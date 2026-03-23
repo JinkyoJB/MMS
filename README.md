@@ -4,28 +4,6 @@
 
 ---
 
-## 디렉토리 구조
-
-\```
-.
-├── main.py
-├── mms
-│   ├── __init__.py
-│   ├── robot
-│   │   ├── __init__.py
-│   │   └── xarm_ros_client.py
-│   ├── sensor
-│   │   ├── __init__.py
-│   │   └── harvester_controller.py
-│   └── turntable
-│       ├── __init__.py
-│       └── controller.py
-├── README.md
-└── requirements.txt
-\```
-
----
-
 ## 환경 설정
 
 ### 1. 레포지토리 클론
