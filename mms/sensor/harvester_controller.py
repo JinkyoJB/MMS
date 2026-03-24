@@ -10,27 +10,41 @@ from harvesters.core import Harvester
 # GENICAM_GENTL64_PATH 환경변수에서 .cti/.so 경로 자동 탐색
 # 없으면 fallback으로 mvIMPACT 기본 경로 사용
 _GENTL_ENV = "GENICAM_GENTL64_PATH"
-_PRODUCER_FILE = "libmvGenTLProducer.so"  # Linux
-if sys.platform == "win32":
-    _PRODUCER_FILE = "mvGenTLProducer.cti"
 
+# 우선 mvIMPACT, 필요하면 Photoneo용 .cti를 나중에 추가
+_PRODUCER_CANDIDATES = [
+    "mvGenTLProducer.cti",       # Matrix Vision GigE
+    "mvGenTLProducer.PCIe.cti",  # PCIe 버전
+    # "photoneo.cti",            # 나중에 Photoneo GenTL 설치하면 추가
+]
 
 def _find_producer_path() -> Path:
-    """GENICAM_GENTL64_PATH 환경변수에서 GenTL Producer 파일 탐색."""
     env_val = os.getenv(_GENTL_ENV)
     if env_val is None:
-        # 환경변수 없을 때 fallback
-        fallback = Path("/opt/mvIMPACT_Acquire/lib/x86_64") / _PRODUCER_FILE
-        print(f"[Sensor] WARNING: {_GENTL_ENV} not set. Trying fallback: {fallback}")
-        return fallback
+        # Ubuntu 기본 설치 경로를 fallback으로 사용할 수도 있음
+        fallback_paths = [
+            "/opt/mvIMPACT_Acquire/lib/x86_64",
+        ]
+        for base in map(Path, fallback_paths):
+            for name in _PRODUCER_CANDIDATES:
+                cand = base / name
+                if cand.exists():
+                    print(f"[Sensor] Using GenTL producer (fallback): {cand}")
+                    return cand
+        raise EnvironmentError(
+            f"[Sensor] {_GENTL_ENV} is not set and no fallback GenTL producer found."
+        )
 
     for p in env_val.split(os.pathsep):
-        candidate = Path(p) / _PRODUCER_FILE
-        if candidate.exists():
-            return candidate
+        base = Path(p)
+        for name in _PRODUCER_CANDIDATES:
+            cand = base / name
+            if cand.exists():
+                print(f"[Sensor] Using GenTL producer: {cand}")
+                return cand
 
     raise FileNotFoundError(
-        f"[Sensor] '{_PRODUCER_FILE}' not found in {_GENTL_ENV}={env_val}"
+        f"[Sensor] No GenTL producer found in {_GENTL_ENV}={env_val}"
     )
 
 
