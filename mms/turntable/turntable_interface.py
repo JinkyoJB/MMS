@@ -256,3 +256,30 @@ class Turntable:
     def stop(self):
         # 현재 운전 중인 모터의 정지 요청
         return FAS_MoveStop(self.bd_id) == FMM_OK
+    
+
+if __name__ == "__main__":
+    import numpy as np
+    import time
+
+
+    RAD2DEG = 180.0 / np.pi
+    DEG2RAD = np.pi / 180.0
+    # 1. 초기화 (ID 0번, 192.168.0.X 대역 고정IP 사용해야 하므로 참고)
+    motor = Turntable(bd_id=0, ip="192.168.0.10", pulses_per_rev=50000) # 50000pulse 당 1바퀴
+
+    # 2. 연결
+    motor.connect(comm_type=0) # 0:TCP, 1:UDP
+
+
+    # 3. 준비 (정보 확인 및 에러 리셋)
+    motor.check_drive_info()
+    motor.check_drive_err()
+    motor.set_servo_on(True) # 서보 온
+    # motor.set_acceleration(360*DEG2RAD,360*DEG2RAD) 세팅하지 않을 경우 기본 가감속은 3.14 rad/s^2
+
+    print("상대 각도 이동 테스트")
+    rpose=-450*DEG2RAD
+    rvel=180*DEG2RAD
+    motor.set_acceleration(180*DEG2RAD,180*DEG2RAD) # 각가속/감속 설정 0.5pi rad/s^2
+    motor.move_inc(rpose, rvel)

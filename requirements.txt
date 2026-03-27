@@ -3,3 +3,11 @@ genicam>=1.5.0
 harvesters>=1.4.0
 # 필요한 경우에만, 그리고 pip에서 잘 설치되는지 확인 후 추가
 # opencv-python>=4.9
+
+# RGBD 카메라 사용시
+# pyorbbecsdk2==2.0.18
+Pillow>=10.0
+opencv-python>=4.9.0
+open3d>=0.15.0
+PyYAML
+scipy
