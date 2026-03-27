@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional, Union
 
 import numpy as np
 
 from mms.core.frames import Frame
 from mms.core.stream import Stream
+from mms.core.transforms import WorldTransformConfig, load_transform
 from mms.sensor.orbbec_client import OrbbecClient, OrbbecConfig
 
 
@@ -22,15 +24,23 @@ class MMSConfig:
     ----------
     orbbec : OrbbecConfig
         Orbbec Femto Bolt sensor configuration.
+    object_frame_yaml : str, optional
+        Path to config/object_frame.yaml (key: T_B_O0).
+        If provided, MMS.world_transform is populated on init.
     stream_max_size : int, default=500
-        Maximum number of frames retained in MMS.frames (Stream).
+        Maximum number of frames retained in MMS.stream (Stream).
         Oldest frames are evicted automatically when the buffer is full.
     """
     orbbec: OrbbecConfig
+    object_frame_yaml: Optional[str] = None
     stream_max_size: int = 500
     # 추후 추가 예정
     # robot: RobotConfig
     # turntable: TurntableConfig
+
+    def __post_init__(self):
+        if self.object_frame_yaml is not None:
+            self.object_frame_yaml = str(Path(self.object_frame_yaml).resolve())
 
 
 class MMS:
@@ -43,17 +53,30 @@ class MMS:
     --------
     T_A^B maps frame A to frame B:  x_B = T_A^B @ x_A
 
+    Attributes
+    ----------
+    world_transform : WorldTransformConfig or None
+        Base <-> Object frame transforms. Populated when
+        MMSConfig.object_frame_yaml is provided.
+
     Example
     -------
     >>> with MMS(cfg) as mms:
     ...     batch = mms.capture_frames(10)
     ...     mms.preprocess(batch, roi_bbox=(-0.5, 0.5, -0.5, 0.5, 0.1, 1.5))
+    ...     x_B = mms.world_transform.T_O_B(theta) @ x_O
     """
 
     def __init__(self, cfg: MMSConfig) -> None:
         self.cfg = cfg
         self.sensor = OrbbecClient(cfg.orbbec)
-        self.stream: Stream = Stream(max_size=cfg.stream_max_size)  # cumulative frame buffer
+        self.stream: Stream = Stream(max_size=cfg.stream_max_size)
+
+        if cfg.object_frame_yaml is not None:
+            T_B_O0 = load_transform(cfg.object_frame_yaml, "T_B_O0")
+            self.world_transform: Optional[WorldTransformConfig] = WorldTransformConfig(T_B_O0)
+        else:
+            self.world_transform = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -21,7 +22,7 @@ from pyorbbecsdk import (
 )
 
 from mms.core.frames import Frame
-from mms.core.transforms import load_T_E_S, pose_mat_to_6d
+from mms.core.transforms import load_transform, pose_mat_to_6d
 
 
 @dataclass
@@ -48,6 +49,9 @@ class OrbbecConfig:
     frame_timeout_ms: int = 2000  # wait_for_frames timeout (ms)
     target_interval_s: float = 0.2  # desired seconds per capture
 
+    def __post_init__(self):
+        self.sensor_frames_yaml = str(Path(self.sensor_frames_yaml).resolve())
+
 
 class OrbbecClient:
     """
@@ -69,7 +73,7 @@ class OrbbecClient:
 
     def __init__(self, cfg: OrbbecConfig):
         self.cfg = cfg
-        self.T_E_S: np.ndarray = load_T_E_S(cfg.sensor_frames_yaml, cfg.T_E_S_key)
+        self.T_E_S: np.ndarray = load_transform(cfg.sensor_frames_yaml, cfg.T_E_S_key)
 
         self._context: Optional[Context] = None
         self._pipeline: Optional[Pipeline] = None

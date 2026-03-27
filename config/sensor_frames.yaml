@@ -1,6 +1,6 @@
 T_E_S_femto:
+  translation: [0.0, 0.0, 0.075]   # EE → Femto: z축 +7.5cm
+  rotation_quat: [0.0, 0.0, 0.0, 1.0]
+T_E_S_phoxi:
   translation: [0.0, 0.0, 0.0]
   rotation_quat: [0, 0, 0, 1]
-T_E_S_phoxi:
-  translation: [...]
-  rotation_quat: [...]
