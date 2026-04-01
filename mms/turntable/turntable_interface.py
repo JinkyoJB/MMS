@@ -279,7 +279,7 @@ if __name__ == "__main__":
     # motor.set_acceleration(360*DEG2RAD,360*DEG2RAD) 세팅하지 않을 경우 기본 가감속은 3.14 rad/s^2
 
     print("상대 각도 이동 테스트")
-    rpose=-450*DEG2RAD
-    rvel=180*DEG2RAD
+    rpose=-30*DEG2RAD
+    rvel=30*DEG2RAD
     motor.set_acceleration(180*DEG2RAD,180*DEG2RAD) # 각가속/감속 설정 0.5pi rad/s^2
     motor.move_inc(rpose, rvel)

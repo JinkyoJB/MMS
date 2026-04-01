@@ -1,0 +1,234 @@
+from xarm.wrapper import XArmAPI
+import numpy as np
+from typing import Optional
+
+
+class XArmInterface:
+    """
+    xArm7 로봇 인터페이스.
+
+    Coordinate frames
+    -----------------
+    - B (Base frame): xArm7 로봇 베이스 = 전역 좌표계 (B ≡ W)
+    - E (End-Effector frame): 로봇 플랜지 / TCP 프레임
+
+    Pose convention
+    ---------------
+    [x(mm), y(mm), z(mm), roll(rad), pitch(rad), yaw(rad)]  — B 기준 TCP pose
+    """
+
+    def __init__(self, ip: str = "192.168.1.210"):
+        self.arm = XArmAPI(ip)
+        self.arm.motion_enable(True)
+        self.arm.set_mode(0)
+        self.arm.set_state(0)
+
+    # ------------------------------------------------------------------
+    # State queries
+    # ------------------------------------------------------------------
+
+    def get_joint_angles(self, is_radian: bool = True) -> np.ndarray:
+        """
+        현재 joint angles 반환.
+
+        Parameters
+        ----------
+        is_radian : bool
+            True → rad, False → deg
+
+        Returns
+        -------
+        np.ndarray, shape (7,)
+        """
+        code, angles = self.arm.get_servo_angle(is_radian=is_radian)
+        if code != 0:
+            raise RuntimeError(f"get_servo_angle failed (code={code})")
+        return np.array(angles[:7])
+
+    def get_pose(self, is_radian: bool = True) -> np.ndarray:
+        """
+        현재 TCP pose 반환 (B 프레임 기준).
+
+        Parameters
+        ----------
+        is_radian : bool
+            True → roll/pitch/yaw 단위 rad, False → deg
+
+        Returns
+        -------
+        np.ndarray, shape (6,)  [x(mm), y(mm), z(mm), roll, pitch, yaw]
+        """
+        code, pose = self.arm.get_position(is_radian=is_radian)
+        if code != 0:
+            raise RuntimeError(f"get_position failed (code={code})")
+        return np.array(pose[:6])
+
+    # ------------------------------------------------------------------
+    # Kinematics
+    # ------------------------------------------------------------------
+
+    def fk(self, joints: np.ndarray, input_is_radian: bool = True) -> np.ndarray:
+        """
+        Forward Kinematics: joint angles → TCP pose (B 프레임 기준).
+
+        Parameters
+        ----------
+        joints : np.ndarray, shape (7,)
+        input_is_radian : bool
+
+        Returns
+        -------
+        np.ndarray, shape (6,)  [x(mm), y(mm), z(mm), roll(rad), pitch(rad), yaw(rad)]
+        """
+        code, pose = self.arm.get_forward_kinematics(
+            angles=joints.tolist(),
+            input_is_radian=input_is_radian,
+            return_is_radian=True,
+        )
+        if code != 0:
+            raise RuntimeError(f"FK failed (code={code})")
+        return np.array(pose[:6])
+
+    def ik(
+        self,
+        pose: np.ndarray,
+        input_is_radian: bool = True,
+        seed_joints: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Inverse Kinematics: TCP pose → joint angles.
+
+        Parameters
+        ----------
+        pose : np.ndarray, shape (6,)
+            [x(mm), y(mm), z(mm), roll, pitch, yaw]
+        input_is_radian : bool
+        seed_joints : np.ndarray or None
+            초기 추정 joint angles (rad). None이면 현재 joint 사용.
+
+        Returns
+        -------
+        np.ndarray, shape (7,)  [rad]
+        """
+        if seed_joints is None:
+            seed_joints = self.get_joint_angles(is_radian=True)
+
+        code, joints = self.arm.get_inverse_kinematics(
+            pose=pose.tolist(),
+            input_is_radian=input_is_radian,
+            return_is_radian=True,
+        )
+        if code != 0:
+            raise RuntimeError(f"IK failed (code={code})")
+        return np.array(joints[:7])
+
+    # ------------------------------------------------------------------
+    # Motion
+    # ------------------------------------------------------------------
+
+    def move_relative(
+        self,
+        dx: float = 0,
+        dy: float = 0,
+        dz: float = 0,
+        d_roll: float = 0,
+        d_pitch: float = 0,
+        d_yaw: float = 0,
+        speed: float = 10,
+        confirm: bool = True,
+    ) -> bool:
+        """
+        현재 TCP pose 기준 상대 이동 (B 프레임).
+
+        Parameters
+        ----------
+        dx, dy, dz          : mm 단위 이동량
+        d_roll, d_pitch, d_yaw : rad 단위 자세 변화량
+        speed               : deg/s
+        confirm             : True → Enter 확인 후 이동
+
+        Returns
+        -------
+        bool : 성공 여부
+        """
+        pose_now = self.get_pose(is_radian=True)
+
+        print(f"\n현재 TCP:  x={pose_now[0]:.1f}  y={pose_now[1]:.1f}  z={pose_now[2]:.1f} mm")
+        print(f"이동 delta: dx={dx:+.1f}  dy={dy:+.1f}  dz={dz:+.1f} mm")
+
+        target_pose = pose_now.copy()
+        target_pose[0] += dx
+        target_pose[1] += dy
+        target_pose[2] += dz
+        target_pose[3] += d_roll
+        target_pose[4] += d_pitch
+        target_pose[5] += d_yaw
+
+        print(f"목표 TCP:  x={target_pose[0]:.1f}  y={target_pose[1]:.1f}  z={target_pose[2]:.1f} mm")
+
+        code, ik_joints_deg = self.arm.get_inverse_kinematics(
+            pose=target_pose.tolist(),
+            input_is_radian=True,
+            return_is_radian=False,
+        )
+        if code != 0:
+            print(f"IK 실패 (code={code}) — 도달 불가능한 위치")
+            return False
+
+        if confirm:
+            input("\nEnter 누르면 이동...")
+
+        self.arm.set_servo_angle(angle=ik_joints_deg, speed=speed, wait=True)
+
+        pose_after = self.get_pose(is_radian=True)
+        print(
+            f"\n이동 완료  "
+            f"dx={pose_after[0]-pose_now[0]:+.1f}  "
+            f"dy={pose_after[1]-pose_now[1]:+.1f}  "
+            f"dz={pose_after[2]-pose_now[2]:+.1f} mm"
+        )
+        return True
+
+    def go_home(self, speed: float = 20, confirm: bool = True) -> None:
+        """
+        안전한 home joint 위치로 이동.
+
+        Home joints (deg): [0, -30, 0, 60, 0, 90, 0]
+        - IK solver seed로 쓰기 좋은 중립적인 자세
+        - Wrist singularity 회피
+        """
+        HOME_JOINTS_DEG = [0.0, -30.0, 0.0, 60.0, 0.0, 90.0, 0.0]
+
+        print(f"\nHome joints (deg): {HOME_JOINTS_DEG}")
+        if confirm:
+            input("Enter 누르면 home으로 이동...")
+
+        self.arm.set_servo_angle(angle=HOME_JOINTS_DEG, speed=speed, is_radian=False, wait=True)
+
+        joints = self.get_joint_angles(is_radian=False)
+        pose = self.get_pose(is_radian=True)
+        print(f"Home 완료")
+        print(f"  joints (deg): {np.round(joints, 2)}")
+        print(f"  TCP (mm): x={pose[0]:.1f}  y={pose[1]:.1f}  z={pose[2]:.1f}")
+
+    def disconnect(self):
+        """로봇 연결 해제."""
+        self.arm.disconnect()
+
+
+if __name__ == "__main__":
+    robot = XArmInterface("192.168.1.210")
+
+    print(" 현재 joint angles (rad) : ", robot.get_joint_angles())
+    print(" 현재 TCP pose (B 프레임, mm+rad) : ", robot.get_pose())
+
+    try:
+        robot.go_home(speed=5)
+
+        print("\n=== move_relative 테스트: +20mm in X, Y, Z ===")
+        robot.move_relative(dx=20, dy=20, dz=20, speed=5)
+
+        input("\nEnter → 원위치 복귀...")
+        robot.move_relative(dx=-20, dy=-20, dz=-20, speed=5)
+    finally:
+        robot.disconnect()

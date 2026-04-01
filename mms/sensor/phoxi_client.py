@@ -1,208 +1,527 @@
-# mms/sensor/harvester_controller.py
+# mms/sensor/phoxi_client.py
+#
+# Photoneo PhoXi3D 클라이언트.
+# Harvesters + mvGenTLProducer.cti (GigE-V / GenTL) 기반.
+# 공식 예제 참조: photoneo-python-examples/GigE-V/harvesters/
+
+from __future__ import annotations
 
 import os
 import sys
-import numpy as np
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from harvesters.core import Harvester
+from typing import Dict, List, Optional
+
+import numpy as np
+from genicam.genapi import NodeMap
+from harvesters.core import Component2DImage, Harvester, ImageAcquirer
+
+from mms.core.frames import Frame
+from mms.core.transforms import load_transform
+from mms.sensor.phoxi_instant_meshing import PhoxiInstantMeshingWrapper
 
 
-# GENICAM_GENTL64_PATH 환경변수에서 .cti/.so 경로 자동 탐색
-# 없으면 fallback으로 mvIMPACT 기본 경로 사용
-_GENTL_ENV = "GENICAM_GENTL64_PATH"
+# ------------------------------------------------------------------
+# CTI 파일 탐색
+# ------------------------------------------------------------------
 
-# 우선 mvIMPACT, 필요하면 Photoneo용 .cti를 나중에 추가
-_PRODUCER_CANDIDATES = [
-    "mvGenTLProducer.cti",       # Matrix Vision GigE
-    "mvGenTLProducer.PCIe.cti",  # PCIe 버전
-    # "photoneo.cti",            # 나중에 Photoneo GenTL 설치하면 추가
-]
+def _find_cti() -> Path:
+    """
+    mvGenTLProducer.cti 경로 탐색 (GENICAM_GENTL64_PATH 기반).
 
-def _find_producer_path() -> Path:
-    env_val = os.getenv(_GENTL_ENV)
+    PhoXi3D는 motionCam과 동일하게 Matrix Vision GenTL Producer를 사용.
+
+    환경변수 설정 예 (PowerShell)
+    ------------------------------
+    $env:GENICAM_GENTL64_PATH = "C:\\path\\to\\mvIMPACT_Acquire\\lib"
+    """
+    env_val = os.getenv("GENICAM_GENTL64_PATH")
     if env_val is None:
-        # Ubuntu 기본 설치 경로를 fallback으로 사용할 수도 있음
-        fallback_paths = [
-            "/opt/mvIMPACT_Acquire/lib/x86_64",
-        ]
-        for base in map(Path, fallback_paths):
-            for name in _PRODUCER_CANDIDATES:
-                cand = base / name
-                if cand.exists():
-                    print(f"[Sensor] Using GenTL producer (fallback): {cand}")
-                    return cand
         raise EnvironmentError(
-            f"[Sensor] {_GENTL_ENV} is not set and no fallback GenTL producer found."
+            "[PhoxiClient] GENICAM_GENTL64_PATH 환경변수가 설정되지 않았습니다.\n"
+            "  Matrix Vision mvIMPACT Acquire 또는 PhoXi Control 설치 후\n"
+            "  GENICAM_GENTL64_PATH를 mvGenTLProducer.cti 위치로 설정하세요."
         )
 
     for p in env_val.split(os.pathsep):
-        base = Path(p)
-        for name in _PRODUCER_CANDIDATES:
-            cand = base / name
-            if cand.exists():
-                print(f"[Sensor] Using GenTL producer: {cand}")
-                return cand
+        cti = Path(p) / "mvGenTLProducer.cti"
+        if cti.exists():
+            return cti
 
     raise FileNotFoundError(
-        f"[Sensor] No GenTL producer found in {_GENTL_ENV}={env_val}"
+        f"[PhoxiClient] mvGenTLProducer.cti not found in GENICAM_GENTL64_PATH={env_val}"
     )
 
 
-class HarvesterController:
+# ------------------------------------------------------------------
+# Harvesters 내부 유틸 (공식 예제 photoneo_genicam/utils.py 참조)
+# ------------------------------------------------------------------
+
+def _data_stream_reset(ia: ImageAcquirer) -> None:
     """
-    GenICam Harvesters 기반 GigE-V 센서 제어 클래스.
-    GENICAM_GENTL64_PATH 환경변수를 통해 GenTL Producer를 자동 탐색한다.
+    start()/stop()을 반복 호출할 때 필요한 스트림 채널 리셋.
+    Harvesters 내부 함수 사용 (API 변경 가능성 있음).
+    """
+    ia._release_data_streams()
+    ia._setup_data_streams(file_dict=ia._file_dict)
 
-    Usage
-    -----
-    # 환경변수 필수 (예: ~/.bashrc에 추가)
-    # export GENICAM_GENTL64_PATH=/opt/mvIMPACT_Acquire/lib/x86_64
 
-    sensor = HarvesterController(serial_number="XXXX")
-    sensor.connect()
-    frame = sensor.fetch_frame()
-    sensor.disconnect()
+# ------------------------------------------------------------------
+# 컴포넌트 유틸 (공식 예제 photoneo_genicam/components.py 참조)
+# ------------------------------------------------------------------
+
+def _sorted_components(features: NodeMap) -> List[str]:
+    """ComponentIDValue 오름차순으로 정렬된 컴포넌트 이름 목록."""
+    def id_value(comp: str) -> int:
+        features.ComponentSelector.value = comp
+        return features.ComponentIDValue.value
+
+    return sorted(features.ComponentSelector.symbolics, key=id_value)
+
+
+def _enable_components(features: NodeMap, component_list: List[str]) -> None:
+    """지정한 컴포넌트만 활성화하고 나머지는 비활성화."""
+    for comp in features.ComponentSelector.symbolics:
+        features.ComponentSelector.value = comp
+        features.ComponentEnable.value = (comp in component_list)
+
+
+def _enabled_components(features: NodeMap) -> List[str]:
+    """
+    현재 활성화된 컴포넌트를 ComponentIDValue 순서대로 반환.
+    multipart payload의 component 순서와 일치함.
+    """
+    result = []
+    for comp in _sorted_components(features):
+        features.ComponentSelector.value = comp
+        if features.ComponentEnable.value:
+            result.append(comp)
+    return result
+
+
+# ------------------------------------------------------------------
+# Config
+# ------------------------------------------------------------------
+
+@dataclass
+class PhoxiConfig:
+    """
+    PhoXi3D client configuration.
+
+    sensor_frames_yaml
+        config/sensor_frames.yaml 경로.
+    T_E_S_key
+        sensor_frames.yaml에서 EE→Sensor transform 키. 예: 'T_E_S_phoxi'
+    serial_number
+        디바이스 시리얼 번호. None → 첫 번째 발견된 디바이스.
+    trigger_timeout_s
+        ia.fetch() 대기 최대 시간(초). 구조광 스캔은 노출 시간이 길므로 여유있게 설정.
+    target_interval_s
+        캡처 호출당 목표 벽시계 시간(초).
+        MMS.capture_frames()가 max(0, target - elapsed) 만큼 sleep.
+        0.0 이면 최대 속도로 캡처.
     """
 
-    def __init__(self, serial_number: str = None, device_index: int = 0):
-        """
-        Parameters
-        ----------
-        serial_number : str, optional
-            장치 시리얼 번호로 특정 디바이스 지정. None이면 device_index 사용.
-        device_index : int
-            serial_number 없을 때 사용할 디바이스 목록 인덱스 (default: 0)
-        """
-        self._serial_number = serial_number
-        self._device_index = device_index
-        self._harvester = None
-        self._ia = None  # ImageAcquirer
+    sensor_frames_yaml: str
+    T_E_S_key: str
+    serial_number: Optional[str] = None
+    trigger_timeout_s: float = 15.0
+    target_interval_s: float = 1.0
 
-    def connect(self) -> None:
+    def __post_init__(self) -> None:
+        self.sensor_frames_yaml = str(Path(self.sensor_frames_yaml).resolve())
+
+
+# ------------------------------------------------------------------
+# PhoxiClient
+# ------------------------------------------------------------------
+
+class PhoxiClient:
+    """
+    Photoneo PhoXi3D 클라이언트. Harvesters + mvGenTLProducer.cti (GenTL/GigE-V) 기반.
+
+    Notation
+    --------
+    T_A^B maps frame A to frame B:  x_B = T_A^B @ x_A
+
+    사전 조건
+    ---------
+    - GENICAM_GENTL64_PATH 환경변수에 mvGenTLProducer.cti 위치 등록.
+    - PhoXi Control 소프트웨어가 실행 중이어야 함.
+    """
+
+    def __init__(self, cfg: PhoxiConfig, mesher: Optional[PhoxiInstantMeshingWrapper] = None) -> None:
+        self.cfg = cfg
+        self.T_E_S: np.ndarray = load_transform(cfg.sensor_frames_yaml, cfg.T_E_S_key)
+        self._mesher = mesher
+
+        self._harvester: Optional[Harvester] = None
+        self._ia: Optional[ImageAcquirer] = None
+        self._features: Optional[NodeMap] = None
+        self._initialized: bool = False
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def initialize(self) -> None:
         """
-        GenTL Producer 로드 → 디바이스 탐색 → 연결 → 취득 시작.
+        GenTL Producer 로드 → 디바이스 탐색 → 연결 → 설정 → 취득 시작.
+
+        설정 내용
+        ---------
+        - UserSet Default 로드
+        - Software trigger 설정
+        - Scan3dOutputMode = CalibratedABC_Grid  (보정된 XYZ 포인트 클라우드)
+        - 활성 컴포넌트: Intensity, Range, Normal
+
+        Raises
+        ------
+        EnvironmentError / FileNotFoundError
+            GENICAM_GENTL64_PATH 미설정 또는 CTI 파일 없을 때.
+        RuntimeError
+            디바이스 없거나 연결 실패 시.
         """
-        producer_path = _find_producer_path()
-        print(f"[Sensor] Using producer: {producer_path}")
+        cti_path = _find_cti()
+        print(f"[PhoxiClient] Using CTI: {cti_path}")
 
-        self._harvester = Harvester()
-        self._harvester.add_file(str(producer_path), check_existence=True, check_validity=True)
-        self._harvester.update()
+        h = Harvester()
+        h.add_file(str(cti_path), check_existence=True, check_validity=True)
+        h.update()
 
-        devices = self._harvester.device_info_list
-        if len(devices) == 0:
-            raise RuntimeError("[Sensor] No GenICam devices found. Check network/device connection.")
+        devices = h.device_info_list
+        if not devices:
+            h.reset()
+            raise RuntimeError(
+                "[PhoxiClient] No devices found.\n"
+                "  GigE-V 직접 연결 방식은 PhoXi Control이 디바이스를 점유하면 탐색 불가.\n"
+                "  → PhoXi Control UI에서 디바이스를 'Disconnect' 후 재시도하세요.\n"
+                "  → 컴퓨터 NIC가 카메라와 같은 서브넷(192.168.10.x)인지 확인하세요."
+            )
 
-        print(f"[Sensor] Found {len(devices)} device(s):")
+        print(f"[PhoxiClient] Found {len(devices)} device(s):")
         for i, dev in enumerate(devices):
-            print(f"  [{i}] {dev}")
+            props = dev.property_dict
+            print(f"  [{i}] serial={props.get('serial_number')}  "
+                  f"model={props.get('model')}")
 
-        # 시리얼 번호 지정 시 해당 장치로 연결, 없으면 인덱스로 연결
-        search_key = {"serial_number": self._serial_number} if self._serial_number else self._device_index
-        self._ia = self._harvester.create(search_key)
+        search_key = (
+            {"serial_number": self.cfg.serial_number}
+            if self.cfg.serial_number else 0
+        )
+        ia = h.create(search_key)
+        features: NodeMap = ia.remote_device.node_map
 
-        features = self._ia.remote_device.node_map
-        fw_ver = getattr(features, "DeviceFirmwareVersion", None)
-        if fw_ver:
-            print(f"[Sensor] Firmware version: {fw_ver.value}")
+        fw_ver = features.DeviceFirmwareVersion.value
+        print(f"[PhoxiClient] Connected. Firmware: {fw_ver}")
 
-        # Default UserSet 로드 (continuous acquisition mode 복원)
-        try:
-            features.UserSetSelector.value = "Default"
-            features.UserSetLoad.execute()
-        except Exception as e:
-            print(f"[Sensor] UserSetLoad skipped: {e}")
+        # UserSet Default 로드
+        features.UserSetSelector.value = "Default"
+        features.UserSetLoad.execute()
 
-        self._ia.start()
-        print("[Sensor] Acquisition started.")
+        # Software trigger
+        features.TriggerSelector.value = "FrameStart"
+        features.TriggerMode.value = "On"
+        features.TriggerSource.value = "Software"
 
-    def disconnect(self) -> None:
-        """
-        취득 중지 및 리소스 해제.
-        """
+        # 보정된 XYZ 포인트 클라우드 모드
+        features.Scan3dOutputMode.value = "CalibratedABC_Grid"
+
+        # 활성 컴포넌트: Intensity (텍스처), Range (포인트클라우드), Normal (법선)
+        _enable_components(features, ["Intensity", "Range", "Normal"])
+
+        # 스트림 리셋 후 시작 (start/stop 반복 시 필수)
+        _data_stream_reset(ia)
+        ia.start()
+
+        self._harvester = h
+        self._ia = ia
+        self._features = features
+        self._initialized = True
+        print("[PhoxiClient] Acquisition started.")
+
+    def shutdown(self) -> None:
+        """취득 중지 및 리소스 해제."""
         if self._ia is not None:
             self._ia.stop()
             self._ia.destroy()
             self._ia = None
-
         if self._harvester is not None:
             self._harvester.reset()
             self._harvester = None
+        self._features = None
+        self._initialized = False
+        print("[PhoxiClient] Disconnected.")
 
-        print("[Sensor] Disconnected.")
+    # ------------------------------------------------------------------
+    # Capture
+    # ------------------------------------------------------------------
 
-    def fetch_frame(self, timeout: float = 15.0) -> np.ndarray:
+    def capture_frame(
+        self,
+        ee_pose_mat_B: np.ndarray,
+        frame_id: int,
+        timestamp: float,
+        get_mesh: bool = False,
+    ) -> Optional[Frame]:
         """
-        단일 프레임 취득 후 numpy 배열로 반환.
+        소프트웨어 트리거로 1회 스캔하고 base (B) 프레임의 Frame을 반환.
 
         Parameters
         ----------
-        timeout : float
-            프레임 대기 최대 시간 (초). default: 15.0
+        ee_pose_mat_B : (4,4) np.ndarray
+            T_E^B — 캡처 시점의 EE→Base 변환 (xArm FK 결과).
+        frame_id : int
+        timestamp : float
 
         Returns
         -------
-        np.ndarray
-            이미지 데이터 배열.
+        Frame or None
         """
-        if self._ia is None:
-            raise RuntimeError("[Sensor] Not connected. Call connect() first.")
+        if not self._initialized:
+            raise RuntimeError("[PhoxiClient] Not initialized. Call initialize() first.")
 
-        with self._ia.fetch(timeout=timeout) as buffer:
-            component = buffer.payload.components[0]
-            frame = component.data.copy()  # buffer 반환 전 반드시 copy
+        _t0 = time.perf_counter()
 
+        self._features.TriggerSoftware.execute()
+
+        # 활성 컴포넌트 이름 목록 → payload 순서와 매칭
+        comp_names = _enabled_components(self._features)
+
+        with self._ia.fetch(timeout=self.cfg.trigger_timeout_s) as buffer:
+            _t1 = time.perf_counter()
+
+            components: Dict[str, Component2DImage] = dict(
+                zip(comp_names, buffer.payload.components)
+            )
+
+            if "Range" not in components:
+                print("[PhoxiClient] Range component not found in payload.")
+                return None
+
+            # Range (포인트 클라우드): Coord3D_ABC32f, (H*W*3,) float32, mm 단위
+            range_comp = components["Range"]
+            points_S_flat = range_comp.data.reshape(-1, 3).copy().astype(np.float32)
+
+            # Normal (법선): Coord3D_ABC32f, (H*W*3,) float32
+            normal_S_flat: Optional[np.ndarray] = None
+            if "Normal" in components:
+                nm_comp = components["Normal"]
+                normal_S_flat = nm_comp.data.reshape(-1, 3).copy().astype(np.float32)
+
+            # Intensity (텍스처): Mono10/12/16, (H*W,) uint16
+            texture_comp: Optional[Component2DImage] = components.get("Intensity")
+            h_tex = range_comp.height
+            w_tex = range_comp.width
+
+        _t2 = time.perf_counter()
+
+        # Mesher에 원시 센서 데이터 공급 (S 프레임, mm 단위)
+        if self._mesher is not None:
+            T_S_B = ee_pose_mat_B @ np.linalg.inv(self.T_E_S)
+            tex_flat = (
+                texture_comp.data.astype(np.float32).reshape(-1)
+                if texture_comp is not None
+                else np.zeros(h_tex * w_tex, dtype=np.float32)
+            )
+            self._mesher.add_scan(points_S_flat, tex_flat, T_S_B, timestamp,
+                                  width=w_tex, height=h_tex)
+
+        frame = self._build_frame(
+            points_S_flat=points_S_flat,
+            normal_S_flat=normal_S_flat,
+            texture_comp=texture_comp,
+            h=h_tex,
+            w=w_tex,
+            ee_pose_mat_B=ee_pose_mat_B,
+            T_E_S=self.T_E_S,
+            frame_id=frame_id,
+            timestamp=timestamp,
+        )
+
+        # get_mesh=True 이면 누적된 TSDF 메쉬를 frame에 저장
+        if get_mesh and self._mesher is not None:
+            frame.mesh = self._mesher.get_mesh()
+
+        _t3 = time.perf_counter()
+
+        print(
+            f"  [timing] trigger+fetch={_t1-_t0:.3f}s  decode={_t2-_t1:.3f}s  "
+            f"build_frame={_t3-_t2:.3f}s  total={_t3-_t0:.3f}s  pts={len(frame.points):,}"
+        )
         return frame
 
-    def get_device_info(self) -> list:
-        """연결된 디바이스 정보 목록 반환."""
-        if self._harvester is None:
-            raise RuntimeError("[Sensor] Not connected. Call connect() first.")
-        return self._harvester.device_info_list
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
 
-    @property
-    def node_map(self):
-        """remote_device의 NodeMap에 직접 접근. 파라미터 읽기/쓰기에 사용."""
-        if self._ia is None:
-            raise RuntimeError("[Sensor] Not connected.")
-        return self._ia.remote_device.node_map
+    @staticmethod
+    def _build_frame(
+        points_S_flat: np.ndarray,
+        normal_S_flat: Optional[np.ndarray],
+        texture_comp: Optional[Component2DImage],
+        h: int,
+        w: int,
+        ee_pose_mat_B: np.ndarray,
+        T_E_S: np.ndarray,
+        frame_id: int,
+        timestamp: float,
+    ) -> Frame:
+        """
+        PhoXi 센서 프레임 데이터를 base (B) 프레임의 Frame으로 변환.
+
+        좌표 변환
+        ---------
+        T_S^B = T_E^B @ (T_E^S)^{-1}
+        x_B   = T_S^B @ x_S
+
+        Parameters
+        ----------
+        points_S_flat : (H*W, 3) float32, mm 단위. 무효점 = all-zero.
+        normal_S_flat : (H*W, 3) float32 or None.
+        texture_comp  : Component2DImage (Intensity) or None.
+        h, w          : 이미지 높이/너비.
+        ee_pose_mat_B : (4,4) T_E^B
+        T_E_S         : (4,4) T_E^S
+        """
+        # T_S^B = T_E^B @ inv(T_E^S)
+        T_S_B = ee_pose_mat_B @ np.linalg.inv(T_E_S)
+        R_mat = T_S_B[:3, :3].astype(np.float32)
+        t_vec = T_S_B[:3, 3].astype(np.float32)
+
+        # 유효점 마스크: all-zero 아닌 점
+        valid = ~np.all(points_S_flat == 0.0, axis=1)
+        pts_m = points_S_flat[valid] / 1000.0          # mm → m, (N, 3)
+
+        # x_B = R @ x_S + t
+        points_B = pts_m @ R_mat.T + t_vec              # (N, 3) float32
+
+        # NormalMap: 회전만 적용 (방향 벡터)
+        normals_B: Optional[np.ndarray] = None
+        if normal_S_flat is not None:
+            norms_valid = normal_S_flat[valid]
+            normals_B = norms_valid @ R_mat.T
+            nlen = np.linalg.norm(normals_B, axis=1, keepdims=True)
+            nlen = np.where(nlen < 1e-6, 1.0, nlen)
+            normals_B = (normals_B / nlen).astype(np.float32)
+
+        # Intensity → 그레이스케일 pseudo-RGB (H, W, 3) uint8
+        # 공식 예제 pointcloud.py의 map_texture() 참조
+        raw_img: Optional[np.ndarray] = None
+        if texture_comp is not None:
+            fmt = texture_comp.data_format
+            data = texture_comp.data
+            if fmt == "RGB8":
+                raw_img = data.astype(np.uint8).reshape(h, w, 3)
+            else:
+                if fmt == "Mono10":
+                    norm = data.astype(np.float32) / 1024.0
+                elif fmt == "Mono12":
+                    norm = data.astype(np.float32) / 4096.0
+                elif fmt == "Mono16":
+                    norm = data.astype(np.float32) / 65536.0
+                else:
+                    norm = data.astype(np.float32) / (data.max() + 1e-6)
+                gray_u8 = (norm * 255).clip(0, 255).astype(np.uint8).reshape(h, w)
+                raw_img = np.stack([gray_u8, gray_u8, gray_u8], axis=-1)
+
+        return Frame(
+            sensor_type="phoxi",
+            img=raw_img,
+            depth=None,         # CalibratedABC_Grid 모드에서는 DepthMap 미사용
+            points=points_B,
+            normals=normals_B,
+            colors=None,        # PhoXi3D는 color 없음
+            frame_id=frame_id,
+            timestamp=timestamp,
+            ee_pose_mat_B=ee_pose_mat_B.astype(np.float64),
+        )
 
 
-# --------------------------
+# ------------------------------------------------------------------
 # 기본 기능 테스트
-# --------------------------
+# ------------------------------------------------------------------
 if __name__ == "__main__":
-    # 환경변수 미설정 시 자동 안내
-    if not os.getenv(_GENTL_ENV):
-        print(f"[WARN] {_GENTL_ENV} is not set.")
-        print("  Run: export GENICAM_GENTL64_PATH=/opt/mvIMPACT_Acquire/lib/x86_64")
+    _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-    # serial_number=None → 첫 번째 발견된 장치에 연결
-    sensor = HarvesterController(serial_number=None, device_index=0)
+    import open3d as o3d
+
+    cfg = PhoxiConfig(
+        sensor_frames_yaml=str(_PROJECT_ROOT / "config" / "sensor_frames.yaml"),
+        T_E_S_key="T_E_S_phoxi",
+        serial_number="SEA-023",  # PhoXi Control에서 확인한 ID
+        trigger_timeout_s=15.0,
+    )
+
+    mesher = PhoxiInstantMeshingWrapper(
+        voxel_size_mm       = 1.5,
+        min_voxel_consensus = 1,    # 단일 스캔에서도 메쉬 생성
+        tracking_enabled    = False,
+        # 해상도는 첫 capture_frame 시 자동 감지
+    )
+    client = PhoxiClient(cfg, mesher=mesher)
+    dummy_ee = np.eye(4, dtype=np.float64)
 
     try:
-        print("=== [TEST 1] connect ===")
-        sensor.connect()
+        print("=== [TEST 1] initialize ===")
+        client.initialize()
 
-        print("\n=== [TEST 2] device_info ===")
-        for info in sensor.get_device_info():
-            print(f"  {info}")
+        N_FRAMES = 10
+        print(f"\n=== [TEST 2] {N_FRAMES}회 capture_frame 타이밍 ===")
+        frames = []
+        for i in range(N_FRAMES):
+            is_last = (i == N_FRAMES - 1)
+            t0 = time.perf_counter()
+            frame = client.capture_frame(
+                ee_pose_mat_B=dummy_ee,
+                frame_id=i,
+                timestamp=t0,
+                get_mesh=is_last,   # 마지막 프레임에만 get_mesh
+            )
+            elapsed = time.perf_counter() - t0
+            if frame is not None:
+                frames.append(frame)
+                mesh_info = (
+                    f"  mesh={len(frame.mesh.vertices):,}v/{len(frame.mesh.triangles):,}t"
+                    if (frame.mesh is not None and len(frame.mesh.vertices) > 0)
+                    else ""
+                )
+                print(f"  [{i+1:2d}/{N_FRAMES}] {elapsed:.3f}s  pts={len(frame.points):,}{mesh_info}")
+            else:
+                print(f"  [{i+1:2d}/{N_FRAMES}] {elapsed:.3f}s  None")
 
-        print("\n=== [TEST 3] fetch_frame ===")
-        frame = sensor.fetch_frame(timeout=15.0)
-        print(f"  shape   : {frame.shape}")
-        print(f"  dtype   : {frame.dtype}")
-        print(f"  min/max : {frame.min()} / {frame.max()}")
+        print(f"\n=== [TEST 3] open3d 시각화 ===")
+        last = frames[-1] if frames else None
+        if last is None:
+            print("  캡처된 프레임 없음")
+        else:
+            geoms = []
+            pcd = last.to_pcd()
+            pcd.paint_uniform_color([0.6, 0.6, 0.6])
+            geoms.append(pcd)
 
-        print("\n=== [TEST 4] fetch x5 FPS 측정 ===")
-        for i in range(5):
-            sensor.fetch_frame()
-            print(f"  Frame {i+1}  FPS: {sensor._ia.statistics.fps:.2f}", end="\r")
-        print()
+            if last.mesh is not None and len(last.mesh.vertices) > 0:
+                print(f"  mesh vertices  : {len(last.mesh.vertices):,}")
+                print(f"  mesh triangles : {len(last.mesh.triangles):,}")
+                last.mesh.paint_uniform_color([0.2, 0.6, 1.0])
+                geoms.append(last.mesh)
+            else:
+                print("  mesh 없음")
+
+            o3d.visualization.draw_geometries(
+                geoms,
+                window_name="PhoxiClient — PointCloud & Mesh",
+                width=1280,
+                height=720,
+            )
 
     except Exception as e:
         print(f"\n[ERROR] {e}", file=sys.stderr)
+        raise
 
     finally:
-        print("\n=== [TEST 5] disconnect ===")
-        sensor.disconnect()
+        print("\n=== [TEST 4] shutdown ===")
+        mesher.cleanup()
+        client.shutdown()

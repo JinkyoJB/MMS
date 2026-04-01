@@ -54,6 +54,7 @@ class Frame:
     frame_id: int
     timestamp: float
     ee_pose_mat_B: np.ndarray
+    mesh: Optional[o3d.geometry.TriangleMesh] = None
 
     def __post_init__(self) -> None:
         if self.ee_pose_mat_B.shape != (4, 4):
@@ -195,6 +196,50 @@ class Frame:
             self.normals = self.normals[ind]
         if self.colors is not None:
             self.colors = self.colors[ind]
+
+    def reconstruct_mesh(
+        self,
+        depth: int = 9,
+        scale: float = 1.1,
+        linear_fit: bool = False,
+        n_threads: int = -1,
+    ) -> None:
+        """
+        Screened Poisson Surface Reconstruction → self.mesh.
+
+        Open3D의 create_from_point_cloud_poisson() 사용.
+        normals이 없으면 자동으로 estimate_normals()를 먼저 실행.
+
+        Parameters
+        ----------
+        depth : int, default=9
+            Octree depth. 높을수록 세밀 (8~11 권장).
+        scale : float, default=1.1
+            Bounding box 여유 배율.
+        linear_fit : bool, default=False
+            True → 선형 보간으로 iso-surface 추출 (메모리 절약).
+        n_threads : int, default=-1
+            -1 = 전체 코어 사용.
+
+        Effects
+        -------
+        self.mesh 에 o3d.geometry.TriangleMesh 저장.
+        """
+        if len(self.points) == 0:
+            return
+
+        if self.normals is None:
+            self.estimate_normals()
+
+        pcd = self.to_pcd()
+        mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+            pcd,
+            depth=depth,
+            scale=scale,
+            linear_fit=linear_fit,
+            n_threads=n_threads,
+        )
+        self.mesh = mesh
 
     def estimate_normals(self,
                          radius: float = 0.01,

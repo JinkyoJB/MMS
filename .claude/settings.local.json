@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda activate:*)",
+      "Bash(find C:/Users/user/workspace/photoneo-python-examples -name *.py)",
+      "Bash(ipconfig)",
+      "Bash(ipconfig /all)",
+      "Bash(powershell -Command \"Get-NetIPAddress | Select-Object InterfaceAlias, IPAddress, PrefixLength | Format-Table -AutoSize\")",
+      "Bash(powershell -Command \"Test-Connection 192.168.10.2 -Count 1 -ErrorAction SilentlyContinue | Format-List\")",
+      "Bash(powershell -Command \"route print 0.0.0.0\")",
+      "Bash(ls:*)",
+      "Bash(\"C:\\\\Program Files\\\\Photoneo\\\\3DMeshing\\\\2.3.0\\\\3DMeshingApp.exe\" --help)",
+      "Bash(\"C:\\\\Program Files\\\\Photoneo\\\\3DMeshing\\\\2.3.0\\\\3DMeshingApp.exe\" -h)",
+      "Bash(\"C:\\\\Program Files\\\\Photoneo\\\\3DMeshing\\\\2.3.0\\\\PoissonRecon.exe\")",
+      "Bash(grep -r \"import\\\\|from\" /c/Users/user/workspace/MMS/mms/sensor/*.py)",
+      "Bash(xargs grep:*)",
+      "Bash(xargs -I {} basename {})",
+      "Bash(python -c ':*)",
+      "Bash(python:*)",
+      "Bash(grep -v \"^$\")"
+    ]
+  }
+}
