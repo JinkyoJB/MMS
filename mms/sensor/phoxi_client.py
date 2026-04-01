@@ -161,6 +161,10 @@ class PhoxiClient:
         self._features: Optional[NodeMap] = None
         self._initialized: bool = False
 
+        # 최근 캡처 데이터 (hand-eye 캘리브레이션 등 외부 접근용)
+        self._last_intensity: Optional[np.ndarray] = None        # (H, W) uint8
+        self._last_organized_pts: Optional[np.ndarray] = None    # (H, W, 3) float32, mm, sensor frame
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -231,15 +235,14 @@ class PhoxiClient:
         # 활성 컴포넌트: Intensity (텍스처), Range (포인트클라우드), Normal (법선)
         _enable_components(features, ["Intensity", "Range", "Normal"])
 
-        # 스트림 리셋 후 시작 (start/stop 반복 시 필수)
-        _data_stream_reset(ia)
         ia.start()
 
         self._harvester = h
         self._ia = ia
         self._features = features
+        self._comp_names = _enabled_components(features)   # 초기화 시 1회 캐시
         self._initialized = True
-        print("[PhoxiClient] Acquisition started.")
+        print(f"[PhoxiClient] Acquisition started.  components={self._comp_names}")
 
     def shutdown(self) -> None:
         """취득 중지 및 리소스 해제."""
@@ -284,16 +287,55 @@ class PhoxiClient:
 
         _t0 = time.perf_counter()
 
-        self._features.TriggerSoftware.execute()
+        # stale 버퍼 소진
+        try:
+            from _gentl import TimeoutException as _GentlTimeout
+        except ImportError:
+            _GentlTimeout = Exception
 
-        # 활성 컴포넌트 이름 목록 → payload 순서와 매칭
-        comp_names = _enabled_components(self._features)
+        def _drain():
+            while True:
+                try:
+                    with self._ia.fetch(timeout=0.05):
+                        pass
+                except Exception:
+                    break
 
-        with self._ia.fetch(timeout=self.cfg.trigger_timeout_s) as buffer:
+        def _trigger_and_fetch():
+            _drain()
+            self._features.TriggerSoftware.execute()
+            return self._ia.fetch(timeout=self.cfg.trigger_timeout_s)
+
+        # 최대 2회 재시도: 1회 실패 시 stop→start 후 재시도
+        last_exc = None
+        _buf_ctx = None
+        for _attempt in range(3):
+            try:
+                _buf_ctx = _trigger_and_fetch()
+                break
+            except _GentlTimeout as e:
+                last_exc = e
+                if _attempt < 2:
+                    print(f"[PhoxiClient] fetch timeout (시도 {_attempt+1}/3), 스트림 재시작...")
+                    try:
+                        self._ia.stop()
+                        self._ia.start()
+                        time.sleep(0.5)
+                    except Exception as restart_err:
+                        print(f"[PhoxiClient] 재시작 실패: {restart_err}")
+                        break
+            except Exception as e:
+                last_exc = e
+                break
+
+        if _buf_ctx is None:
+            raise last_exc
+
+        with _buf_ctx as buffer:
             _t1 = time.perf_counter()
 
             components: Dict[str, Component2DImage] = dict(
-                zip(comp_names, buffer.payload.components)
+                zip(self._comp_names, buffer.payload.components)
             )
 
             if "Range" not in components:
@@ -310,28 +352,51 @@ class PhoxiClient:
                 nm_comp = components["Normal"]
                 normal_S_flat = nm_comp.data.reshape(-1, 3).copy().astype(np.float32)
 
-            # Intensity (텍스처): Mono10/12/16, (H*W,) uint16
-            texture_comp: Optional[Component2DImage] = components.get("Intensity")
+            # Intensity (텍스처): Mono10/12/16 또는 RGB8 — 버퍼 안에서 즉시 복사
             h_tex = range_comp.height
             w_tex = range_comp.width
+            tex_raw: Optional[np.ndarray] = None
+            tex_fmt: Optional[str] = None
+            if "Intensity" in components:
+                _tc = components["Intensity"]
+                tex_fmt = _tc.data_format
+                tex_raw = _tc.data.copy()   # 버퍼 반환 전 복사
 
         _t2 = time.perf_counter()
+
+        # 강도 이미지 → uint8 그레이스케일 (hand-eye 캘리브레이션 / _build_frame 공용)
+        if tex_raw is not None:
+            if tex_fmt == "RGB8":
+                _gray = tex_raw.astype(np.uint8).reshape(h_tex, w_tex, 3).mean(axis=2).astype(np.uint8)
+                tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
+            elif tex_fmt == "Mono10":
+                _gray = (tex_raw.astype(np.float32) / 1024.0 * 255).clip(0, 255).astype(np.uint8).reshape(h_tex, w_tex)
+                tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
+            elif tex_fmt == "Mono12":
+                _gray = (tex_raw.astype(np.float32) / 4096.0 * 255).clip(0, 255).astype(np.uint8).reshape(h_tex, w_tex)
+                tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
+            else:
+                _max = float(tex_raw.max()) or 1.0
+                _gray = (tex_raw.astype(np.float32) / _max * 255).clip(0, 255).astype(np.uint8).reshape(h_tex, w_tex)
+                tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
+            self._last_intensity = _gray
+        else:
+            _gray = None
+            tex_flat_f32 = np.zeros(h_tex * w_tex, dtype=np.float32)
+            self._last_intensity = None
+
+        self._last_organized_pts = points_S_flat.reshape(h_tex, w_tex, 3)
 
         # Mesher에 원시 센서 데이터 공급 (S 프레임, mm 단위)
         if self._mesher is not None:
             T_S_B = ee_pose_mat_B @ np.linalg.inv(self.T_E_S)
-            tex_flat = (
-                texture_comp.data.astype(np.float32).reshape(-1)
-                if texture_comp is not None
-                else np.zeros(h_tex * w_tex, dtype=np.float32)
-            )
-            self._mesher.add_scan(points_S_flat, tex_flat, T_S_B, timestamp,
+            self._mesher.add_scan(points_S_flat, tex_flat_f32, T_S_B, timestamp,
                                   width=w_tex, height=h_tex)
 
         frame = self._build_frame(
             points_S_flat=points_S_flat,
             normal_S_flat=normal_S_flat,
-            texture_comp=texture_comp,
+            img_gray=_gray,
             h=h_tex,
             w=w_tex,
             ee_pose_mat_B=ee_pose_mat_B,
@@ -360,7 +425,7 @@ class PhoxiClient:
     def _build_frame(
         points_S_flat: np.ndarray,
         normal_S_flat: Optional[np.ndarray],
-        texture_comp: Optional[Component2DImage],
+        img_gray: Optional[np.ndarray],
         h: int,
         w: int,
         ee_pose_mat_B: np.ndarray,
@@ -380,7 +445,7 @@ class PhoxiClient:
         ----------
         points_S_flat : (H*W, 3) float32, mm 단위. 무효점 = all-zero.
         normal_S_flat : (H*W, 3) float32 or None.
-        texture_comp  : Component2DImage (Intensity) or None.
+        img_gray      : (H, W) uint8 or None — 이미 디코딩된 강도 이미지.
         h, w          : 이미지 높이/너비.
         ee_pose_mat_B : (4,4) T_E^B
         T_E_S         : (4,4) T_E^S
@@ -406,25 +471,10 @@ class PhoxiClient:
             nlen = np.where(nlen < 1e-6, 1.0, nlen)
             normals_B = (normals_B / nlen).astype(np.float32)
 
-        # Intensity → 그레이스케일 pseudo-RGB (H, W, 3) uint8
-        # 공식 예제 pointcloud.py의 map_texture() 참조
+        # 그레이스케일 → pseudo-RGB (H, W, 3) uint8
         raw_img: Optional[np.ndarray] = None
-        if texture_comp is not None:
-            fmt = texture_comp.data_format
-            data = texture_comp.data
-            if fmt == "RGB8":
-                raw_img = data.astype(np.uint8).reshape(h, w, 3)
-            else:
-                if fmt == "Mono10":
-                    norm = data.astype(np.float32) / 1024.0
-                elif fmt == "Mono12":
-                    norm = data.astype(np.float32) / 4096.0
-                elif fmt == "Mono16":
-                    norm = data.astype(np.float32) / 65536.0
-                else:
-                    norm = data.astype(np.float32) / (data.max() + 1e-6)
-                gray_u8 = (norm * 255).clip(0, 255).astype(np.uint8).reshape(h, w)
-                raw_img = np.stack([gray_u8, gray_u8, gray_u8], axis=-1)
+        if img_gray is not None:
+            raw_img = np.stack([img_gray, img_gray, img_gray], axis=-1)
 
         return Frame(
             sensor_type="phoxi",
