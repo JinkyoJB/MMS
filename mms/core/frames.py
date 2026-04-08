@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 import open3d as o3d
 
-from mms.core.transforms import pose_mat_to_6d
+from mms.utils.transforms import pose_mat_to_6d
 
 
 @dataclass

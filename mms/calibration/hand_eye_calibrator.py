@@ -2,7 +2,6 @@
 #
 # Hand-Eye 캘리브레이션: T_E^S (End-Effector → Sensor) 추정.
 #
-# 수식 (CLAUDE.md 표기)
 # ----------------------
 #   AX = XB  방정식:
 #     A_i = T_E_B^(i+1) @ inv(T_E_B^i)  ... EE 간 상대 운동 (base frame)
@@ -105,14 +104,27 @@ class HandEyeCalibrator:
 
         Parameters
         ----------
-        T_E_B : (4,4)  EE-frame → Base-frame  (robot FK)
-        T_M_S : (4,4)  Marker-frame → Sensor-frame  (marker detector)
+        T_E_B : (4,4)  EE-frame → Base-frame  (robot FK), translation in meters.
+        T_M_S : (4,4)  Marker-frame → Sensor-frame  (marker detector),
+                       translation in mm (marker_detector.py 출력 단위).
+                       내부적으로 m 단위로 변환하여 저장한다.
+
+        Note
+        ----
+        calibrateHandEye는 T_E_B, T_M_S 의 translation 단위가 일치해야 한다.
+        T_E_B translation 은 meters, marker_detector 출력(T_M_S) translation 은 mm
+        이므로 여기서 T_M_S[:3, 3] / 1000 으로 통일한다.
         """
         assert T_E_B.shape == (4, 4), "T_E_B must be (4,4)"
         assert T_M_S.shape == (4, 4), "T_M_S must be (4,4)"
         self._T_E_B_list.append(T_E_B.copy())
-        self._T_M_S_list.append(T_M_S.copy())
-        log.info(f"[HandEye] 샘플 추가 (총 {len(self._T_E_B_list)}개)")
+        T_M_S_m = T_M_S.copy()
+        T_M_S_m[:3, 3] /= 1000.0   # mm → m  (T_E_B 단위와 통일)
+        self._T_M_S_list.append(T_M_S_m)
+        log.info(
+            f"[HandEye] 샘플 추가 (총 {len(self._T_E_B_list)}개)  "
+            f"T_M_S t_norm={np.linalg.norm(T_M_S_m[:3, 3]) * 1000:.1f}mm"
+        )
 
     @property
     def n_samples(self) -> int:
@@ -258,7 +270,7 @@ class HandEyeCalibrator:
             )
 
         R = self._T_E_S[:3, :3]
-        t = self._T_E_S[:3, 3]        # meters 단위 (입력 T_M_S가 mm → calibrate가 mm 단위 t 반환)
+        t = self._T_E_S[:3, 3]        # meters 단위 (add_sample에서 T_M_S mm→m 변환 완료)
         q = _rot_to_quat(R)
 
         # 기존 YAML 로드
@@ -345,7 +357,7 @@ if __name__ == "__main__":
         sensor_frames_yaml=SENSOR_YAML,
         T_E_S_key=OUTPUT_KEY,
         serial_number="SEA-023",
-        trigger_timeout_s=15.0,
+        trigger_timeout_s=30.0,   # PhoXi S Gen3 고품질 스캔은 최대 ~25초 소요 가능
     )
     sensor = PhoxiClient(cfg)
     sensor.initialize()
@@ -371,10 +383,40 @@ if __name__ == "__main__":
 
     try:
         for idx, pose_entry in enumerate(pose_list):
-            name   = pose_entry.get("name", f"pose_{idx}")
-            joints_deg = pose_entry["joints"]   # list[float], 7개, degrees
+            name = pose_entry.get("name", f"pose_{idx}")
 
-            print(f"\n[{idx+1}/{len(pose_list)}] {name}  joints={joints_deg}")
+            # ── 포즈 포맷 분기: joints 또는 ee_pose ──────────────────────
+            if "joints" in pose_entry:
+                # 기존 포맷: joint angles (degrees, 7축)
+                joints_deg = pose_entry["joints"]
+                print(f"\n[{idx+1}/{len(pose_list)}] {name}  joints={joints_deg}")
+
+            elif "ee_pose" in pose_entry:
+                # 신규 포맷: [x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg]
+                ee = pose_entry["ee_pose"]
+                ee_pose_rad = [ee[0], ee[1], ee[2],
+                               np.radians(ee[3]), np.radians(ee[4]), np.radians(ee[5])]
+                print(f"\n[{idx+1}/{len(pose_list)}] {name}  "
+                      f"ee=[{ee[0]:.1f},{ee[1]:.1f},{ee[2]:.1f}mm  "
+                      f"rpy={ee[3]:.1f},{ee[4]:.1f},{ee[5]:.1f}°]")
+
+                # IK로 joint angles 계산
+                code_ik, ik_joints = robot.arm.get_inverse_kinematics(
+                    pose=ee_pose_rad,
+                    input_is_radian=True,
+                    return_is_radian=False,
+                )
+                if code_ik != 0:
+                    print(f"  [!] IK 실패 (code={code_ik}) — 건너뜀")
+                    failed_poses.append(name)
+                    continue
+                joints_deg = ik_joints[:7]
+                print(f"  IK joints={[round(j,1) for j in joints_deg]}")
+
+            else:
+                print(f"\n[{idx+1}/{len(pose_list)}] {name}  [!] joints 또는 ee_pose 키 없음 — 건너뜀")
+                failed_poses.append(name)
+                continue
 
             # 로봇 이동
             code = robot.arm.set_servo_angle(
@@ -402,11 +444,16 @@ if __name__ == "__main__":
             print(f"  TCP  x={pose6[0]:.1f}  y={pose6[1]:.1f}  z={pose6[2]:.1f} mm")
 
             # 캡처
-            frame = sensor.capture_frame(
-                ee_pose_mat_B=T_E_B,
-                frame_id=idx,
-                timestamp=time.perf_counter(),
-            )
+            try:
+                frame = sensor.capture_frame(
+                    ee_pose_mat_B=T_E_B,
+                    frame_id=idx,
+                    timestamp=time.perf_counter(),
+                )
+            except Exception as cap_err:
+                print(f"  [!] 캡처 예외: {cap_err} — 건너뜀")
+                failed_poses.append(name)
+                continue
             if frame is None:
                 print("  [!] 캡처 실패 — 건너뜀")
                 failed_poses.append(name)

@@ -18,7 +18,7 @@ from genicam.genapi import NodeMap
 from harvesters.core import Component2DImage, Harvester, ImageAcquirer
 
 from mms.core.frames import Frame
-from mms.core.transforms import load_transform
+from mms.utils.transforms import load_transform, compute_T_S_B, transform_points, transform_normals
 from mms.sensor.phoxi_instant_meshing import PhoxiInstantMeshingWrapper
 
 
@@ -389,7 +389,7 @@ class PhoxiClient:
 
         # Mesher에 원시 센서 데이터 공급 (S 프레임, mm 단위)
         if self._mesher is not None:
-            T_S_B = ee_pose_mat_B @ np.linalg.inv(self.T_E_S)
+            T_S_B = compute_T_S_B(ee_pose_mat_B, self.T_E_S)
             self._mesher.add_scan(points_S_flat, tex_flat_f32, T_S_B, timestamp,
                                   width=w_tex, height=h_tex)
 
@@ -450,26 +450,23 @@ class PhoxiClient:
         ee_pose_mat_B : (4,4) T_E^B
         T_E_S         : (4,4) T_E^S
         """
-        # T_S^B = T_E^B @ inv(T_E^S)
-        T_S_B = ee_pose_mat_B @ np.linalg.inv(T_E_S)
-        R_mat = T_S_B[:3, :3].astype(np.float32)
-        t_vec = T_S_B[:3, 3].astype(np.float32)
+        # T_S_B = T_E_B @ inv(T_E_S)  →  x_B = T_S_B @ x_S
+        T_S_B = compute_T_S_B(ee_pose_mat_B, T_E_S)
 
         # 유효점 마스크: all-zero 아닌 점
         valid = ~np.all(points_S_flat == 0.0, axis=1)
         pts_m = points_S_flat[valid] / 1000.0          # mm → m, (N, 3)
 
-        # x_B = R @ x_S + t
-        points_B = pts_m @ R_mat.T + t_vec              # (N, 3) float32
+        points_B = transform_points(T_S_B, pts_m).astype(np.float32)
 
         # NormalMap: 회전만 적용 (방향 벡터)
         normals_B: Optional[np.ndarray] = None
         if normal_S_flat is not None:
             norms_valid = normal_S_flat[valid]
-            normals_B = norms_valid @ R_mat.T
+            normals_B = transform_normals(T_S_B, norms_valid).astype(np.float32)
             nlen = np.linalg.norm(normals_B, axis=1, keepdims=True)
             nlen = np.where(nlen < 1e-6, 1.0, nlen)
-            normals_B = (normals_B / nlen).astype(np.float32)
+            normals_B = normals_B / nlen
 
         # 그레이스케일 → pseudo-RGB (H, W, 3) uint8
         raw_img: Optional[np.ndarray] = None

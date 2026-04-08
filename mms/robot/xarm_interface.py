@@ -2,6 +2,8 @@ from xarm.wrapper import XArmAPI
 import numpy as np
 from typing import Optional
 
+from mms.utils.transforms import pose6d_to_mat
+
 
 class XArmInterface:
     """
@@ -19,6 +21,14 @@ class XArmInterface:
 
     def __init__(self, ip: str = "192.168.1.210"):
         self.arm = XArmAPI(ip)
+
+    def enable_motion(self) -> None:
+        """
+        모션 제어 활성화. 실제로 로봇을 움직이기 전에만 호출한다.
+
+        주의: set_state(0)은 컨트롤러를 이전 명령 위치로 resume시키므로
+        포즈 읽기(get_pose, get_joint_angles)만 할 때는 호출하지 않는다.
+        """
         self.arm.motion_enable(True)
         self.arm.set_mode(0)
         self.arm.set_state(0)
@@ -62,6 +72,20 @@ class XArmInterface:
         if code != 0:
             raise RuntimeError(f"get_position failed (code={code})")
         return np.array(pose[:6])
+
+    def get_ee_pose_mat(self) -> np.ndarray:
+        """
+        현재 EE pose를 (4,4) 동차 변환 행렬로 반환 (B 프레임 기준).
+
+        get_pose()의 [x(mm), y(mm), z(mm), roll, pitch, yaw]를
+        T_E_B (4,4) SE3 행렬로 변환한다. Translation 단위는 m.
+
+        Returns
+        -------
+        T_E_B : np.ndarray, shape (4,4)
+        """
+        pose6d = self.get_pose(is_radian=True)
+        return pose6d_to_mat(pose6d)
 
     # ------------------------------------------------------------------
     # Kinematics
@@ -178,6 +202,7 @@ class XArmInterface:
         if confirm:
             input("\nEnter 누르면 이동...")
 
+        self.enable_motion()
         self.arm.set_servo_angle(angle=ik_joints_deg, speed=speed, wait=True)
 
         pose_after = self.get_pose(is_radian=True)
@@ -203,6 +228,7 @@ class XArmInterface:
         if confirm:
             input("Enter 누르면 home으로 이동...")
 
+        self.enable_motion()
         self.arm.set_servo_angle(angle=HOME_JOINTS_DEG, speed=speed, is_radian=False, wait=True)
 
         joints = self.get_joint_angles(is_radian=False)
@@ -219,16 +245,33 @@ class XArmInterface:
 if __name__ == "__main__":
     robot = XArmInterface("192.168.1.210")
 
+    # 읽기만 할 때는 enable_motion() 불필요
     print(" 현재 joint angles (rad) : ", robot.get_joint_angles())
     print(" 현재 TCP pose (B 프레임, mm+rad) : ", robot.get_pose())
+    print(" ----------------------------------------------------")
 
-    try:
-        robot.go_home(speed=5)
+    # try:
+    #     robot.go_home(speed=5)  # 내부에서 enable_motion() 호출
 
-        print("\n=== move_relative 테스트: +20mm in X, Y, Z ===")
-        robot.move_relative(dx=20, dy=20, dz=20, speed=5)
+    #     print("\n=== move_relative 테스트: +20mm in X, Y, Z ===")
+    #     robot.move_relative(dx=20, dy=20, dz=20, speed=5)
 
-        input("\nEnter → 원위치 복귀...")
-        robot.move_relative(dx=-20, dy=-20, dz=-20, speed=5)
-    finally:
+    #     input("\nEnter → 원위치 복귀...")
+    #     robot.move_relative(dx=-20, dy=-20, dz=-20, speed=5)
+    # finally:
+    #     robot.disconnect()
+
+    target_pose = [300, 0, 400, 180, -35.0, 0]
+    try :
+        robot.enable_motion()  # 모션 제어 활성화
+        code = robot.arm.set_position(
+            x=target_pose[0], y=target_pose[1], z=target_pose[2],
+            roll=target_pose[3], pitch=target_pose[4], yaw=target_pose[5],
+            is_radian=False, speed=30, wait=True
+        )
+        print('code:', code)
+        print('실제 TCP:', robot.get_pose(is_radian=False))
+        robot.disconnect()
+    except Exception as e:
+        print("Error:", e)
         robot.disconnect()

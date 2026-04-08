@@ -6632,3 +6632,15 @@
 [03/27 15:13:27.893530][info][30516][SensorBase.cpp:47] [CL8764100L9] SensorBase is destroyed
 [03/27 15:13:27.893557][info][30516][SensorBase.cpp:47] [CL8764100L9] SensorBase is destroyed
 [03/27 15:13:27.914355][warning][24724][Pipeline.cpp:295] [CL8764100L9] Output frameset queue is full, drop oldest frameset! [**469 logs in 16815ms, last: 15:13:27.206195**]
+[04/08 11:09:55.215890][info][21244][DeviceManager.cpp:25] Current found device(s): (0)
+[04/08 11:09:55.215993][info][21244][DeviceManager.cpp:339] Enable net device enumeration: true
+[04/08 11:09:57.950698][info][21244][DeviceManager.cpp:25] Current device(s) list: (0)
+[04/08 11:09:57.950736][warning][21244][ObException.hpp:48] No device found
+[04/08 11:10:20.131119][info][13224][DeviceManager.cpp:25] Current found device(s): (0)
+[04/08 11:10:20.131220][info][13224][DeviceManager.cpp:339] Enable net device enumeration: true
+[04/08 11:10:22.342361][info][13224][DeviceManager.cpp:25] Current device(s) list: (0)
+[04/08 11:10:22.342414][warning][13224][ObException.hpp:48] No device found
+[04/08 11:10:56.683155][info][31956][DeviceManager.cpp:25] Current found device(s): (0)
+[04/08 11:10:56.683253][info][31956][DeviceManager.cpp:339] Enable net device enumeration: true
+[04/08 11:10:59.362260][info][31956][DeviceManager.cpp:25] Current device(s) list: (0)
+[04/08 11:10:59.362315][warning][31956][ObException.hpp:48] No device found

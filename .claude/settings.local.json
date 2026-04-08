@@ -17,7 +17,8 @@
       "Bash(xargs -I {} basename {})",
       "Bash(python -c ':*)",
       "Bash(python:*)",
-      "Bash(grep -v \"^$\")"
+      "Bash(grep -v \"^$\")",
+      "Read(//c/Program Files/Photoneo/3DMeshing/2.3.0/API/**)"
     ]
   }
 }

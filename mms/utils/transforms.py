@@ -1,4 +1,16 @@
-# mms/core/transforms.py
+# mms/utils/transforms.py
+#
+# 좌표계 변환 유틸리티
+#
+# Notation: T_A_B maps coordinates from frame A to frame B
+#   x_B = T_A_B @ x_A
+#
+# Frames
+# ------
+# B : Base frame  — xArm7 base (≡ World)
+# O : Object frame — turntable/object (z-up, origin at center)
+# E : End-Effector frame — robot flange / TCP
+# S : Sensor frame — per-device camera frame (S_femto, S_phoxi)
 
 from __future__ import annotations
 
@@ -92,6 +104,27 @@ class WorldTransformConfig:
 
 # ---------- Sensor frame (S) / EE frame (E) ----------
 
+def compute_T_S_B(T_E_B: np.ndarray, T_E_S: np.ndarray) -> np.ndarray:
+    """
+    Compute Sensor → Base transform.
+
+    T_S_B = T_E_B @ inv(T_E_S)
+    x_B   = T_S_B @ x_S
+
+    Parameters
+    ----------
+    T_E_B : (4,4) np.ndarray  —  EE → Base  (robot FK result)
+    T_E_S : (4,4) np.ndarray  —  EE → Sensor  (hand-eye calibration)
+
+    Returns
+    -------
+    T_S_B : (4,4) np.ndarray  —  Sensor → Base
+    """
+    assert T_E_B.shape == (4, 4)
+    assert T_E_S.shape == (4, 4)
+    return T_E_B @ np.linalg.inv(T_E_S)
+
+
 def sensor_pose_to_ee_pose(
     T_B_S: np.ndarray,
     T_E_S: np.ndarray,
@@ -177,3 +210,29 @@ def pose_mat_to_6d(T: np.ndarray, order: str = "xyz") -> np.ndarray:
     assert T.shape == (4, 4)
     rpy = R.from_matrix(T[:3, :3]).as_euler(order, degrees=False)
     return np.concatenate([T[:3, 3], rpy])
+
+
+def pose6d_to_mat(pose6d: np.ndarray, order: str = "xyz") -> np.ndarray:
+    """
+    Convert [x(mm), y(mm), z(mm), r1, r2, r3] to (4,4) SE3 matrix.
+
+    xArm get_position() 결과를 T_E_B 행렬로 변환할 때 사용.
+    Translation은 mm → m 변환이 자동 적용된다.
+
+    Parameters
+    ----------
+    pose6d : np.ndarray, shape (6,)
+        [x(mm), y(mm), z(mm), r1(rad), r2(rad), r3(rad)]
+    order : str, default='xyz'
+        Euler angle convention (scipy.Rotation.from_euler).
+
+    Returns
+    -------
+    T : (4,4) np.ndarray  —  SE3 transform (translation in meters)
+    """
+    pose6d = np.asarray(pose6d, dtype=float)
+    assert pose6d.shape == (6,)
+    T = np.eye(4, dtype=float)
+    T[:3, :3] = R.from_euler(order, pose6d[3:6], degrees=False).as_matrix()
+    T[:3, 3] = pose6d[:3] / 1000.0   # mm → m
+    return T

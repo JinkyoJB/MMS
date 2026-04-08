@@ -22,7 +22,7 @@ from pyorbbecsdk import (
 )
 
 from mms.core.frames import Frame
-from mms.core.transforms import load_transform, pose_mat_to_6d
+from mms.utils.transforms import load_transform, pose_mat_to_6d, compute_T_S_B, transform_points
 
 
 @dataclass
@@ -314,17 +314,14 @@ class OrbbecClient:
         frame_id : int
         timestamp : float
         """
-        # T_S^B = T_E^B @ (T_E^S)^{-1}  →  x_B = T_S^B @ x_S
-        T_S_B = ee_pose_mat_B @ np.linalg.inv(T_E_S)
+        # T_S_B = T_E_B @ inv(T_E_S)  →  x_B = T_S_B @ x_S
+        T_S_B = compute_T_S_B(ee_pose_mat_B, T_E_S)
 
         # Filter out zero-depth (invalid) points before transform
         valid = ~np.all(points_S == 0.0, axis=1)
         pts = points_S[valid]  # (M, 3) float32, M << N
 
-        # x_B = R @ x_S + t
-        R = T_S_B[:3, :3].astype(np.float32)
-        t = T_S_B[:3, 3].astype(np.float32)
-        points_B = pts @ R.T + t  # (M, 3) float32
+        points_B = transform_points(T_S_B, pts).astype(np.float32)
 
         colors_B = colors_S[valid].astype(np.float32) if colors_S is not None else None
 

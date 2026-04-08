@@ -30,16 +30,108 @@ with MMS(cfg) as mms:
 
 ## 좌표계 표기 규칙
 
+
 ```
-T_A^B : 프레임 A → 프레임 B 변환   x_B = T_A^B @ x_A
+T_A_B : 프레임 A → 프레임 B 변환   x_B = T_A_B @ x_A
 ```
 
-| 기호 | 프레임 |
-|------|--------|
-| B | xArm7 base |
-| O | 오브젝트 / 턴테이블 |
-| E | End-Effector |
-| S | 센서 (Orbbec / PhoXi) |
+| 기호 | 프레임 | 설명 |
+|------|--------|------|
+| B | Base | xArm7 로봇 베이스 (≡ 월드 프레임 W) |
+| O | Object | 턴테이블 오브젝트 (원점: 테이블 중심, z축: 위쪽) |
+| E | End-Effector | 로봇 플랜지 / TCP |
+| S | Sensor | 카메라 프레임 (S_femto, S_phoxi) |
+
+---
+
+## 좌표계 변환 (Frame Transforms)
+
+### 프레임 관계도
+
+- **B ↔ O** : `config/object_frame.yaml`에 θ=0 기준 고정 초기값(`T_B_O0`)을 저장. 실제 θ별 변환은 `WorldTransformConfig`가 `T_B_O0`에 `Rz(θ)`를 합성하여 계산
+- **E ↔ B** : 로봇 FK로 실시간 계산 (`xArmInterface.fk()`)
+- **S ↔ E** : 핸드-아이 캘리브레이션 결과, 고정값 (`config/sensor_frames.yaml`)
+- **S → B** : 위 세 가지를 합성하여 파생 (`T_E_B @ inv(T_E_S)`)
+
+---
+
+### 변환 일람
+
+| 변환 | 방향 | 출처 | 비고 |
+|------|------|------|------|
+| `T_B_O0` | Base → Object (θ=0) | `config/object_frame.yaml` | 설치 시 1회 측정 |
+| `T_E_S_femto` | EE → Orbbec 센서 | `config/sensor_frames.yaml` | 핸드-아이 캘리브레이션 |
+| `T_E_S_phoxi` | EE → PhoXi 센서 | `config/sensor_frames.yaml` | 핸드-아이 캘리브레이션 |
+| `T_E_B` | EE → Base | 로봇 FK 실시간 | `xArmInterface.fk()` |
+
+**파생 변환 (코드에서 계산):**
+
+| 변환 | 수식 | 의미 |
+|------|------|------|
+| `T_O_B(θ)` | `inv(T_B_O0) @ blkdiag(Rz(θ), 1)` | Object → Base (턴테이블 회전 포함) |
+| `T_B_O(θ)` | `inv(T_O_B(θ))` | Base → Object |
+| `T_S_B` | `T_E_B @ inv(T_E_S)` | Sensor → Base |
+| `T_B_E` (NBV용) | `T_B_S @ inv(T_E_S)` | Base → EE target (센서 목표 자세로부터) |
+
+---
+
+### config 파일 스키마
+
+**`config/object_frame.yaml`**
+```yaml
+T_B_O0:                       # Base → Object at theta = 0
+  translation: [x, y, z]      # 미터 단위
+  rotation_quat: [qx, qy, qz, qw]
+```
+
+**`config/sensor_frames.yaml`**
+```yaml
+T_E_S_femto:                  # EE → Orbbec Femto Bolt
+  translation: [x, y, z]
+  rotation_quat: [qx, qy, qz, qw]
+
+T_E_S_phoxi:                  # EE → PhoXi 3D Scanner
+  translation: [x, y, z]
+  rotation_quat: [qx, qy, qz, qw]
+```
+
+---
+
+### 사용 예시
+
+```python
+from mms.utils.transforms import (
+    load_transform, WorldTransformConfig,
+    compute_T_S_B, transform_points, transform_normals,
+    sensor_pose_to_ee_pose,
+)
+
+# 1. 오브젝트 ↔ 베이스 변환 (턴테이블 각도 포함)
+T_B_O0 = load_transform("config/object_frame.yaml", "T_B_O0")
+wt = WorldTransformConfig(T_B_O0)
+
+theta = 1.57  # 90도 (rad)
+x_B = wt.T_O_B(theta) @ x_O   # 오브젝트 좌표 → 베이스 좌표
+x_O = wt.T_B_O(theta) @ x_B   # 베이스 좌표 → 오브젝트 좌표
+
+# 2. 센서 → 베이스 변환
+T_E_S = load_transform("config/sensor_frames.yaml", "T_E_S_femto")
+T_E_B = robot.fk(joints)       # xArm FK 결과 (4x4)
+
+T_S_B = compute_T_S_B(T_E_B, T_E_S)
+points_B = transform_points(T_S_B, points_S)    # 센서 좌표 → 베이스 좌표
+normals_B = transform_normals(T_S_B, normals_S) # 법선 벡터 변환
+
+# 3. NBV: 센서 목표 자세 → EE 목표 자세
+T_B_E_target = sensor_pose_to_ee_pose(T_B_S_target, T_E_S)
+
+# 4. MMS를 통한 직접 호출 (가장 간편)
+with MMS(cfg) as mms:
+    x_B  = mms.T_O_B(theta) @ x_O      # Object → Base
+    x_O  = mms.T_B_O(theta) @ x_B      # Base → Object
+    T_sb = mms.T_S_B(T_E_B)            # Sensor → Base (self.sensor.T_E_S 자동 참조)
+    T_sb = mms.T_S_B(T_E_B, T_E_S)     # 센서 T_E_S 직접 지정도 가능
+```
 
 ---
 
@@ -52,24 +144,26 @@ MMS/
 ├── config/
 │   ├── object_frame.yaml          # T_B_O0 (base→object at θ=0)
 │   ├── sensor_frames.yaml         # T_E_S_femto, T_E_S_phoxi
-│   ├── nbv.yaml                   # NBV 파라미터
-│   └── robot.yaml                 # xArm 설정
+│   └── calibration_poses.yaml     # 핸드-아이 캘리브레이션 포즈
 └── mms/
     ├── system.py                  # MMS 최상위 오케스트레이터
     ├── core/
-    │   ├── transforms.py          # 좌표 변환 유틸 (rotz, load_T_B_O0, ...)
     │   ├── frames.py              # Frame 데이터클래스 + 전처리 메서드
     │   ├── stream.py              # Stream — 슬라이딩 윈도우 Frame 버퍼
     │   ├── scan_data.py           # voxel map, TSDF, frontier 추출
     │   └── nbv_planner.py         # NBV 플래너
     ├── sensor/
     │   ├── orbbec_client.py       # OrbbecClient (pyorbbecsdk 래퍼)
-    │   └── phoxi_client.py        # PhoXi 래퍼 (추후)
+    │   └── phoxi_client.py        # PhoxiClient (Harvesters/GenTL 래퍼)
     ├── robot/
     │   ├── xarm_interface.py      # EE pose 읽기 + 모션 제어
     │   └── ee_turntable_planner.py
-    └── turntable/
-        └── turntable_interface.py # θ 읽기 + θ* 명령
+    ├── turntable/
+    │   └── turntable_interface.py # θ 읽기 + θ* 명령
+    └── utils/
+        ├── transforms.py          # 좌표 변환 유틸 (WorldTransformConfig, compute_T_S_B, ...)
+        ├── diagnostics.py         # PCD 통계, ROI 자동 추출
+        └── visualization.py       # Open3D 시각화
 ```
 
 ---
@@ -88,6 +182,9 @@ MMS/
 | `preprocess(frames, roi_bbox, ...)` | ROI → voxel → denoise → normals (`list[Frame]` 또는 `Stream` 수용) |
 | `clear_stream()` | `self.stream` 버퍼 초기화 |
 | `self.stream` | `Stream` — 누적 프레임 버퍼 (`latest()`, `since()`, `between()` 등 조회 가능) |
+| `T_O_B(theta)` | Object → Base 변환 (4×4). `object_frame_yaml` 필요 |
+| `T_B_O(theta)` | Base → Object 변환 (4×4). `object_frame_yaml` 필요 |
+| `T_S_B(T_E_B, T_E_S=None)` | Sensor → Base 변환 (4×4). T_E_S 생략 시 `self.sensor.T_E_S` 사용 |
 
 ### `Frame` (`mms/core/frames.py`)
 
