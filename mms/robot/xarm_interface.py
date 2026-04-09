@@ -261,7 +261,7 @@ if __name__ == "__main__":
     # finally:
     #     robot.disconnect()
 
-    target_pose = [300, 0, 400, 180, -35.0, 0]
+    target_pose = [280, 0, 350, 180, -58, 0]
     try :
         robot.enable_motion()  # 모션 제어 활성화
         code = robot.arm.set_position(

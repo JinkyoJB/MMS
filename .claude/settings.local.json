@@ -18,7 +18,9 @@
       "Bash(python -c ':*)",
       "Bash(python:*)",
       "Bash(grep -v \"^$\")",
-      "Read(//c/Program Files/Photoneo/3DMeshing/2.3.0/API/**)"
+      "Read(//c/Program Files/Photoneo/3DMeshing/2.3.0/API/**)",
+      "Bash(pip show:*)",
+      "Bash(pip list:*)"
     ]
   }
 }

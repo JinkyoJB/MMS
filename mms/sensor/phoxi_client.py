@@ -164,6 +164,7 @@ class PhoxiClient:
         # 최근 캡처 데이터 (hand-eye 캘리브레이션 등 외부 접근용)
         self._last_intensity: Optional[np.ndarray] = None        # (H, W) uint8
         self._last_organized_pts: Optional[np.ndarray] = None    # (H, W, 3) float32, mm, sensor frame
+        self._last_marker_pts: Optional[np.ndarray] = None       # (H, W, 3) float32, mm, marker frame (detect_marker_transform 전용)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -232,6 +233,24 @@ class PhoxiClient:
         # 보정된 XYZ 포인트 클라우드 모드
         features.Scan3dOutputMode.value = "CalibratedABC_Grid"
 
+        # TextureSource = LED: 구조광 패턴 없이 LED 단독 조명으로 텍스처 획득.
+        # 구조광 조명 하에서는 intensity 이미지에 수백 개의 가짜 blob이 생성되어
+        # A4-REV-23A 마커 감지 품질이 크게 저하된다.
+        # GenTL 노드명은 펌웨어 버전에 따라 다를 수 있으므로 silently skip.
+        for _node_name in [
+            "CapturingSettingsTextureSource",
+            "TextureSource",
+            "CapturingSettings_TextureSource",
+        ]:
+            try:
+                node = getattr(features, _node_name, None)
+                if node is not None:
+                    node.value = "LED"
+                    print(f"[PhoxiClient] TextureSource → LED  (node: {_node_name})")
+                    break
+            except Exception:
+                pass
+
         # 활성 컴포넌트: Intensity (텍스처), Range (포인트클라우드), Normal (법선)
         _enable_components(features, ["Intensity", "Range", "Normal"])
 
@@ -243,6 +262,144 @@ class PhoxiClient:
         self._comp_names = _enabled_components(features)   # 초기화 시 1회 캐시
         self._initialized = True
         print(f"[PhoxiClient] Acquisition started.  components={self._comp_names}")
+
+    def detect_marker_transform(self) -> Optional[np.ndarray]:
+        """
+        Photoneo 내장 마커 인식으로 T_M^S (Marker→Sensor) 변환 행렬을 반환한다.
+
+        RecognizeMarkers=True + CoordinateSpace=MarkerSpace 모드로 전환하여
+        GenTL 청크 CurrentCameraToCoordinateSpaceTransformation에서
+        Camera→Marker 변환 행렬을 읽고, 역행렬(T_M^S)을 반환한다.
+
+        Translation 단위: mm (PhoXi 3D 스캐너 기본 단위).
+
+        Returns
+        -------
+        T_M_S : (4,4) float64  — Marker frame → Sensor frame, mm 단위
+                None            — 마커 인식 실패 또는 타임아웃 (마커가 시야에 없음)
+
+        Notes
+        -----
+        - 내부에서 스트림을 stop→재설정→start하므로 호출 비용이 큼.
+        - 반환 후 sensor는 원래 CalibratedABC_Grid 스캔 모드로 자동 복원됨.
+        - 마커가 없으면 fetch()가 타임아웃하므로 None이 반환됨.
+        """
+        if not self._initialized:
+            raise RuntimeError("[PhoxiClient] Not initialized. Call initialize() first.")
+
+        features = self._features
+        ia = self._ia
+        T_S_M: Optional[np.ndarray] = None
+
+        # ── 마커 감지 모드로 전환 ──────────────────────────────────────
+        ia.stop()
+        try:
+            features.RecognizeMarkers.value = True
+            features.CoordinateSpace.value = "MarkerSpace"
+            features.ChunkModeActive.value = True
+            features.ChunkSelector.value = "CurrentCameraToCoordinateSpaceTransformation"
+            features.ChunkEnable.value = True
+            _data_stream_reset(ia)
+            ia.start()
+
+            # stale 버퍼 소진
+            while True:
+                try:
+                    with ia.fetch(timeout=0.05):
+                        pass
+                except Exception:
+                    break
+
+            features.TriggerSoftware.execute()
+            try:
+                with ia.fetch(timeout=self.cfg.trigger_timeout_s) as _buf:
+                    # buffer context 안에서만 청크 값이 NodeMap에 반영됨
+                    T_S_M = self._read_transform_chunk(
+                        features, "CurrentCameraToCoordinateSpaceTransformation"
+                    )
+                    # intensity + Range(마커 프레임) 캡처 (디버그용)
+                    comp_names = _enabled_components(features)
+                    components = dict(zip(comp_names, _buf.payload.components))
+                    if "Range" in components:
+                        rng = components["Range"]
+                        h, w = rng.height, rng.width
+                        # Range: MarkerSpace 좌표계 3D 포인트 (mm), (H, W, 3)
+                        self._last_marker_pts = (
+                            rng.data.reshape(-1, 3).copy()
+                            .astype(np.float32)
+                            .reshape(h, w, 3)
+                        )
+                        if "Intensity" in components:
+                            tc = components["Intensity"]
+                            self._last_intensity = self._decode_intensity(
+                                tc.data.copy(), tc.data_format, h, w
+                            )
+                        else:
+                            self._last_intensity = None
+                    else:
+                        self._last_marker_pts = None
+                        self._last_intensity = None
+            except Exception as e:
+                print(f"[PhoxiClient] 마커 인식 실패 (timeout 또는 오류): {e}")
+                T_S_M = None
+                self._last_intensity = None
+
+        finally:
+            # ── 정상 스캔 모드로 복원 ──────────────────────────────────
+            ia.stop()
+            try:
+                features.RecognizeMarkers.value = False
+                features.CoordinateSpace.value = "CalibratedABC_Grid"
+                features.ChunkModeActive.value = False
+            except Exception:
+                pass
+            _data_stream_reset(ia)
+            ia.start()
+
+        if T_S_M is None:
+            return None
+
+        # T_S_M : Sensor → Marker  (x_M = T_S_M @ x_S)
+        # T_M_S : Marker → Sensor  (x_S = T_M_S @ x_M)  ← hand-eye 캘리브레이션 입력
+        T_M_S = np.linalg.inv(T_S_M)
+        t_norm = np.linalg.norm(T_M_S[:3, 3])
+        print(f"[PhoxiClient] 마커 인식 성공  t_norm={t_norm:.1f}mm  "
+              f"t=({T_M_S[0,3]:.1f},{T_M_S[1,3]:.1f},{T_M_S[2,3]:.1f})mm")
+        return T_M_S
+
+    @staticmethod
+    def _read_transform_chunk(features: "NodeMap", chunk_name: str) -> np.ndarray:
+        """
+        GenTL 청크에서 4×4 변환 행렬을 읽는다.
+
+        Photoneo 공식 예제 photoneo_genicam/chunks.py 의
+        parse_chunk_selector + get_transformation_matrix_from_chunk 인라인 구현.
+
+        Parameters
+        ----------
+        features   : ia.remote_device.node_map
+        chunk_name : 청크 이름 (예: "CurrentCameraToCoordinateSpaceTransformation")
+
+        Returns
+        -------
+        (4,4) float64
+        """
+        selector_alias = f"Chunk{chunk_name}Selector"
+        value_alias    = f"Chunk{chunk_name}Value"
+        # Photoneo 청크 구성 순서 (공식 예제 기준)
+        order = [
+            "Rot00", "Rot01", "Rot02", "TransX",
+            "Rot10", "Rot11", "Rot12", "TransY",
+            "Rot20", "Rot21", "Rot22", "TransZ",
+        ]
+        chunk_data = {}
+        for key in order:
+            features.get_node(selector_alias).value = key
+            chunk_data[key] = features.get_node(value_alias).value
+
+        flat = [chunk_data[k] for k in order]
+        mat_3x4 = np.array(flat, dtype=np.float64).reshape(3, 4)
+        return np.vstack([mat_3x4, [0.0, 0.0, 0.0, 1.0]])
 
     def shutdown(self) -> None:
         """취득 중지 및 리소스 해제."""
@@ -319,8 +476,9 @@ class PhoxiClient:
                     print(f"[PhoxiClient] fetch timeout (시도 {_attempt+1}/3), 스트림 재시작...")
                     try:
                         self._ia.stop()
+                        _data_stream_reset(self._ia)
                         self._ia.start()
-                        time.sleep(0.5)
+                        time.sleep(2.0)   # PhoXi Gen3 S 스트림 재초기화 대기
                     except Exception as restart_err:
                         print(f"[PhoxiClient] 재시작 실패: {restart_err}")
                         break
@@ -364,21 +522,10 @@ class PhoxiClient:
 
         _t2 = time.perf_counter()
 
-        # 강도 이미지 → uint8 그레이스케일 (hand-eye 캘리브레이션 / _build_frame 공용)
+        # 강도 이미지 → uint8 그레이스케일
         if tex_raw is not None:
-            if tex_fmt == "RGB8":
-                _gray = tex_raw.astype(np.uint8).reshape(h_tex, w_tex, 3).mean(axis=2).astype(np.uint8)
-                tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
-            elif tex_fmt == "Mono10":
-                _gray = (tex_raw.astype(np.float32) / 1024.0 * 255).clip(0, 255).astype(np.uint8).reshape(h_tex, w_tex)
-                tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
-            elif tex_fmt == "Mono12":
-                _gray = (tex_raw.astype(np.float32) / 4096.0 * 255).clip(0, 255).astype(np.uint8).reshape(h_tex, w_tex)
-                tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
-            else:
-                _max = float(tex_raw.max()) or 1.0
-                _gray = (tex_raw.astype(np.float32) / _max * 255).clip(0, 255).astype(np.uint8).reshape(h_tex, w_tex)
-                tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
+            _gray = self._decode_intensity(tex_raw, tex_fmt, h_tex, w_tex)
+            tex_flat_f32 = tex_raw.astype(np.float32).reshape(-1)
             self._last_intensity = _gray
         else:
             _gray = None
@@ -420,6 +567,24 @@ class PhoxiClient:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _decode_intensity(
+        raw: np.ndarray,
+        fmt: Optional[str],
+        h: int,
+        w: int,
+    ) -> np.ndarray:
+        """raw intensity 데이터 → (H, W) uint8 그레이스케일."""
+        if fmt == "RGB8":
+            return raw.astype(np.uint8).reshape(h, w, 3).mean(axis=2).astype(np.uint8)
+        elif fmt == "Mono10":
+            return (raw.astype(np.float32) / 1024.0 * 255).clip(0, 255).astype(np.uint8).reshape(h, w)
+        elif fmt == "Mono12":
+            return (raw.astype(np.float32) / 4096.0 * 255).clip(0, 255).astype(np.uint8).reshape(h, w)
+        else:
+            _max = float(raw.max()) or 1.0
+            return (raw.astype(np.float32) / _max * 255).clip(0, 255).astype(np.uint8).reshape(h, w)
 
     @staticmethod
     def _build_frame(

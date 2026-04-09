@@ -68,6 +68,7 @@ def main():
         # visualize("PhoXi — Raw PCD", batch)
         # mms.visualize_with_object_frame(batch, theta=THETA, frame_size=0.05,
         #                                  title="PhoXi — Frame Transform Verification")
+        # robot.go_home(speed=5, confirm=True)
         check_hand_eye(mms, robot, n_poses=N_CALIB_POSES)
     robot.disconnect()
 
