@@ -28,7 +28,11 @@
       "Read(//c/Program Files/Microsoft Visual Studio/2022/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/**)",
       "Bash(\"C:/Program Files/Microsoft Visual Studio/18/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --help)",
       "Bash('C:/Program Files/Microsoft Visual Studio/18/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe' -B build -G 'Visual Studio 18 2026' -A x64)",
-      "Bash(cd C:/Users/user/workspace/MMS/mms/sensor rm phoxi_client.py phoxi_instant_meshing.py phoxi_meshing.py orbbec_client.py camera.py echo \"done\" find . -maxdepth 1 -name \"*.py\")"
+      "Bash(cd C:/Users/user/workspace/MMS/mms/sensor rm phoxi_client.py phoxi_instant_meshing.py phoxi_meshing.py orbbec_client.py camera.py echo \"done\" find . -maxdepth 1 -name \"*.py\")",
+      "mcp__claude_ai_Notion__notion-fetch",
+      "Bash(python3:*)",
+      "Bash(grep -v \"//\")",
+      "Bash('C:/Program Files/Microsoft Visual Studio/18/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe' --build build --config Release)"
     ]
   }
 }
