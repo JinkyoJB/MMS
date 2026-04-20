@@ -1,3 +1,9 @@
+# Artec scanner (SP.10.36181288) hand-eye calibration result
+# TODO: replace with actual hand-eye calibration result
+T_E_S_artec:
+  translation: [0.0, 0.0, 0.0]
+  rotation_quat: [0.0, 0.0, 0.0, 1.0]
+
 T_E_S_femto:
   rotation_quat: [0.0, 0.0, 0.0, 1.0]
   translation: [0.0, 0.0, 0.075]

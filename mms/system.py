@@ -11,9 +11,17 @@ import numpy as np
 
 from mms.core.frames import Frame
 from mms.core.stream import Stream
-from mms.utils.transforms import WorldTransformConfig, load_transform, compute_T_S_B
-from mms.sensor.orbbec_client import OrbbecClient, OrbbecConfig
-from mms.sensor.phoxi_client import PhoxiClient, PhoxiConfig
+from mms.sensor.scan_result import ScanResult
+from mms.utils.transforms import (
+    WorldTransformConfig,
+    load_transform,
+    compute_T_S_B,
+    transform_points,
+    transform_normals,
+)
+from mms.sensor.orbbec import OrbbecClient, OrbbecConfig
+from mms.sensor.phoxi import PhoxiClient, PhoxiConfig
+from mms.sensor.artec.artec_client import ArtecClient, ArtecConfig
 
 
 @dataclass
@@ -21,7 +29,7 @@ class MMSConfig:
     """
     Top-level MMS configuration.
 
-    센서는 orbbec / phoxi 중 하나만 설정한다.
+    센서는 orbbec / phoxi / artec 중 하나만 설정한다.
 
     Attributes
     ----------
@@ -29,6 +37,15 @@ class MMSConfig:
         Orbbec Femto Bolt 센서 설정.
     phoxi : PhoxiConfig, optional
         Photoneo PhoXi 3D 센서 설정.
+    artec : ArtecConfig, optional
+        Artec 3D 스캐너 설정.
+    sensor_frames_yaml : str, optional
+        Path to config/sensor_frames.yaml.
+        Required to load T_E_S for sensor→base frame conversion.
+    T_E_S_key : str, optional
+        Key in sensor_frames_yaml for the T_E_S transform of the active sensor.
+        e.g. "T_E_S_femto", "T_E_S_phoxi", "T_E_S_artec".
+        Required when sensor_frames_yaml is provided.
     object_frame_yaml : str, optional
         Path to config/object_frame.yaml (key: T_B_O0).
         If provided, MMS.world_transform is populated on init.
@@ -38,17 +55,29 @@ class MMSConfig:
     """
     orbbec: Optional[OrbbecConfig] = None
     phoxi: Optional[PhoxiConfig] = None
+    artec: Optional[ArtecConfig] = None
+    sensor_frames_yaml: Optional[str] = None
+    T_E_S_key: Optional[str] = None
     object_frame_yaml: Optional[str] = None
     stream_max_size: int = 500
-    # 추후 추가 예정
-    # robot: RobotConfig
-    # turntable: TurntableConfig
 
     def __post_init__(self):
-        if self.orbbec is None and self.phoxi is None:
-            raise ValueError("MMSConfig: orbbec 또는 phoxi 중 하나를 설정해야 합니다.")
-        if self.orbbec is not None and self.phoxi is not None:
-            raise ValueError("MMSConfig: orbbec과 phoxi를 동시에 설정할 수 없습니다.")
+        active = sum([
+            self.orbbec is not None,
+            self.phoxi is not None,
+            self.artec is not None,
+        ])
+        if active == 0:
+            raise ValueError("MMSConfig: orbbec, phoxi, artec 중 하나를 설정해야 합니다.")
+        if active > 1:
+            raise ValueError("MMSConfig: 센서는 하나만 설정할 수 있습니다.")
+
+        if self.sensor_frames_yaml is not None:
+            self.sensor_frames_yaml = str(Path(self.sensor_frames_yaml).resolve())
+            if self.T_E_S_key is None:
+                raise ValueError(
+                    "MMSConfig: sensor_frames_yaml을 지정하면 T_E_S_key도 함께 지정해야 합니다."
+                )
         if self.object_frame_yaml is not None:
             self.object_frame_yaml = str(Path(self.object_frame_yaml).resolve())
 
@@ -57,11 +86,20 @@ class MMS:
     """
     Top-level MMS (Multi Modal Scanning System) orchestrator.
 
-    Manages sensor lifecycle, frame capture, and preprocessing pipeline.
+    Manages sensor lifecycle, frame capture, and the sensor-to-base
+    coordinate transform pipeline.
 
     Notation
     --------
     T_A_B maps frame A to frame B:  x_B = T_A_B @ x_A
+
+    Sensor pipeline
+    ---------------
+    1. sensor.capture() → ScanResult   (S frame, mm)
+    2. _scan_to_frame()                (S → B transform, mm → m)
+        T_S_B = T_E_B @ inv(T_E_S)
+        pts_B = T_S_B @ (pts_S / 1000)
+    3. Frame                           (B frame, m)
 
     Attributes
     ----------
@@ -73,7 +111,7 @@ class MMS:
     ------------------------------------
     T_O_B(theta)      Object → Base at turntable angle theta (rad)
     T_B_O(theta)      Base → Object at turntable angle theta (rad)
-    T_S_B(T_E_B)      Sensor → Base  (uses self.sensor.T_E_S)
+    T_S_B(T_E_B)      Sensor → Base  (uses self._T_E_S loaded from yaml)
 
     Example
     -------
@@ -87,12 +125,26 @@ class MMS:
 
     def __init__(self, cfg: MMSConfig) -> None:
         self.cfg = cfg
+
+        # Sensor
         if cfg.phoxi is not None:
-            self.sensor: OrbbecClient | PhoxiClient = PhoxiClient(cfg.phoxi)
+            self.sensor: OrbbecClient | PhoxiClient | ArtecClient = PhoxiClient(cfg.phoxi)
+        elif cfg.artec is not None:
+            self.sensor = ArtecClient(cfg.artec)
         else:
             self.sensor = OrbbecClient(cfg.orbbec)
+
+        # T_E_S: EE → Sensor transform (hand-eye calibration result)
+        if cfg.sensor_frames_yaml is not None:
+            self._T_E_S: Optional[np.ndarray] = load_transform(
+                cfg.sensor_frames_yaml, cfg.T_E_S_key
+            )
+        else:
+            self._T_E_S = None
+
         self.stream: Stream = Stream(max_size=cfg.stream_max_size)
 
+        # World transform (B <-> O)
         if cfg.object_frame_yaml is not None:
             T_B_O0 = load_transform(cfg.object_frame_yaml, "T_B_O0")
             self.world_transform: Optional[WorldTransformConfig] = WorldTransformConfig(T_B_O0)
@@ -116,6 +168,67 @@ class MMS:
     def __exit__(self, *_) -> None:
         self.shutdown()
 
+    # ── sensor → frame conversion ──────────────────────────────────────────
+
+    def _scan_to_frame(
+        self,
+        scan: ScanResult,
+        ee_pose_mat_B: np.ndarray,
+    ) -> Frame:
+        """
+        Convert a ScanResult (sensor frame, mm) to a Frame (base frame, m).
+
+        Transform chain:
+            T_S_B = T_E_B @ inv(T_E_S)
+            pts_B = T_S_B @ (pts_S_mm / 1000)
+
+        If T_E_S is not configured (sensor_frames_yaml not set),
+        points are converted mm→m but remain in the sensor frame (no rotation).
+        A warning is printed in this case.
+
+        Parameters
+        ----------
+        scan : ScanResult
+            Raw capture from sensor.capture() — S frame, mm.
+        ee_pose_mat_B : (4,4) np.ndarray
+            T_E_B — EE → Base transform at capture time (robot FK).
+            Pass np.eye(4) when the robot is not connected.
+
+        Returns
+        -------
+        Frame
+            Points in base (B) frame, meters.
+        """
+        if self._T_E_S is not None:
+            T_S_B = compute_T_S_B(ee_pose_mat_B, self._T_E_S)
+        else:
+            print("[MMS] ⚠ T_E_S 미설정 (sensor_frames_yaml 없음). "
+                  "포인트가 센서(S) 프레임 기준으로 유지됩니다.")
+            T_S_B = ee_pose_mat_B  # identity T_E_S assumed
+
+        pts_m = (scan.points / 1000.0).astype(np.float64)
+        pts_B = transform_points(T_S_B, pts_m).astype(np.float32)
+
+        normals_B: Optional[np.ndarray] = None
+        if scan.normals is not None:
+            normals_B = transform_normals(
+                T_S_B, scan.normals.astype(np.float64)
+            ).astype(np.float32)
+
+        depth_m = scan.depth / 1000.0 if scan.depth is not None else None
+
+        return Frame(
+            sensor_type=scan.sensor_type,
+            img=scan.img,
+            depth=depth_m,
+            points=pts_B,
+            normals=normals_B,
+            colors=scan.colors,
+            frame_id=scan.frame_id,
+            timestamp=scan.timestamp,
+            ee_pose_mat_B=ee_pose_mat_B.astype(np.float64),
+        )
+
     # ── capture ────────────────────────────────────────────────────────────
 
     def capture_frames(
@@ -126,6 +239,9 @@ class MMS:
         """
         Capture n frames from the sensor and append them to self.stream.
 
+        Each ScanResult (S frame, mm) is converted to a Frame (B frame, m)
+        via _scan_to_frame() using T_E_S loaded from sensor_frames_yaml.
+
         Frame pacing is controlled by sensor config target_interval_s:
         after each capture, sleeps max(0, target - elapsed) so that
         successive frames are spaced target_interval_s apart.
@@ -135,7 +251,7 @@ class MMS:
         n : int
             Number of frames to capture.
         ee_pose_fn : () -> (4,4) np.ndarray, optional
-            Callable that returns the current T_E^B from the robot.
+            Callable that returns the current T_E_B from the robot.
             If None, identity matrix is used (robot not connected).
 
         Returns
@@ -155,18 +271,19 @@ class MMS:
             )
 
             t_start = time.perf_counter()
+            frame_id = len(self.stream) + len(batch)
 
-            frame = self.sensor.capture_frame(
-                ee_pose_mat_B=ee_pose_mat_B,
-                frame_id=len(self.stream) + len(batch),
+            scan: Optional[ScanResult] = self.sensor.capture(
+                frame_id=frame_id,
                 timestamp=time.time(),
             )
 
             elapsed = time.perf_counter() - t_start
 
-            if frame is None:
+            if scan is None:
                 print(f"  [{i:02d}] 캡처 실패 (None) — 스킵  elapsed={elapsed:.3f}s")
             else:
+                frame = self._scan_to_frame(scan, ee_pose_mat_B)
                 print(f"  [{i:02d}] frame_id={frame.frame_id}  "
                       f"pts={len(frame.points):>8,}  "
                       f"img={'있음' if frame.img is not None else '없음'}  "
@@ -224,10 +341,10 @@ class MMS:
         normal_max_nn : int, default=30
         enable_normals : bool or None, default=None
             Normal estimation 실행 여부.
-            None이면 cfg.orbbec가 설정된 경우 자동으로 True, 아니면 False.
+            None이면 True로 동작.
         """
         if enable_normals is None:
-            enable_normals = self.sensor is not None
+            enable_normals = True
 
         targets = frames if frames is not None else self.stream
 
@@ -318,23 +435,25 @@ class MMS:
             )
         return self.world_transform.T_B_O(theta)
 
-    def T_S_B(self, T_E_B: np.ndarray, T_E_S: Optional[np.ndarray] = None) -> np.ndarray:
+    def T_S_B(self, T_E_B: np.ndarray) -> np.ndarray:
         """
         Sensor → Base transform.
 
         T_S_B = T_E_B @ inv(T_E_S)
         x_B   = mms.T_S_B(T_E_B) @ x_S
 
+        Uses self._T_E_S loaded from MMSConfig.sensor_frames_yaml.
+
         Parameters
         ----------
         T_E_B : (4,4) np.ndarray
             EE → Base transform at capture time (from robot FK).
-        T_E_S : (4,4) np.ndarray, optional
-            EE → Sensor transform. If None, uses self.sensor.T_E_S.
         """
-        if T_E_S is None:
-            T_E_S = self.sensor.T_E_S
-        return compute_T_S_B(T_E_B, T_E_S)
+        if self._T_E_S is None:
+            raise RuntimeError(
+                "T_E_S not configured. Provide sensor_frames_yaml and T_E_S_key in MMSConfig."
+            )
+        return compute_T_S_B(T_E_B, self._T_E_S)
 
     # ── visualization / diagnostics ────────────────────────────────────────
 
@@ -409,9 +528,9 @@ class MMS:
             print("[MMS] world_transform 미설정 — Object 축 표시 생략.")
 
         # ── Sensor(S) 좌표계 (첫 프레임 기준) ────────────────────────────
-        if frames_list:
+        if frames_list and self._T_E_S is not None:
             T_E_B_0 = frames_list[0].ee_pose_mat_B
-            T_S_B_0 = compute_T_S_B(T_E_B_0, self.sensor.T_E_S)
+            T_S_B_0 = compute_T_S_B(T_E_B_0, self._T_E_S)
             sensor_axes = o3d.geometry.TriangleMesh.create_coordinate_frame(
                 size=frame_size * 0.6
             )

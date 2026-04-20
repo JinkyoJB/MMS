@@ -20,7 +20,15 @@
       "Bash(grep -v \"^$\")",
       "Read(//c/Program Files/Photoneo/3DMeshing/2.3.0/API/**)",
       "Bash(pip show:*)",
-      "Bash(pip list:*)"
+      "Bash(pip list:*)",
+      "Bash(where.exe cmake:*)",
+      "Read(//c/Program Files/CMake/bin/**)",
+      "Read(//c/Program Files \\(x86\\)/CMake/bin/**)",
+      "Read(//c/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/**)",
+      "Read(//c/Program Files/Microsoft Visual Studio/2022/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/**)",
+      "Bash(\"C:/Program Files/Microsoft Visual Studio/18/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --help)",
+      "Bash('C:/Program Files/Microsoft Visual Studio/18/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe' -B build -G 'Visual Studio 18 2026' -A x64)",
+      "Bash(cd C:/Users/user/workspace/MMS/mms/sensor rm phoxi_client.py phoxi_instant_meshing.py phoxi_meshing.py orbbec_client.py camera.py echo \"done\" find . -maxdepth 1 -name \"*.py\")"
     ]
   }
 }
