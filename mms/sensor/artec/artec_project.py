@@ -494,7 +494,11 @@ def visualize_project_entries(
 # 검증
 # ==============================================================
 
-def verify_artec_project(artec_client, visualize: bool = True) -> bool:
+def verify_artec_project(
+    artec_client,
+    visualize: bool = True,
+    scan_model=None,
+) -> bool:
     """
     artec_project_py 바인딩 및 ProjectManager / ProjectHandle 검증.
 
@@ -503,7 +507,7 @@ def verify_artec_project(artec_client, visualize: bool = True) -> bool:
     1. 모듈 로드 확인
     2. 함수 존재 여부
     3. project_max_version()
-    4. 스캔 캡처 → ModelHandle (artec_base)
+    4. 스캔 모델 준비 (scan_model 인자 우선, 없으면 capture_to_model)
     5. ProjectManager.create(tmp_path) — 새 프로젝트
     6. entry_count() == 0 (빈 프로젝트)
     7. project_save() — 스캔 데이터 저장
@@ -513,6 +517,14 @@ def verify_artec_project(artec_client, visualize: bool = True) -> bool:
     11. CompositeMeshHandle 또는 ScanHandle 데이터 shape 검증
     12. visualize_project_entries() (선택)
     13. 임시 파일 정리
+
+    Parameters
+    ----------
+    artec_client : ArtecClient
+    visualize : bool
+    scan_model : artec_base.ModelHandle | None
+        SDK scanning session으로 생성된 ModelHandle 우선 사용.
+        None이면 capture_to_model()로 캡처 (UUID 없어 save 실패 가능).
 
     Returns
     -------
@@ -564,17 +576,27 @@ def verify_artec_project(artec_client, visualize: bool = True) -> bool:
     except Exception as e:
         chk("project_max_version() 호출", False, str(e))
 
-    # ── 4. 스캔 캡처 ─────────────────────────────────────────
-    scan_model = None
-    for tex in (False, True):
-        try:
-            scan_model = artec_base.capture_to_model(artec_client, capture_texture=tex)
-            if scan_model is not None:
-                chk(f"capture_to_model(texture={tex})", True,
-                    f"scans={scan_model.scan_count()}")
-                break
-        except Exception as e:
-            chk(f"capture_to_model(texture={tex})", False, str(e))
+    # ── 4. 스캔 모델 준비 ────────────────────────────────────
+    # scan_model이 전달되면 재사용 (SDK scanning session 결과 → UUID 보유).
+    # 없으면 capture_to_model()로 캡처 (UUID 미설정으로 save 실패 가능).
+    if scan_model is not None:
+        total_frames = sum(
+            scan_model.get_scan(i).frame_count()
+            for i in range(scan_model.scan_count())
+        )
+        chk("scan_model 수신", True,
+            f"scans={scan_model.scan_count()}  total_frames={total_frames}")
+    else:
+        scan_model = None
+        for tex in (False, True):
+            try:
+                scan_model = artec_base.capture_to_model(artec_client, capture_texture=tex)
+                if scan_model is not None:
+                    chk(f"capture_to_model(texture={tex})", True,
+                        f"scans={scan_model.scan_count()}")
+                    break
+            except Exception as e:
+                chk(f"capture_to_model(texture={tex})", False, str(e))
 
     if scan_model is None:
         print("    ※ 스캔 데이터 없음 — 저장/로드 테스트 건너뜀")

@@ -278,8 +278,8 @@ def capture_frame_handle(
     """
     m = _load()
     tex      = artec_client.cfg.capture_texture if capture_texture is None else capture_texture
-    sc_cap   = artec_client._scanner.scanner_capsule()
-    proc_cap = artec_client._scanner.processor_capsule()
+    sc_cap   = artec_client.scanner_capsule()
+    proc_cap = artec_client.processor_capsule()
 
     t0  = time.perf_counter()
     cap = m.capture_frame_mesh(sc_cap, proc_cap, tex)
@@ -316,8 +316,8 @@ def capture_to_model(
     """
     m = _load()
     tex      = artec_client.cfg.capture_texture if capture_texture is None else capture_texture
-    sc_cap   = artec_client._scanner.scanner_capsule()
-    proc_cap = artec_client._scanner.processor_capsule()
+    sc_cap   = artec_client.scanner_capsule()
+    proc_cap = artec_client.processor_capsule()
 
     t0  = time.perf_counter()
     cap = m.capture_to_model(sc_cap, proc_cap, tex)

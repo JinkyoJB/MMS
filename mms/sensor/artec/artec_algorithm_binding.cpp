@@ -81,21 +81,29 @@ static py::capsule make_model_cap(base::IModel* raw)
         [](void* p){ static_cast<base::IModel*>(p)->release(); });
 }
 
-// Core: 알고리즘 실행 (in == out, GIL 해제)
+// Core: 알고리즘 실행 (in != out, GIL 해제)
 // algo_raw: createXxx 가 반환한 IAlgorithm* (refcount=1 추정)
-// 반환: 동일 IModel* 에 addRef 한 새 capsule
+// 반환: 알고리즘 결과가 담긴 새 out IModel* capsule
+//
+// AlgorithmWorkset 주의사항:
+//   "Output model is empty in the most cases."
+//   ws.in == ws.out 로 in-place 실행 시 ErrorCode_ArgumentInvalid 발생.
+//   ws.out 은 항상 별도의 빈 모델이어야 한다.
 static py::capsule run_algo(algo::IAlgorithm* algo_raw, py::capsule model_cap)
 {
-    // TRef 가 algo_raw 의 lifetime 관리
     base::TRef<algo::IAlgorithm> algo_ref;
     algo_ref.attach(algo_raw);
 
-    auto* model = get_model(model_cap);
+    auto* model_in = get_model(model_cap);
+
+    // 별도의 빈 출력 모델 생성
+    base::TRef<base::IModel> out_model;
+    check_ec(base::createModel(&out_model), "createModel(out)");
 
     base::AlgorithmWorkset ws{};
-    ws.in          = model;
-    ws.out         = model;   // in-place
-    ws.progress    = nullptr;
+    ws.in           = model_in;
+    ws.out          = static_cast<base::IModel*>(out_model);
+    ws.progress     = nullptr;
     ws.cancellation = nullptr;
     ws.threadsCount = 0;
 
@@ -104,9 +112,9 @@ static py::capsule run_algo(algo::IAlgorithm* algo_raw, py::capsule model_cap)
         check_ec(base::executeJob(algo_raw, &ws), "executeJob");
     }
 
-    // 반환 capsule 용 새 ref
-    model->addRef();
-    return make_model_cap(model);
+    base::IModel* out_raw = static_cast<base::IModel*>(out_model);
+    out_raw->addRef();
+    return make_model_cap(out_raw);
 }
 
 // ============================================================

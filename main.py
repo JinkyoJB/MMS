@@ -2,7 +2,7 @@ import msvcrt
 import numpy as np
 from mms import PROJECT_ROOT
 from mms.system import MMS, MMSConfig
-from mms.sensor.phoxi_client import PhoxiConfig
+from mms.sensor.phoxi.phoxi_client import PhoxiConfig
 from mms.robot.xarm_interface import XArmInterface
 from mms.utils.diagnostics import print_pcd_stats
 from mms.utils.visualization import visualize, visualize_hand_eye_calibration

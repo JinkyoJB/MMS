@@ -442,6 +442,7 @@ def verify_artec_scanning(
     artec_client,
     visualize: bool = True,
     record_seconds: float = 5.0,
+    scan_model_out: Optional[list] = None,
 ) -> bool:
     """
     artec_scanning_py 바인딩 전체를 검증한다.
@@ -454,6 +455,9 @@ def verify_artec_scanning(
         True → 스캔 결과를 Open3D로 시각화.
     record_seconds : float
         Record 모드 지속 시간(초).
+    scan_model_out : list | None
+        비어있는 list를 전달하면 스캔 결과 ModelHandle을 [0]에 저장한다.
+        algorithm / project 테스트에서 다중 프레임 모델을 재사용할 때 사용.
 
     Returns
     -------
@@ -679,6 +683,9 @@ def verify_artec_scanning(
             visualize_scan_model(model, title="Artec Scanning Result")
         except Exception as e:
             print(f"    [WARN] 시각화 실패: {e}")
+
+    if scan_model_out is not None and model is not None:
+        scan_model_out.append(model)
 
     passed = len(failures) == 0
     status = "전체 통과" if passed else f"{len(failures)}개 실패: {failures}"

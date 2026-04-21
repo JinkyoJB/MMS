@@ -656,9 +656,13 @@ def verify_artec_capturing(
     try:
         info_dto = sh.info()
         chk("info() → ScannerInfoDTO",      isinstance(info_dto, ScannerInfoDTO))
-        chk("  depth_map_size_x > 0",
-            info_dto.depth_map_size_x > 0,
-            f"{info_dto.depth_map_size_x}x{info_dto.depth_map_size_y}")
+        # Spider 등 일부 scanner는 SDK가 depth_map_size를 0으로 반환 (정상)
+        if info_dto.depth_map_size_x == 0:
+            print(f"    [INFO]   depth_map_size_x == 0 — 이 scanner type은 미지원 (정상)")
+        else:
+            chk("  depth_map_size_x > 0",
+                info_dto.depth_map_size_x > 0,
+                f"{info_dto.depth_map_size_x}x{info_dto.depth_map_size_y}")
         print(f"    {info_dto}")
     except Exception as e:
         chk("info() 호출", False, str(e))

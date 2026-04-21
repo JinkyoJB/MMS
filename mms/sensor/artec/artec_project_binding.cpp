@@ -224,23 +224,38 @@ static py::capsule project_load_all(py::capsule proj_cap)
 {
     auto* project = get_project(proj_cap);
 
-    // 빈 출력 모델 생성
+    // ws.in / ws.out 은 반드시 별도 빈 모델이어야 한다.
+    // (AlgorithmWorkset: "Output model is empty in the most cases."
+    //  ws.in == ws.out 이면 load executeJob 도 ErrorCode_ArgumentInvalid 발생)
+    base::TRef<base::IModel> in_model;
     base::TRef<base::IModel> out_model;
-    check_ec(base::createModel(&out_model), "createModel (for load)");
+    check_ec(base::createModel(&in_model),  "createModel (in for load)");
+    check_ec(base::createModel(&out_model), "createModel (out for load)");
 
-    // loader 설정: entryList = nullptr → 모든 엔트리 로드
+    // 프로젝트 엔트리 UUID 수집 → IArrayUuid 생성
+    // entryList = nullptr 은 ErrorCode_ArgumentInvalid 를 유발하므로
+    // 항상 UUID 배열을 명시적으로 전달해야 한다.
+    int n_entries = project->getEntryCount();
+    base::TRef<base::IArrayUuid> entry_list;
+    check_ec(base::createArrayUuid(&entry_list, n_entries), "createArrayUuid");
+    for (int i = 0; i < n_entries; ++i)
+    {
+        proj::EntryInfo info{};
+        check_ec(project->getEntry(i, &info, nullptr), "getEntry");
+        check_ec(entry_list->setElement(i, info.uuid), "setElement");
+    }
+
     proj::ProjectLoaderSettings settings{};
-    settings.entryList = nullptr;
+    settings.entryList = static_cast<base::IArrayUuid*>(entry_list);
 
     base::IJob* loader_raw = nullptr;
     check_ec(project->createLoader(&loader_raw, &settings), "createLoader");
     base::TRef<base::IJob> loader;
     loader.attach(loader_raw);
 
-    base::IModel*          mp = static_cast<base::IModel*>(out_model);
     base::AlgorithmWorkset ws{};
-    ws.in           = mp;
-    ws.out          = mp;
+    ws.in           = static_cast<base::IModel*>(in_model);
+    ws.out          = static_cast<base::IModel*>(out_model);
     ws.progress     = nullptr;
     ws.cancellation = nullptr;
     ws.threadsCount = 0;
@@ -250,9 +265,10 @@ static py::capsule project_load_all(py::capsule proj_cap)
         check_ec(base::executeJob(loader_raw, &ws), "executeJob (load)");
     }
 
-    // capsule 용 addRef (out_model TRef가 함수 끝에서 release → net refcount 유지)
-    mp->addRef();
-    return make_model_cap(mp);
+    // 로드 결과는 ws.out 에 담김
+    base::IModel* out_raw = static_cast<base::IModel*>(out_model);
+    out_raw->addRef();
+    return make_model_cap(out_raw);
 }
 
 // ============================================================
@@ -281,9 +297,15 @@ static void project_save(
     base::TRef<base::IJob> saver;
     saver.attach(saver_raw);
 
+    // ws.out 은 save 결과 출력용이 아니므로 별도 빈 모델로 설정.
+    // AlgorithmWorkset: "Output model is empty in the most cases."
+    // ws.in == ws.out (동일 모델) 이면 ErrorCode_ArgumentInvalid 발생.
+    base::TRef<base::IModel> out_model;
+    check_ec(base::createModel(&out_model), "createModel(out for save)");
+
     base::AlgorithmWorkset ws{};
     ws.in           = model;
-    ws.out          = model;
+    ws.out          = static_cast<base::IModel*>(out_model);
     ws.progress     = nullptr;
     ws.cancellation = nullptr;
     ws.threadsCount = 0;

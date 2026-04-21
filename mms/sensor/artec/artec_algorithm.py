@@ -763,7 +763,11 @@ def visualize_model_result(model_handle, title: str = "Artec Algorithm Result") 
 # Verify
 # ==============================================================
 
-def verify_artec_algorithm(artec_client, visualize: bool = True) -> bool:
+def verify_artec_algorithm(
+    artec_client,
+    visualize: bool = True,
+    scan_model=None,
+) -> bool:
     """
     artec_algorithm_py 바인딩 및 Algorithms 클래스 검증.
 
@@ -774,11 +778,19 @@ def verify_artec_algorithm(artec_client, visualize: bool = True) -> bool:
     3. get_scanner_type() 호출
     4. 설정 초기화 함수 검증 (init_*)
     5. SettingsDTO.default() 검증
-    6. 스캔 캡처 (artec_base.capture_to_model)
+    6. 스캔 모델 준비 (scan_model 인자 우선, 없으면 capture_to_model)
     7. Algorithms.serial_registration()
     8. Algorithms.outliers_removal()
     9. Algorithms.fast_fusion()  → final mesh 확인
     10. visualize_model_result() (선택)
+
+    Parameters
+    ----------
+    artec_client : ArtecClient
+    visualize : bool
+    scan_model : artec_base.ModelHandle | None
+        다중 프레임이 있는 ModelHandle. None이면 capture_to_model()로 캡처.
+        serial_registration은 프레임 수 >= 2 필요.
 
     Returns
     -------
@@ -860,25 +872,44 @@ def verify_artec_algorithm(artec_client, visualize: bool = True) -> bool:
         except Exception as e:
             chk(f"{name}()", False, str(e))
 
-    # ── 6. 스캔 캡처 ─────────────────────────────────────────
+    # ── 6. 스캔 모델 준비 ────────────────────────────────────
+    # scan_model이 전달되면 재사용 (다중 프레임 필요).
+    # 없으면 capture_to_model()로 1-frame 캡처 (registration 불가 → 건너뜀).
     model = None
-    for tex in (False, True):
-        try:
-            model = artec_base.capture_to_model(artec_client, capture_texture=tex)
-            if model is not None:
-                chk(f"capture_to_model(texture={tex})", True,
-                    f"scans={model.scan_count()}")
-                break
-            else:
-                chk(f"capture_to_model(texture={tex})", False, "None 반환")
-        except Exception as e:
-            chk(f"capture_to_model(texture={tex})", False, str(e))
+    if scan_model is not None:
+        model = scan_model
+        total_frames = sum(
+            model.get_scan(i).frame_count()
+            for i in range(model.scan_count())
+        )
+        chk("scan_model 수신", True,
+            f"scans={model.scan_count()}  total_frames={total_frames}")
+    else:
+        for tex in (False, True):
+            try:
+                model = artec_base.capture_to_model(artec_client, capture_texture=tex)
+                if model is not None:
+                    chk(f"capture_to_model(texture={tex})", True,
+                        f"scans={model.scan_count()}")
+                    break
+                else:
+                    chk(f"capture_to_model(texture={tex})", False, "None 반환")
+            except Exception as e:
+                chk(f"capture_to_model(texture={tex})", False, str(e))
 
     if model is None:
         print("    ※ 스캔 데이터 없음 — 알고리즘 단계 건너뜀")
-        ok = len(failed) == 0
         _print_summary(passed, failed)
-        return ok
+        return len(failed) == 0
+
+    total_frames = sum(
+        model.get_scan(i).frame_count()
+        for i in range(model.scan_count())
+    )
+    if total_frames < 2:
+        print(f"    ※ frame 수 부족 ({total_frames}개) — serial_registration 건너뜀 (최소 2개 필요)")
+        _print_summary(passed, failed)
+        return len(failed) == 0
 
     # ── 7. serial_registration ────────────────────────────────
     try:
