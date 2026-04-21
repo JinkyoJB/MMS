@@ -6,7 +6,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from mms import PROJECT_ROOT
 from mms.system import MMS, MMSConfig
-from mms.sensor.phoxi_client import PhoxiConfig
+from mms.sensor.phoxi.phoxi_client import PhoxiConfig
 from mms.robot.xarm_interface import XArmInterface
 from mms.utils.diagnostics import print_pcd_stats
 from mms.utils.visualization import visualize, visualize_hand_eye_calibration

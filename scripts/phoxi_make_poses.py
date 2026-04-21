@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/scan_calib_poses.py
+scripts/phoxi_make_poses.py
 
 후보 EE 포즈로 로봇을 이동시켜 PhoXi로 마커 가시성을 자동 검증한다.
 통과 조건: Photoneo RecognizeMarkers 성공 (T_M_S 반환)
@@ -10,7 +10,7 @@ scripts/scan_calib_poses.py
 
 Usage
 -----
-  python scripts/scan_calib_poses.py
+  python scripts/phoxi_make_poses.py
 
 설정 (아래 CONFIG 섹션 참고)
 -----------------------------
@@ -34,7 +34,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from mms.robot.xarm_interface import XArmInterface
-from mms.sensor.phoxi_client import PhoxiClient, PhoxiConfig
+from mms.sensor.phoxi.phoxi_client import PhoxiClient, PhoxiConfig
 
 # ==============================================================================
 # CONFIG

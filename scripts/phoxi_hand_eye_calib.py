@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import sys
+
 import time
 from pathlib import Path
 
@@ -33,9 +34,9 @@ from scipy.spatial.transform import Rotation as ScipyR
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from mms.calibration.hand_eye_calibrator import HandEyeCalibrator
+from mms.utils.calibration.hand_eye_calibrator import HandEyeCalibrator
 from mms.robot.xarm_interface import XArmInterface
-from mms.sensor.phoxi_client import PhoxiClient, PhoxiConfig
+from mms.sensor.phoxi.phoxi_client import PhoxiClient, PhoxiConfig
 
 # A4-REV-23A board 좌표 파일 (마커 프레임, mm)
 _POSITIONS_FILE = Path(
@@ -103,11 +104,9 @@ def _draw_marker_detections(
 
 ROBOT_IP       = "192.168.1.210"
 POSES_YAML     = _PROJECT_ROOT / "config" / "calibration_poses.yaml"
-SENSOR_YAML    = str(_PROJECT_ROOT / "config" / "sensor_frames.yaml")
-OUTPUT_YAML    = _PROJECT_ROOT / "config" / "sensor_frames.yaml"
-OUTPUT_KEY     = "T_E_S_phoxi"
+OUTPUT_YAML    = _PROJECT_ROOT / "config" / "calibration" / "hand_eye_phoxi.yaml"
 MOVE_SPEED_DEG = 10     # deg/s
-SETTLE_TIME_S  = 2.0    # 이동 후 진동 정착 대기 (s)
+SETTLE_TIME_S  = 3.0    # 이동 후 진동 정착 대기 (s)
 MIN_SAMPLES    = 3
 DEBUG_DIR      = _PROJECT_ROOT / "debug_calib"
 
@@ -134,15 +133,13 @@ def main() -> None:
     print("  마커 감지: Photoneo RecognizeMarkers (GenTL 내장)")
     print("=" * 60)
     print(f"  포즈 파일  : {POSES_YAML}  ({len(pose_list)}개)")
-    print(f"  출력 파일  : {OUTPUT_YAML}  key={OUTPUT_KEY}")
+    print(f"  출력 파일  : {OUTPUT_YAML}")
     print(f"  이동 속도  : {MOVE_SPEED_DEG} deg/s")
     print(f"  정착 대기  : {SETTLE_TIME_S} s")
 
     # ── 초기화 ──────────────────────────────────────────────────────
     robot = XArmInterface(ip=ROBOT_IP)
     sensor = PhoxiClient(PhoxiConfig(
-        sensor_frames_yaml=SENSOR_YAML,
-        T_E_S_key=OUTPUT_KEY,
         serial_number="SEA-023",
         trigger_timeout_s=15.0,
     ))
@@ -185,6 +182,13 @@ def main() -> None:
                     failed.append(name)
                     continue
                 joints_deg = ik_joints[:7]
+                # IK 해를 현재 관절값 기준 ±180° 이내로 정규화
+                _, cur_joints = robot.arm.get_servo_angle(is_radian=False)
+                cur_joints = cur_joints[:7]
+                joints_deg = [
+                    j - 360 * round((j - c) / 360)
+                    for j, c in zip(joints_deg, cur_joints)
+                ]
                 print(f"  IK  joints={[round(j,1) for j in joints_deg]}")
 
             else:
@@ -244,10 +248,10 @@ def main() -> None:
 
             # 디버그: board 마커 위치를 픽셀로 매핑해 초록 원으로 표시
             if (sensor._last_intensity is not None
-                    and sensor._last_marker_pts is not None
+                    and sensor._last_organized_pts is not None
                     and board_pts is not None):
                 vis = _draw_marker_detections(
-                    sensor._last_intensity, sensor._last_marker_pts, board_pts
+                    sensor._last_intensity, sensor._last_organized_pts, board_pts
                 )
             elif sensor._last_intensity is not None:
                 vis = cv2.cvtColor(sensor._last_intensity, cv2.COLOR_GRAY2BGR)
@@ -279,8 +283,12 @@ def main() -> None:
 
     print(f"\n캘리브레이션 실행 ({calibrator.n_samples} 샘플)...")
     calibrator.calibrate()
-    calibrator.save_yaml(OUTPUT_YAML, key=OUTPUT_KEY)
-    print("\n완료. config/sensor_frames.yaml 업데이트됨.")
+    calibrator.save_yaml(
+        OUTPUT_YAML,
+        sensor="phoxi_m",
+        method="photoneo_a4rev23a",
+    )
+    print(f"\n완료. {OUTPUT_YAML} 저장됨.")
 
 
 if __name__ == "__main__":

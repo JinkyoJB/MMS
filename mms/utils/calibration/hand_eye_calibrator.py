@@ -202,24 +202,41 @@ class HandEyeCalibrator:
         return self._T_E_S
 
     def _compute_residuals(self, T_E_S: np.ndarray) -> tuple[float, float]:
-        """AX=XB 잔차 (mean_t_m, mean_r_deg)."""
+        """
+        T_B_M 일관성 잔차 (mean_t_m, mean_r_deg).
+
+        올바른 체인: T(M→B) = T_E_B @ inv(T_E_S) @ T_M_S
+        마커가 고정돼 있으면 모든 포즈에서 T_B_M 이 동일해야 한다.
+        """
         if self.n_samples < 2:
             return np.inf, np.inf
+        T_S_E = np.linalg.inv(T_E_S)
         errs_t, errs_r = [], []
         for i in range(self.n_samples - 1):
-            A = np.linalg.inv(self._T_E_B_list[i]) @ self._T_E_B_list[i + 1]
-            B = self._T_M_S_list[i + 1] @ np.linalg.inv(self._T_M_S_list[i])
-            diff = np.linalg.inv(A @ T_E_S) @ (T_E_S @ B)
+            T_B_M_i  = self._T_E_B_list[i]     @ T_S_E @ self._T_M_S_list[i]
+            T_B_M_i1 = self._T_E_B_list[i + 1] @ T_S_E @ self._T_M_S_list[i + 1]
+            diff = np.linalg.inv(T_B_M_i1) @ T_B_M_i
             errs_t.append(np.linalg.norm(diff[:3, 3]))
             angle = np.arccos(np.clip((np.trace(diff[:3, :3]) - 1) / 2, -1.0, 1.0))
             errs_r.append(np.degrees(angle))
         return float(np.mean(errs_t)), float(np.mean(errs_r))
 
-    def save_yaml(self, yaml_path: Path, key: str = "T_E_S_phoxi") -> None:
+    def save_yaml(
+        self,
+        yaml_path: Path,
+        sensor: str = "phoxi_m",
+        method: str = "photoneo_a4rev23a",
+    ) -> None:
         """
-        T_E_S를 config/sensor_frames.yaml 에 저장.
+        T_E_S를 YAML로 저장 (config/calibration/hand_eye_<sensor>.yaml 권장).
+
+        형식:
+          sensor, date, method, n_poses, T_E_C: {translation, rotation_quat, matrix}
+
         translation 단위: meters.
         """
+        import datetime
+
         if self._T_E_S is None:
             raise RuntimeError("calibrate()를 먼저 호출하세요.")
         if np.linalg.norm(self._T_E_S[:3, 3]) * 1000 < 1.0:
@@ -227,18 +244,27 @@ class HandEyeCalibrator:
 
         t = self._T_E_S[:3, 3]
         q = _rot_to_quat(self._T_E_S[:3, :3])
+        mat = self._T_E_S.tolist()
 
         yaml_path = Path(yaml_path)
-        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) if yaml_path.exists() else {}
-        data[key] = {
-            "translation":    [float(v) for v in t],
-            "rotation_quat":  [float(v) for v in q],
+        yaml_path.parent.mkdir(parents=True, exist_ok=True)
+
+        data = {
+            "sensor": sensor,
+            "date": datetime.date.today().isoformat(),
+            "method": method,
+            "n_poses": self.n_samples,
+            "T_E_C": {
+                "translation":   [float(v) for v in t],
+                "rotation_quat": [float(v) for v in q],
+                "matrix":        [[float(v) for v in row] for row in mat],
+            },
         }
         yaml_path.write_text(
             yaml.dump(data, default_flow_style=None, allow_unicode=True),
             encoding="utf-8",
         )
-        log.info(f"[HandEye] 저장: {yaml_path}  key={key}")
-        print(f"[HandEye] 저장: {yaml_path}  key={key}")
+        log.info(f"[HandEye] 저장: {yaml_path}")
+        print(f"[HandEye] 저장: {yaml_path}")
         print(f"  translation (m) : {t.tolist()}")
         print(f"  rotation_quat   : {q.tolist()}")

@@ -13,8 +13,6 @@ N_CALIB_POSES = 3
 
 cfg = MMSConfig(
     phoxi=PhoxiConfig(
-        sensor_frames_yaml=str(PROJECT_ROOT / "config/sensor_frames.yaml"),
-        T_E_S_key="T_E_S_phoxi",
         serial_number=None,
         trigger_timeout_s=15.0,
         target_interval_s=1.0,
