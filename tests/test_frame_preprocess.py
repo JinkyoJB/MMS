@@ -188,7 +188,7 @@ def test_from_orbbec_sensor_type():
         rgb=rgb,
         points_xyzrgb=points_xyzrgb,
         ee_pose_mat_B=np.eye(4, dtype=np.float64),
-        T_E_S=np.eye(4, dtype=np.float64),
+        T_EC=np.eye(4, dtype=np.float64),
         frame_id=1,
         timestamp=1.0,
     )
@@ -199,13 +199,13 @@ def test_from_orbbec_sensor_type():
 
 
 def test_from_orbbec_identity_transform_preserves_points():
-    """Identity T_E^B and T_E^S → points in B == points in S."""
+    """Identity T_EB and T_EC → points in B == points in S."""
     points_xyzrgb, rgb, _, pts_S = _orbbec_inputs()
     frame = Frame.from_orbbec(
         rgb=rgb,
         points_xyzrgb=points_xyzrgb,
         ee_pose_mat_B=np.eye(4, dtype=np.float64),
-        T_E_S=np.eye(4, dtype=np.float64),
+        T_EC=np.eye(4, dtype=np.float64),
         frame_id=0,
         timestamp=0.0,
     )
@@ -215,7 +215,7 @@ def test_from_orbbec_identity_transform_preserves_points():
 
 
 def test_from_orbbec_translation_applied():
-    """T_E^B = pure translation (1,0,0), T_E^S = identity → points shifted by (1,0,0)."""
+    """T_EB = pure translation (1,0,0), T_EC = identity → points shifted by (1,0,0)."""
     N = 10
     pts_S = np.zeros((N, 3), dtype=np.float32)
     points_xyzrgb = np.hstack([pts_S, np.ones((N, 3), dtype=np.float32) * 128])
@@ -228,7 +228,7 @@ def test_from_orbbec_translation_applied():
         rgb=rgb,
         points_xyzrgb=points_xyzrgb,
         ee_pose_mat_B=T,
-        T_E_S=np.eye(4, dtype=np.float64),
+        T_EC=np.eye(4, dtype=np.float64),
         frame_id=0,
         timestamp=0.0,
     )
@@ -259,7 +259,7 @@ def test_from_orbbec_normal_map_z_invariant_under_z_rotation():
         rgb=rgb,
         points_xyzrgb=points_xyzrgb,
         ee_pose_mat_B=T_rot,
-        T_E_S=np.eye(4, dtype=np.float64),
+        T_EC=np.eye(4, dtype=np.float64),
         frame_id=0,
         timestamp=0.0,
         normal_map_S=normal_map_S,
@@ -278,7 +278,7 @@ def test_from_phoxi_raises_not_implemented():
         Frame.from_phoxi(
             raw_frame=np.zeros(10, dtype=np.float32),
             ee_pose_mat_B=np.eye(4, dtype=np.float64),
-            T_E_S=np.eye(4, dtype=np.float64),
+            T_EC=np.eye(4, dtype=np.float64),
             frame_id=0,
             timestamp=0.0,
         )

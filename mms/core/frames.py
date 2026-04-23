@@ -16,7 +16,7 @@ class Frame:
     """
     Unified sensor frame in base (B) coordinates.
 
-    Convention: T_A^B maps frame A -> frame B, i.e. x_B = T_A^B @ x_A.
+    Convention: T_AB maps frame A to frame B, i.e. x_B = T_AB @ x_A.
 
     Attributes
     ----------
@@ -39,7 +39,7 @@ class Frame:
     timestamp : float
         Monotonic or ROS time in seconds.
     ee_pose_mat_B : np.ndarray
-        (4, 4) float64, T_E^B — EE-to-Base transform at capture time.
+        (4, 4) float64, T_EB — E-to-B transform at capture time.
         x_B = ee_pose_mat_B @ x_E
 
     권장 전처리 순서: roi_crop() → voxel_downsample() → denoise() → estimate_normals()
@@ -182,7 +182,8 @@ class Frame:
         -------
         Filters self.points / self.normals / self.colors in-place.
         """
-        if len(self.points) == 0:
+        if len(self.points) < max(nb_neighbors, 2):
+            # SOR 이 빈 결과를 반환하거나 통계가 의미 없는 경우 — skip
             return
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(self.points)
@@ -190,7 +191,10 @@ class Frame:
             nb_neighbors=nb_neighbors,
             std_ratio=std_ratio,
         )
-        ind = np.asarray(ind)
+        ind = np.asarray(ind, dtype=np.int64)
+        if ind.size == 0:
+            # 모든 점이 outlier 로 판정된 경우 — 원본 유지
+            return
         self.points = self.points[ind]
         if self.normals is not None:
             self.normals = self.normals[ind]

@@ -32,7 +32,9 @@
       "mcp__claude_ai_Notion__notion-fetch",
       "Bash(python3:*)",
       "Bash(grep -v \"//\")",
-      "Bash('C:/Program Files/Microsoft Visual Studio/18/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe' --build build --config Release)"
+      "Bash('C:/Program Files/Microsoft Visual Studio/18/Professional/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe' --build build --config Release)",
+      "Bash(conda run *)",
+      "Bash(C:/Users/user/miniconda3/envs/mms-env/python.exe *)"
     ]
   }
 }

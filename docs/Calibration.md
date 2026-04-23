@@ -190,7 +190,7 @@ def solve_hand_eye(
 
 ```yaml
 # config/calibration/hand_eye_<sensor>.yaml
-sensor: femto_bolt          # femto_bolt | phoxi_m | artec_spider
+sensor: femto_bolt          # femto_bolt | phoxi_s | artec_spider
 date: "2026-04-21"
 method: charuco_pnp         # charuco_pnp | sphere_array_3d
 n_poses: 20

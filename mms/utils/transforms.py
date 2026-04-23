@@ -2,15 +2,16 @@
 #
 # 좌표계 변환 유틸리티
 #
-# Notation: T_A_B maps coordinates from frame A to frame B
-#   x_B = T_A_B @ x_A
+# Notation: T_AB maps coordinates from frame A to frame B
+#   x_B = T_AB @ x_A
 #
 # Frames
 # ------
-# B : Base frame  — xArm7 base (≡ World)
-# O : Object frame — turntable/object (z-up, origin at center)
+# B : Base frame        — xArm7 base (≡ World)
+# F : Turntable frame   — turntable rotation axis center
+# O : Object frame      — internal global frame (first-scan reference, Artec-style)
 # E : End-Effector frame — robot flange / TCP
-# S : Sensor frame — per-device camera frame (S_femto, S_phoxi)
+# C : Camera frame      — per-device camera frame (C_femto, C_phoxi)
 
 from __future__ import annotations
 
@@ -62,93 +63,184 @@ def load_transform(yaml_path: str, key: str) -> np.ndarray:
 
 # ---------- Object frame (O) ----------
 
-class WorldTransformConfig:
+class TurntableTransformConfig:
     """
-    Static world transform configuration (base <-> object frames).
+    Static turntable transform configuration (base <-> turntable frames).
 
     Notation
     --------
-    T_A_B maps coordinates from frame A to frame B:
-        x_B = T_A_B @ x_A
+    T_AB maps coordinates from frame A to frame B:
+        x_B = T_AB @ x_A
+
+    Frames: B = Base (xArm7 root), F = Turntable frame (z-up, origin at center)
 
     Parameters
     ----------
-    T_B_O0 : (4,4) np.ndarray
-        Base → Object transform at theta = 0.
-        Load with: load_transform("config/object_frame.yaml", "T_B_O0")
+    T_BF0 : (4,4) np.ndarray
+        B → F transform at theta = 0.
+        Load with: load_transform("config/calibration/turntable_frame.yaml", "T_B_F0")
     """
 
-    def __init__(self, T_B_O0: np.ndarray):
-        assert T_B_O0.shape == (4, 4)
-        self.T_B_O0 = T_B_O0
-        self._T_O_B0 = np.linalg.inv(T_B_O0)   # cached; T_B_O0 is constant
+    def __init__(self, T_BF0: np.ndarray):
+        assert T_BF0.shape == (4, 4)
+        self.T_BF0 = T_BF0
+        self._T_FB0 = np.linalg.inv(T_BF0)   # cached; T_BF0 is constant
 
-    def T_O_B(self, theta: float) -> np.ndarray:
+    def T_FB(self, theta: float) -> np.ndarray:
         """
-        Object → Base transform at turntable angle theta (rad).
+        F → B transform at turntable angle theta (rad).
 
-        x_B = T_O_B(theta) @ x_O
+        x_B = T_FB(theta) @ x_F
         """
-        T = self._T_O_B0.copy()
-        T[:3, :3] = self._T_O_B0[:3, :3] @ rotz(theta)
+        T = self._T_FB0.copy()
+        T[:3, :3] = self._T_FB0[:3, :3] @ rotz(theta)
         return T
 
-    def T_B_O(self, theta: float) -> np.ndarray:
+    def T_BF(self, theta: float) -> np.ndarray:
         """
-        Base → Object transform at turntable angle theta (rad).
+        B → F transform at turntable angle theta (rad).
 
-        x_O = T_B_O(theta) @ x_B
+        x_F = T_BF(theta) @ x_B
         """
-        return np.linalg.inv(self.T_O_B(theta))
+        return np.linalg.inv(self.T_FB(theta))
+
+
+# backwards-compatible alias used by existing callers
+WorldTransformConfig = TurntableTransformConfig
 
 
 # ---------- Sensor frame (S) / EE frame (E) ----------
 
-def compute_T_S_B(T_E_B: np.ndarray, T_E_S: np.ndarray) -> np.ndarray:
+def compute_T_CB(T_EB: np.ndarray, T_EC: np.ndarray) -> np.ndarray:
     """
-    Compute Sensor → Base transform.
+    Compute Camera → Base transform.
 
-    T_S_B = T_E_B @ inv(T_E_S)
-    x_B   = T_S_B @ x_S
+    T_CB = T_EB @ inv(T_EC)
+    x_B  = T_CB @ x_C
 
     Parameters
     ----------
-    T_E_B : (4,4) np.ndarray  —  EE → Base  (robot FK result)
-    T_E_S : (4,4) np.ndarray  —  EE → Sensor  (hand-eye calibration)
+    T_EB : (4,4) np.ndarray  —  E → B  (robot FK result)
+    T_EC : (4,4) np.ndarray  —  E → C  (hand-eye calibration)
 
     Returns
     -------
-    T_S_B : (4,4) np.ndarray  —  Sensor → Base
+    T_CB : (4,4) np.ndarray  —  C → B
     """
-    assert T_E_B.shape == (4, 4)
-    assert T_E_S.shape == (4, 4)
-    return T_E_B @ np.linalg.inv(T_E_S)
+    assert T_EB.shape == (4, 4)
+    assert T_EC.shape == (4, 4)
+    return T_EB @ np.linalg.inv(T_EC)
+
+
+# backwards-compatible alias
+compute_T_S_B = compute_T_CB
 
 
 def sensor_pose_to_ee_pose(
-    T_B_S: np.ndarray,
-    T_E_S: np.ndarray,
+    T_BC: np.ndarray,
+    T_EC: np.ndarray,
 ) -> np.ndarray:
     """
-    Compute EE target pose from sensor target pose.
+    Compute EE target pose from camera target pose.
 
-    T_B_E = T_B_S @ inv(T_E_S)
+    T_BE = T_BC @ inv(T_EC)
 
     Parameters
     ----------
-    T_B_S : (4,4) np.ndarray
-        Base → Sensor target transform.
-    T_E_S : (4,4) np.ndarray
-        EE → Sensor transform (hand-eye calibration result).
+    T_BC : (4,4) np.ndarray
+        B → C target transform.
+    T_EC : (4,4) np.ndarray
+        E → C transform (hand-eye calibration result).
 
     Returns
     -------
-    T_B_E : (4,4) np.ndarray
-        Base → EE target transform.
+    T_BE : (4,4) np.ndarray
+        B → E target transform.
     """
-    assert T_B_S.shape == (4, 4)
-    assert T_E_S.shape == (4, 4)
-    return T_B_S @ np.linalg.inv(T_E_S)
+    assert T_BC.shape == (4, 4)
+    assert T_EC.shape == (4, 4)
+    return T_BC @ np.linalg.inv(T_EC)
+
+
+# ---------- O–C 체인 (NBV ↔ Hardware 인터페이스) ----------
+
+def compute_T_CO(
+    theta: float,
+    T_EB: np.ndarray,
+    T_OF: np.ndarray,
+    T_EC: np.ndarray,
+    tt: TurntableTransformConfig,
+) -> np.ndarray:
+    """
+    Compute camera pose in object frame: T_CO (C → O).
+
+    Chain: C → E → B → F → O
+    T_CO = inv(T_OF) @ inv(T_FB(θ)) @ T_EB @ inv(T_EC)
+
+    x_O = T_CO @ x_C
+    T_CO[:3, 3] = camera origin expressed in O frame (NBV input).
+
+    Parameters
+    ----------
+    theta : float
+        Turntable angle (rad).
+    T_EB : (4,4) np.ndarray
+        E → B transform from robot FK.
+    T_OF : (4,4) np.ndarray
+        O → F transform (fixed after first-scan initialisation).
+        Use np.eye(4) when O ≡ F at θ = 0.
+    T_EC : (4,4) np.ndarray
+        E → C transform (hand-eye calibration result).
+    tt : TurntableTransformConfig
+        Provides T_FB(theta).
+
+    Returns
+    -------
+    T_CO : (4,4) np.ndarray  —  C → O
+    """
+    T_FO = np.linalg.inv(T_OF)
+    T_BF = np.linalg.inv(tt.T_FB(theta))
+    T_CE = np.linalg.inv(T_EC)
+    return T_FO @ T_BF @ T_EB @ T_CE
+
+
+def solve_T_EB(
+    theta: float,
+    T_CO_des: np.ndarray,
+    T_OF: np.ndarray,
+    T_EC: np.ndarray,
+    tt: TurntableTransformConfig,
+) -> np.ndarray:
+    """
+    Solve for robot target T_EB given a desired camera pose T_CO_des.
+
+    Inverts the T_CO chain:
+    T_EB = T_FB(θ) @ T_OF @ T_CO_des @ T_EC
+
+    Derivation:
+        T_CO = inv(T_OF) @ inv(T_FB) @ T_EB @ inv(T_EC)
+        T_EB = inv(inv(T_OF) @ inv(T_FB)) @ T_CO @ T_EC
+             = T_FB @ T_OF @ T_CO @ T_EC
+
+    Parameters
+    ----------
+    theta : float
+        Turntable angle (rad).
+    T_CO_des : (4,4) np.ndarray
+        Desired camera pose in O frame (C → O).
+        Produced by the NBV layer.
+    T_OF : (4,4) np.ndarray
+        O → F transform (fixed after first-scan initialisation).
+    T_EC : (4,4) np.ndarray
+        E → C transform (hand-eye calibration result).
+    tt : TurntableTransformConfig
+        Provides T_FB(theta).
+
+    Returns
+    -------
+    T_EB : (4,4) np.ndarray  —  E → B  (robot FK target pose)
+    """
+    return tt.T_FB(theta) @ T_OF @ T_CO_des @ T_EC
 
 
 # ---------- 포즈/점/법선 유틸 ----------

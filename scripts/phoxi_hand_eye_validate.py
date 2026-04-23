@@ -9,11 +9,11 @@ Hand-Eye 캘리브레이션 결과 검증 스크립트 (PhoXi).
 캘리브레이션이 정확하면, 고정된 마커 보드를 여러 로봇 자세에서 촬영했을 때
 Base 프레임 기준 마커 포즈 T_B_M(i) 가 모든 i에서 일정해야 한다.
 
-  T_B_M(i) = T_B_E(i) · T_E_S · inv(T_M_S(i))
+  T_MB(i) = T_EB(i) · T_CE · T_MC(i)   (M→C→E→B)
 
 일관성 오차(Consistency Error):
-  t_err : T_B_M translation 의 std dev (mm)  — 목표 < 1.0 mm
-  r_err : T_B_M rotation 의 angle std dev (deg)
+  t_err : T_MB translation 의 std dev (mm)  — 목표 < 1.0 mm
+  r_err : T_MB rotation 의 angle std dev (deg)
 
 Usage
 -----
@@ -51,7 +51,7 @@ CALIB_YAML  = _PROJECT_ROOT / "config" / "calibration" / "hand_eye_phoxi.yaml"
 # helpers
 # ==============================================================================
 
-def _load_T_E_S(yaml_path: Path) -> np.ndarray:
+def _load_T_EC(yaml_path: Path) -> np.ndarray:
     data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     mat = data["T_E_C"]["matrix"]
     T = np.array(mat, dtype=np.float64)
@@ -103,7 +103,7 @@ def main() -> None:
         print("  먼저 scripts/phoxi_hand_eye_calib.py 를 실행하세요.")
         return
 
-    T_E_S = _load_T_E_S(CALIB_YAML)
+    T_EC = _load_T_EC(CALIB_YAML)
     calib_meta = yaml.safe_load(CALIB_YAML.read_text(encoding="utf-8"))
     print("=" * 60)
     print("  Hand-Eye Calibration Validator  (PhoXi)")
@@ -113,14 +113,14 @@ def main() -> None:
           f"date={calib_meta.get('date')}  "
           f"method={calib_meta.get('method')}  "
           f"n_poses={calib_meta.get('n_poses')}")
-    print(f"  T_E_S translation : {(T_E_S[:3,3]*1000).round(2).tolist()} mm")
+    print(f"  T_EC translation : {(T_EC[:3,3]*1000).round(2).tolist()} mm")
     print()
 
     robot  = XArmInterface(ip=ROBOT_IP)
     sensor = PhoxiClient(PhoxiConfig(serial_number="SEA-023", trigger_timeout_s=15.0))
     sensor.initialize()
 
-    T_B_M_list: list[np.ndarray] = []
+    T_MB_list: list[np.ndarray] = []
 
     print("로봇을 마커 보드가 보이는 자세로 수동 이동 후 Enter → 캡처.")
     print("권장: 10개 이상, 다양한 방향(틸트/좌우/거리)에서 캡처.")
@@ -128,33 +128,33 @@ def main() -> None:
 
     try:
         while True:
-            key = input(f"[{len(T_B_M_list)+1}] Enter 캡처 / q 종료 > ").strip().lower()
+            key = input(f"[{len(T_MB_list)+1}] Enter 캡처 / q 종료 > ").strip().lower()
             if key == "q":
                 break
 
-            T_B_E = _fk_matrix(robot)
-            T_M_S = sensor.detect_marker_transform()
+            T_EB = _fk_matrix(robot)
+            T_MC = sensor.detect_marker_transform()
 
-            if T_M_S is None:
+            if T_MC is None:
                 print("  [!] 마커 감지 실패 — 건너뜀\n")
                 continue
 
-            T_M_S_m = T_M_S.copy()
-            T_M_S_m[:3, 3] /= 1000.0                       # mm → m
+            T_MC_m = T_MC.copy()
+            T_MC_m[:3, 3] /= 1000.0                       # mm → m
 
-            # T(M→B) = FK @ T(S→E) @ T(M→S) = FK @ inv(T_E_S) @ T_M_S
-            T_B_M = T_B_E @ np.linalg.inv(T_E_S) @ T_M_S_m
-            T_B_M_list.append(T_B_M)
+            # T_MB = T_EB @ T_CE @ T_MC   (M→C→E→B)
+            T_MB = T_EB @ np.linalg.inv(T_EC) @ T_MC_m
+            T_MB_list.append(T_MB)
 
-            t_mm = T_B_M[:3, 3] * 1000
-            print(f"  T_B_M t=({t_mm[0]:.1f}, {t_mm[1]:.1f}, {t_mm[2]:.1f}) mm\n")
+            t_mm = T_MB[:3, 3] * 1000
+            print(f"  T_MB t=({t_mm[0]:.1f}, {t_mm[1]:.1f}, {t_mm[2]:.1f}) mm\n")
 
     finally:
         sensor.shutdown()
         robot.disconnect()
 
     # ── 결과 ────────────────────────────────────────────────────────
-    n = len(T_B_M_list)
+    n = len(T_MB_list)
     print(f"\n{'='*60}")
     print(f"  캡처 샘플 수: {n}")
 
@@ -162,8 +162,8 @@ def main() -> None:
         print("  샘플 2개 이상 필요합니다.")
         return
 
-    translations = np.array([T[:3, 3] for T in T_B_M_list]) * 1000  # mm
-    rotations    = [T[:3, :3] for T in T_B_M_list]
+    translations = np.array([T[:3, 3] for T in T_MB_list]) * 1000  # mm
+    rotations    = [T[:3, :3] for T in T_MB_list]
 
     t_mean  = translations.mean(axis=0)
     t_std   = translations.std(axis=0)

@@ -2,29 +2,34 @@
 
 ### Notation
 
-- We use **T\_A^B** to denote the homogeneous transform that maps points
+- We use **T_AB** to denote the homogeneous transform that maps points
   from frame A to frame B:
-  
-  \[
-  T_A^B : \text{frame A} \rightarrow \text{frame B}, \quad x_B = T_A^B \cdot x_A
-  \]
-  
-  - Example: \(x_O = T_B^O(\theta) \cdot x_B\) means we transform a point
-    from base frame B to object frame O at angle \(\theta\).
+
+  ```
+  T_AB : frame A → frame B,   x_B = T_AB @ x_A
+  ```
+
+  - Example: `x_F = T_BF(theta) @ x_B` transforms a point from base
+    frame B to turntable frame F at angle θ.
+  - Chain rule: `T_AC = T_AB @ T_BC` (middle frame B cancels).
+
+- **Only use `T_AB` style** (two-letter subscript, underscores).  
+  Never write `T_A^B`, `^A T_B`, or `T_A^B`.
 
 ### Coordinate frame naming
 
-| Symbol | Name              | Description                                        |
-|--------|-------------------|----------------------------------------------------|
-| B      | Base frame        | xArm7 robot base. Global world frame (B ≡ W).     |
-| O      | Object frame      | Turntable/object frame. Origin at table center, z-up. |
-| E      | End-Effector frame| Robot flange / TCP frame.                          |
-| S      | Sensor frame      | Per-sensor camera frame (e.g. S\_Femto, S\_PhoXi). |
+| Symbol | Name                    | Description                                               |
+|--------|-------------------------|-----------------------------------------------------------|
+| B      | Base frame              | xArm7 robot base. Global world frame (B ≡ W).            |
+| F      | Turntable frame         | Origin at turntable rotation axis center, z-axis up.     |
+| O      | Object (Internal Global)| First-scan reference frame, Artec-style internal global. |
+| E      | End-Effector frame      | Robot flange / TCP frame.                                 |
+| C      | Camera frame            | Per-sensor frame (e.g. C_femto, C_phoxi).                |
 
 > **Important:**  
-> In all math, “frame” means **coordinate frame** (B, O, E, S).  
-> Sensor data from a camera (one capture) is called a **SensorFrame**
-> or **data frame**, to avoid confusion.
+> In all math, "frame" means **coordinate frame** (B, F, O, E, C).  
+> A captured camera image+depth+pcd data object is called a **Frame**
+> (capital F, the Python dataclass), not a "sensor frame", to avoid confusion.
 
 ---
 
@@ -37,120 +42,95 @@
 
 ---
 
-### 2. Object frame (O)
+### 2. Turntable frame (F)
 
-- Object frame O is fixed to the turntable/object:
-  - Origin at turntable center.
+- Turntable frame F is fixed to the turntable:
+  - Origin at turntable rotation axis center.
   - z-axis points up.
-  - The object is static in O, even when the turntable rotates.
+  - An object sitting on the turntable is static in F; only F itself
+    rotates relative to B as the turntable angle θ changes.
 
-#### 2.1. B ↔ O transform
+#### 2.1. B ↔ F transform
 
-- During installation/calibration we measure **T\_B^O(0)** once:
+- During installation/calibration we measure **T_BF0** once:
 
-  - \(T_B^O(0)\): base → object transform at turntable angle \(\theta = 0\).
-  - Stored in `config/object_frame.yaml`:
+  - `T_BF0`: B → F transform at turntable angle θ = 0.
+  - Stored in `config/calibration/turntable_frame.yaml`:
 
     ```yaml
-    T_B_O0:                # B → O at theta = 0
-      translation: [0.5, 0.0, 0.2]
+    T_B_F0:                # B → F at theta = 0
+      translation: [x, y, z]
       rotation_quat: [qx, qy, qz, qw]
+      matrix: [[...], ...]
     ```
 
-- For a general turntable angle \(\theta\):
+- For a general turntable angle θ:
 
-  - We define the object→base transform:
+  ```
+  T_FB(theta) = T_FB0 @ Rz(theta)      # F → B
+  T_BF(theta) = inv(T_FB(theta))       # B → F
 
-    \[
-    T_O^B(\theta) = \bigl(T_B^O(0)\bigr)^{-1} \cdot
-    \begin{bmatrix}
-      R_z(\theta) & 0 \\
-      0 & 1
-    \end{bmatrix}^{-1}
-    \]
+  x_B = T_FB(theta) @ x_F
+  x_F = T_BF(theta) @ x_B
+  ```
 
-  - Then:
+  where `T_FB0 = inv(T_BF0)` and `Rz(theta)` is the 4×4 z-rotation matrix.
 
-    \[
-    x_B = T_O^B(\theta) \cdot x_O, \qquad
-    x_O = T_B^O(\theta) \cdot x_B
-    \]
+- Intuition for Rz(θ):
+  - As the turntable rotates by θ, the F frame rotates by θ around B's z-axis.
+  - Points expressed in F are constant; their B-frame coordinates change with θ.
 
-    with
-
-    \[
-    T_B^O(\theta) = \bigl(T_O^B(\theta)\bigr)^{-1}
-    \]
-
-- Intuition for \(R_z(\theta)\):
-
-  - \(R_z(\theta)\) represents the rotation of the O-frame z-axis by
-    angle \(\theta\) as seen from the base frame B.
-  - Points in O (\(x_O\)) are constant as \(\theta\) changes; only their
-    representation in B (\(x_B\)) changes with \(\theta\).
-
-#### 2.2. helper
+#### 2.2. TurntableTransformConfig helper
 
 ```python
-class WorldTransformConfig:
+class TurntableTransformConfig:
     """
-    Static world transform configuration (base <-> object frames).
-
-    Notation
-    --------
-    T_A_B maps coordinates from frame A to frame B:
-        x_B = T_A_B @ x_A
+    T_AB maps frame A → frame B:  x_B = T_AB @ x_A
     """
 
-    def __init__(self, T_B_O0: np.ndarray):
-        """
-        Parameters
-        ----------
-        T_B_O0 : (4,4) np.ndarray
-            Base → Object transform at theta = 0.
-        """
-        self.T_B_O0 = T_B_O0
+    def __init__(self, T_BF0: np.ndarray):
+        """T_BF0: (4,4) B → F transform at theta = 0."""
+        self.T_BF0 = T_BF0
+        self._T_FB0 = np.linalg.inv(T_BF0)
 
-    def T_O_B(self, theta: float) -> np.ndarray:
-        """
-        Object → Base transform at turntable angle theta (rad).
-
-        x_B = T_O_B(theta) @ x_O
-        """
-        T_O_B0 = np.linalg.inv(self.T_B_O0)
+    def T_FB(self, theta: float) -> np.ndarray:
+        """F → B at turntable angle theta (rad).  x_B = T_FB(theta) @ x_F"""
         Rz = rotz(theta)
-        T = T_O_B0.copy()
-        T[:3, :3] = T_O_B0[:3, :3] @ Rz
+        T = self._T_FB0.copy()
+        T[:3, :3] = self._T_FB0[:3, :3] @ Rz[:3, :3]
         return T
 
-    def T_B_O(self, theta: float) -> np.ndarray:
-        """
-        Base → Object transform at turntable angle theta (rad).
-
-        x_O = T_B_O(theta) @ x_B
-        """
-        return np.linalg.inv(self.T_O_B(theta))
+    def T_BF(self, theta: float) -> np.ndarray:
+        """B → F at turntable angle theta (rad).  x_F = T_BF(theta) @ x_B"""
+        return np.linalg.inv(self.T_FB(theta))
 ```
 
 ---
 
-### 3. End-Effector (E) and Sensor (S) frames
+### 3. End-Effector (E) and Camera (C) frames
 
 - E: robot EE / flange / TCP frame.
-- S: sensor frame, defined per device:
+- C: camera/sensor frame, defined per device:
 
-  - \(T_E^{S_{\text{Femto}}}\): EE → Femto Bolt sensor.
-  - \(T_E^{S_{\text{PhoXi}}}\): EE → PhoXi 3D sensor.
+  - `T_EC_femto`: E → Femto Bolt camera frame.
+  - `T_EC_phoxi`: E → PhoXi 3D camera frame.
+  - Stored in `config/calibration/hand_eye_phoxi.yaml` (key: `T_E_C`).
 
-- When NBV computes a **sensor target pose** \(T_B^{S,\text{target}}\),
-  we convert to an EE target pose using:
+- When NBV computes a **camera target pose** `T_BC_target`,
+  convert to EE target pose:
 
-  \[
-  T_B^{E,\text{target}} = T_B^{S,\text{target}} \cdot \bigl(T_E^S\bigr)^{-1}
-  \]
+  ```
+  T_BE_target = T_BC_target @ inv(T_EC)
+  ```
 
   so that robot control is always expressed in the EE frame.
 
-> Again: E, S, B, O here are **coordinate frames**.  
-> A captured camera **SensorFrame** is a data object that contains
-> img, depth, pcd, normals, timestamp, and EE pose in the B frame.
+- Camera → Base transform:
+
+  ```
+  T_CB = T_EB @ inv(T_EC)     # x_B = T_CB @ x_C
+  ```
+
+> Again: E, C, B, F, O here are **coordinate frames**.  
+> A captured camera data object (img, depth, pcd, normals, timestamp,
+> ee_pose_mat_B) is the Python **Frame** dataclass.

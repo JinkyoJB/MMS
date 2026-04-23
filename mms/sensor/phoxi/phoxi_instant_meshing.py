@@ -231,16 +231,16 @@ class PhoxiInstantMeshingWrapper:
 
     Coordinate convention
     ---------------------
-    - point_cloud (phoim_Frame) : 센서(S) 프레임, mm 단위.
+    - point_cloud (phoim_Frame) : 카메라(C) 프레임, mm 단위.
                                   GenTL Range 컴포넌트 원본 그대로.
-    - T_S_B (4,4)               : 센서→베이스 변환. add_scan()에서
+    - T_CB (4,4)               : C→B 변환. add_scan()에서
                                   camera_position/axes를 추출.
 
     Usage
     -----
     wrapper = PhoxiInstantMeshingWrapper()
     # 스캔마다 (해상도는 첫 add_scan 시점에 자동 감지):
-    wrapper.add_scan(points_S_flat, texture_flat, T_S_B, timestamp)
+    wrapper.add_scan(points_C_flat, texture_flat, T_CB, timestamp)
     # 완료 후:
     mesh = wrapper.get_mesh()          # o3d.geometry.TriangleMesh
     wrapper.cleanup()
@@ -441,7 +441,7 @@ class PhoxiInstantMeshingWrapper:
         self,
         points_S_flat: np.ndarray,
         texture_flat: np.ndarray,
-        T_S_B: np.ndarray,
+        T_CB: np.ndarray,
         timestamp: float,
         width: int = 0,
         height: int = 0,
@@ -455,7 +455,7 @@ class PhoxiInstantMeshingWrapper:
                         무효점 = (0,0,0). GenTL Range 컴포넌트 원본.
         texture_flat  : (H*W,) 또는 (H*W*3,) float32. Intensity 원본 값.
                         RGB8(3채널)이면 자동으로 grayscale 변환.
-        T_S_B         : (4,4) float64 또는 float32. 센서→베이스 변환.
+        T_CB         : (4,4) float64 또는 float32. 센서→베이스 변환.
         timestamp     : 단조 시간 (초).
         width, height : 센서 해상도. 첫 호출 시 필수.
 
@@ -486,7 +486,7 @@ class PhoxiInstantMeshingWrapper:
         pc_ptr = pts.ctypes.data_as(ctypes.POINTER(_Vec3f))
         tx_ptr = tex.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
-        T = np.asarray(T_S_B, dtype=np.float64)
+        T = np.asarray(T_CB, dtype=np.float64)
 
         def _v3d(col: int) -> _Vec3d:
             v = _Vec3d()
@@ -681,7 +681,7 @@ if __name__ == "__main__":
 
     cfg = PhoxiConfig(
         sensor_frames_yaml=str(_PROJECT_ROOT / "config" / "sensor_frames.yaml"),
-        T_E_S_key="T_E_S_phoxi",
+        T_EC_key="T_EC_phoxi",
         serial_number="SEA-023",
         trigger_timeout_s=15.0,
     )
@@ -703,8 +703,8 @@ if __name__ == "__main__":
 
         print("=== 스캔 3회 취득 후 메쉬 생성 ===")
         dummy_ee = np.eye(4, dtype=np.float64)
-        T_E_S = client.T_E_S
-        T_S_B = dummy_ee @ np.linalg.inv(T_E_S)
+        T_EC = client.T_EC
+        T_CB = dummy_ee @ np.linalg.inv(T_EC)
 
         for i in range(3):
             input(f"\n[{i+1}/3] 로봇을 위치시킨 후 Enter ▶")
@@ -727,7 +727,7 @@ if __name__ == "__main__":
                 else:
                     tex = np.zeros(h * w, dtype=np.float32)
 
-            ok = mesher.add_scan(pts_S, tex, T_S_B, time.perf_counter())
+            ok = mesher.add_scan(pts_S, tex, T_CB, time.perf_counter())
             print(f"  add_scan: {'OK' if ok else 'tracking lost'}")
 
         print(f"\n총 {mesher.scan_count}회 스캔 → 메쉬 생성 중...")

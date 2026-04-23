@@ -6,12 +6,12 @@ xArm7 + PhoXi 3D 스캐너 Hand-Eye 캘리브레이션 실행 스크립트.
 
 동작 순서
 ---------
-1. config/calibration_poses.yaml 의 포즈로 로봇 순차 이동
+1. config/calibration/calibration_poses.yaml 의 포즈로 로봇 순차 이동
 2. 각 포즈에서 PhoxiClient.detect_marker_transform() 호출
    → Photoneo 내장 RecognizeMarkers 로 T_M_S (Marker→Sensor) 획득
 3. HandEyeCalibrator.add_sample(T_E_B, T_M_S) 로 샘플 누적
-4. HandEyeCalibrator.calibrate() → T_E_S 계산 (AX=XB)
-5. config/sensor_frames.yaml 에 T_E_S_phoxi 저장
+4. HandEyeCalibrator.calibrate() → T_EC 계산 (AX=XB)
+5. config/calibration/hand_eye_phoxi.yaml 에 T_E_C 저장
 
 Usage
 -----
@@ -103,7 +103,7 @@ def _draw_marker_detections(
 # ==============================================================================
 
 ROBOT_IP       = "192.168.1.210"
-POSES_YAML     = _PROJECT_ROOT / "config" / "calibration_poses.yaml"
+POSES_YAML     = _PROJECT_ROOT / "config" /  "calibration" / "calibration_poses.yaml"
 OUTPUT_YAML    = _PROJECT_ROOT / "config" / "calibration" / "hand_eye_phoxi.yaml"
 MOVE_SPEED_DEG = 10     # deg/s
 SETTLE_TIME_S  = 3.0    # 이동 후 진동 정착 대기 (s)
@@ -220,17 +220,17 @@ def main() -> None:
 
             time.sleep(SETTLE_TIME_S)
 
-            # T_E_B (EE→Base, meters)
+            # T_EB (E→B, meters)
             pose6 = robot.get_pose(is_radian=False)
             R_EB = ScipyR.from_euler("xyz", np.radians(pose6[3:6])).as_matrix()
-            T_E_B = np.eye(4)
-            T_E_B[:3, :3] = R_EB
-            T_E_B[:3, 3]  = pose6[:3] / 1000.0
+            T_EB = np.eye(4)
+            T_EB[:3, :3] = R_EB
+            T_EB[:3, 3]  = pose6[:3] / 1000.0
             print(f"  TCP  ({pose6[0]:.1f},{pose6[1]:.1f},{pose6[2]:.1f}) mm")
 
-            # Photoneo 마커 감지 → T_M_S (mm)
+            # Photoneo 마커 감지 → T_MC (mm)
             # detect_marker_transform()은 내부에서 intensity도 _last_intensity에 저장
-            T_M_S = sensor.detect_marker_transform()
+            T_MC = sensor.detect_marker_transform()
 
             # 디버그: intensity 이미지 저장 (감지 성공/실패 무관)
             if sensor._last_intensity is not None:
@@ -239,12 +239,12 @@ def main() -> None:
                     sensor._last_intensity,
                 )
 
-            if T_M_S is None:
+            if T_MC is None:
                 print("  [!] 마커 감지 실패 — 건너뜀")
                 failed.append(name)
                 continue
 
-            t = T_M_S[:3, 3]
+            t = T_MC[:3, 3]
 
             # 디버그: board 마커 위치를 픽셀로 매핑해 초록 원으로 표시
             if (sensor._last_intensity is not None
@@ -255,14 +255,14 @@ def main() -> None:
                 )
             elif sensor._last_intensity is not None:
                 vis = cv2.cvtColor(sensor._last_intensity, cv2.COLOR_GRAY2BGR)
-                cv2.putText(vis, f"T_M_S t=({t[0]:.0f},{t[1]:.0f},{t[2]:.0f})mm",
+                cv2.putText(vis, f"T_MC t=({t[0]:.0f},{t[1]:.0f},{t[2]:.0f})mm",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             else:
                 vis = None
             if vis is not None:
                 cv2.imwrite(str(DEBUG_DIR / f"{name}_detected.png"), vis)
 
-            calibrator.add_sample(T_E_B, T_M_S)
+            calibrator.add_sample(T_EB, T_MC)
             print(f"  ✓ 샘플 {calibrator.n_samples}  "
                   f"marker=({t[0]:.0f},{t[1]:.0f},{t[2]:.0f}) mm")
 
@@ -285,7 +285,7 @@ def main() -> None:
     calibrator.calibrate()
     calibrator.save_yaml(
         OUTPUT_YAML,
-        sensor="phoxi_m",
+        sensor="phoxi_s",
         method="photoneo_a4rev23a",
     )
     print(f"\n완료. {OUTPUT_YAML} 저장됨.")

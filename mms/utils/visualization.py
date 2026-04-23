@@ -5,7 +5,7 @@ import numpy as np
 import open3d as o3d
 
 from mms.core.frames import Frame
-from mms.utils.transforms import compute_T_S_B
+from mms.utils.transforms import compute_T_CB
 
 FRAME_COLORS = [
     [1.0, 0.2, 0.2], [0.2, 0.8, 0.2], [0.2, 0.4, 1.0],
@@ -72,27 +72,29 @@ def visualize(
 
 def visualize_hand_eye_calibration(
     frames: list[Frame],
-    T_E_S: np.ndarray,
+    T_EC: np.ndarray,
     frame_size: float = 0.05,
     max_pts_per_frame: int = 100_000,
     title: str = "Hand-Eye Calibration Verification",
+    # backwards-compatible parameter alias
+    T_E_S: np.ndarray = None,
 ) -> None:
     """
-    핸드-아이 캘리브레이션(T_E_S) 검증 시각화.
+    핸드-아이 캘리브레이션(T_EC) 검증 시각화.
 
     검증 원리
     ---------
-    T_E_S가 정확하면, 로봇이 어느 자세에 있든 동일한 물체를 B 프레임으로
+    T_EC가 정확하면, 로봇이 어느 자세에 있든 동일한 물체를 B 프레임으로
     변환한 PCD가 서로 겹쳐야 한다.
     각 프레임의 PCD를 다른 색으로 오버레이했을 때:
-      - 잘 겹침  → T_E_S 정확
-      - 어긋남   → T_E_S에 오차 있음, 재캘리브레이션 필요
+      - 잘 겹침  → T_EC 정확
+      - 어긋남   → T_EC에 오차 있음, 재캘리브레이션 필요
 
     표시 요소
     ---------
     큰 축    : B 프레임 (로봇 베이스 원점)
-    중간 축  : 각 캡처 시점의 EE 자세 (T_E_B)
-    작은 축  : 각 캡처 시점의 Sensor 자세 (T_S_B)
+    중간 축  : 각 캡처 시점의 EE 자세 (T_EB)
+    작은 축  : 각 캡처 시점의 Camera 자세 (T_CB)
     컬러 구체: EE 위치 마커 (프레임마다 다른 색)
     PCD      : 프레임마다 다른 색 → 겹칠수록 캘리브레이션 양호
 
@@ -106,9 +108,9 @@ def visualize_hand_eye_calibration(
     ----------
     frames : list[Frame]
         서로 다른 EE 자세에서 캡처한 프레임 목록 (최소 2개 권장).
-        각 frame.ee_pose_mat_B에 캡처 시점의 T_E_B가 기록되어 있어야 한다.
-    T_E_S : (4,4) np.ndarray
-        EE → Sensor 변환 (핸드-아이 캘리브레이션 결과, config/sensor_frames.yaml).
+        각 frame.ee_pose_mat_B에 캡처 시점의 T_EB가 기록되어 있어야 한다.
+    T_EC : (4,4) np.ndarray
+        E → C 변환 (핸드-아이 캘리브레이션 결과, config/calibration/hand_eye_phoxi.yaml).
     frame_size : float, default=0.05
         좌표계 축 표시 길이 (m).
     max_pts_per_frame : int, default=100_000
@@ -116,6 +118,9 @@ def visualize_hand_eye_calibration(
     title : str
         Open3D 창 제목.
     """
+    if T_E_S is not None and T_EC is None:
+        T_EC = T_E_S  # backwards-compatible alias
+
     geoms: list = []
     centroids: list[np.ndarray] = []
 
@@ -134,25 +139,25 @@ def visualize_hand_eye_calibration(
     for i, frame in enumerate(frames):
         color = FRAME_COLORS[i % len(FRAME_COLORS)]
 
-        T_E_B = frame.ee_pose_mat_B          # (4,4)  EE → Base
-        T_S_B = compute_T_S_B(T_E_B, T_E_S) # (4,4)  Sensor → Base
+        T_EB = frame.ee_pose_mat_B          # (4,4)  E → B
+        T_CB = compute_T_CB(T_EB, T_EC)    # (4,4)  C → B
 
         # ── EE 자세 축 (중간 크기) ────────────────────────────────────────
         ee_axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size)
-        ee_axes.transform(T_E_B)
+        ee_axes.transform(T_EB)
         geoms.append(ee_axes)
 
         # ── EE 위치 마커 구체 (프레임 색 식별용) ──────────────────────────
         sphere = o3d.geometry.TriangleMesh.create_sphere(radius=frame_size * 0.25)
-        sphere.translate(T_E_B[:3, 3])
+        sphere.translate(T_EB[:3, 3])
         sphere.paint_uniform_color(color)
         sphere.compute_vertex_normals()
         geoms.append(sphere)
 
-        # ── Sensor 자세 축 (작은 크기) ────────────────────────────────────
-        s_axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size * 0.5)
-        s_axes.transform(T_S_B)
-        geoms.append(s_axes)
+        # ── Camera 자세 축 (작은 크기) ────────────────────────────────────
+        c_axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=frame_size * 0.5)
+        c_axes.transform(T_CB)
+        geoms.append(c_axes)
 
         # ── 포인트 클라우드 ───────────────────────────────────────────────
         pts = frame.points
@@ -168,7 +173,7 @@ def visualize_hand_eye_calibration(
         pcd.paint_uniform_color(color)
         geoms.append(pcd)
 
-        ee_p = T_E_B[:3, 3]
+        ee_p = T_EB[:3, 3]
         print(f"  [{i:>2}]  "
               f"[{ee_p[0]:+.3f}, {ee_p[1]:+.3f}, {ee_p[2]:+.3f}]  "
               f"[{centroid[0]:+.3f}, {centroid[1]:+.3f}, {centroid[2]:+.3f}]  "

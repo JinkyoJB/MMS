@@ -4,7 +4,7 @@ scripts/phoxi_make_poses.py
 
 후보 EE 포즈로 로봇을 이동시켜 PhoXi로 마커 가시성을 자동 검증한다.
 통과 조건: Photoneo RecognizeMarkers 성공 (T_M_S 반환)
-통과 포즈는 config/calibration_poses.yaml에 ee_pose 형식으로 자동 추가.
+통과 포즈는 config/calibration/calibration_poses.yaml에 ee_pose 형식으로 자동 추가.
 
 마커 감지: PhoxiClient.detect_marker_transform() — Photoneo GenTL 내장 사용.
 
@@ -42,7 +42,7 @@ from mms.sensor.phoxi.phoxi_client import PhoxiClient, PhoxiConfig
 
 ROBOT_IP      = "192.168.1.210"
 SENSOR_YAML   = str(_PROJECT_ROOT / "config" / "sensor_frames.yaml")
-POSES_YAML    = _PROJECT_ROOT / "config" / "calibration_poses.yaml"
+POSES_YAML    = _PROJECT_ROOT / "config" / "calibration" / "calibration_poses.yaml"
 
 MARKER_POS_MM = np.array([600.0, 3.7, 635.0])   # 마커보드 중심 (Base frame, mm)
 BASE_RPY_DEG  = [163, -83.4, 20.9]              # 마커보드면을 바라보는 EE 방향
@@ -144,7 +144,7 @@ def main():
     robot  = XArmInterface(ip=ROBOT_IP)
     sensor = PhoxiClient(PhoxiConfig(
         sensor_frames_yaml=SENSOR_YAML,
-        T_E_S_key="T_E_S_phoxi",
+        T_EC_key="T_EC_phoxi",
         serial_number="SEA-023",
         trigger_timeout_s=15.0,
     ))
