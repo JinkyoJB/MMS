@@ -218,3 +218,7 @@ __marimo__/
 
 
 /debug_calib
+/debug_calib_artec
+/debug_intrinsic_artec
+/output
+/datasets

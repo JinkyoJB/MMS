@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from mms.utils.transforms import (
+from utils.transforms import (
     TurntableTransformConfig,
     compute_T_CB,
     compute_T_CO,

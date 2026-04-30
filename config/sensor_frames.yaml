@@ -1,8 +1,9 @@
 # Artec scanner (SP.10.36181288) hand-eye calibration result
-# TODO: replace with actual hand-eye calibration result
+# 2026-04-29  charuco_uv3d_procrustes + solvePnP refinement
+# t_err=3.55mm  r_err=1.30°  (PARK method, n=22 poses)
 T_EC_artec:
-  translation: [0.0, 0.0, 0.0]
-  rotation_quat: [0.0, 0.0, 0.0, 1.0]
+  translation: [0.004329194884776221, -0.17715790903434658, -0.059004772935621924]
+  rotation_quat: [0.28410265849620736, 0.7112875756035403, 0.6027294602740305, -0.22376966270073106]
 
 T_EC_femto:
   rotation_quat: [0.0, 0.0, 0.0, 1.0]

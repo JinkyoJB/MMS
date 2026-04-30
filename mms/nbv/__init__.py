@@ -1,1 +1,0 @@
-from .manual_picker import pick_camera_target_in_frame, compute_camera_pose_from_normal

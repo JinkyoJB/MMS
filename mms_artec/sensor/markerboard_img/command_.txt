@@ -1,0 +1,1 @@
+python scripts/artec_hand_eye_calib.py --target-n 1 --interactive --square-mm 18.5 --marker-mm 13.875
