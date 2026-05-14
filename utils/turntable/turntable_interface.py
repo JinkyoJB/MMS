@@ -39,6 +39,9 @@ class Turntable:
         self.pulses_per_rev = pulses_per_rev
         self.TCP = 0
         self.UDP = 1
+        self._last_comm_type: int = self.TCP   # 마지막 connect 의 comm_type 기억
+                                                # — emergency_stop 의 reconnect 가
+                                                # 같은 모드 사용
         # 모션 파라미터 (단위: rad/s^2)
         self.default_accel = np.pi  # 기본 가속도 (3.14 rad/s^2)
         self.default_decel = np.pi  # 기본 감속도
@@ -93,19 +96,22 @@ class Turntable:
 
     def connect(self, comm_type: int = 0) -> bool:
         # 모터 드라이브에 연결 (0: TCP, 1: UDP)
+        self._last_comm_type = int(comm_type)
         ip_parts = list(map(int, self.ip.split('.')))
-        
+
         if comm_type == self.TCP:
             result = FAS_ConnectTCP(ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3], self.bd_id)
+            proto = "TCP"
         else:
             result = FAS_Connect(ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3], self.bd_id)
-            
+            proto = "UDP"
+
         if result != 0:
             self.is_connected = True
-            print(f"Board ID {self.bd_id}: Connect Success ({self.ip})")
+            print(f"Board ID {self.bd_id}: Connect Success ({self.ip}, {proto})")
             return True
         else:
-            print(f"Board ID {self.bd_id}: Connect fail")
+            print(f"Board ID {self.bd_id}: Connect fail ({proto})")
             return False
 
     def disconnect(self):
@@ -348,7 +354,65 @@ class Turntable:
     def stop(self):
         # 현재 운전 중인 모터의 정지 요청
         return FAS_MoveStop(self.bd_id) == FMM_OK
-    
+
+    def emergency_stop(self):
+        """
+        Drive 통신이 sucked 상태에서도 모터 정지.
+
+        검증된 패턴 (scripts/turntable/turntable_stop.py 와 동일):
+          1. 기존 TCP connection close (socket 이 corrupted 상태일 수 있음)
+          2. 짧은 대기 후 **fresh connect**
+          3. stop() — 모션 종료
+          4. set_servo_on(False) — 모터 전원 차단 (가장 강력, 모터 free-wheel)
+
+        @check_connection decorator 미적용 — emergency_stop 은 connection 이
+        sucked 일 때 부르는 거라 is_connected 플래그 무관하게 진행.
+
+        Returns
+        -------
+        dict — {'reconnect', 'stop', 'servo_off'} 각 bool.
+        """
+        results = {"reconnect": False, "stop": False, "servo_off": False}
+
+        # 1. 기존 connection close (실패 무관)
+        try:
+            FAS_Close(self.bd_id)
+        except Exception:
+            pass
+        self.is_connected = False
+        time.sleep(0.3)
+
+        # 2. Fresh connection — 마지막 사용된 comm_type (TCP/UDP) 그대로
+        ip_parts = list(map(int, self.ip.split('.')))
+        try:
+            if self._last_comm_type == self.TCP:
+                ok = FAS_ConnectTCP(ip_parts[0], ip_parts[1], ip_parts[2],
+                                    ip_parts[3], self.bd_id) != 0
+            else:
+                ok = FAS_Connect(ip_parts[0], ip_parts[1], ip_parts[2],
+                                 ip_parts[3], self.bd_id) != 0
+        except Exception:
+            ok = False
+        if not ok:
+            return results
+        self.is_connected = True
+        results["reconnect"] = True
+        time.sleep(0.2)
+
+        # 3. Stop motion
+        try:
+            results["stop"] = (FAS_MoveStop(self.bd_id) == FMM_OK)
+        except Exception:
+            pass
+
+        # 4. Servo OFF — motor power cut (가장 결정적)
+        try:
+            results["servo_off"] = (FAS_ServoEnable(self.bd_id, 0) == FMM_OK)
+        except Exception:
+            pass
+
+        return results
+
 
 if __name__ == "__main__":
     import numpy as np

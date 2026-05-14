@@ -1,16 +1,17 @@
 # Artec Phase 2 — Bottom-face Scanning + Pose Disambiguation — 2026-05-07
 
-> **목적**: docs/7_artec_phase1.md §0 의 water-tight 목표를 위해 바닥면 스캔 도입.
-> 그 과정에서 발견된 **face-merging 문제** 와 해결책 분석.
+> **목적**: docs/7_artec_phase.md §0 의 water-tight 목표를 위해 Phase 2 (바닥면
+> 캡처 + Phase 1 정합) 도입. 그 과정에서 발견된 **face-merging 문제** 와 해결책 분석.
 
 ---
 
 ## 0. 한 줄 요약
 
-**Phase 2 = Phase 1 의 multi-IScan 재호출** (사용자 flip 후 또 한 바퀴). 그러나
-대칭/유사한 아이템에서 SDK 의 GlobalRegistration 이 **윗면(face1) 과 바닥면(face6)
-을 동일면으로 오인 합병** 함. 시작 hint 없는 local-minimum 문제. 해결: **flip 자세를
-초기 추정으로 주입** (또는 비대칭 마커 / 로봇 그립).
+**Phase 2 = 바닥면 캡처 + Phase 1 데이터와 정합**. 객체를 뒤집어 (또는 옆으로 눕혀)
+새 IScan 으로 캡처. SDK 의 GlobalRegistration 만으로는 대칭/유사한 아이템에서
+**윗면(face1) 과 바닥면(face6) 을 동일면으로 오인 합병** 함. 시작 hint 없는
+local-minimum 문제. 해결: **물리 회전 자세를 초기 추정으로 주입** (centroid pivot
+기반 pre-rotation hint). 대안: 비대칭 마커 / 로봇 그립.
 
 ---
 
@@ -213,22 +214,40 @@ def make_axis_physical_rotations(axis: str, angles_deg: List[float]) -> List[np.
 - Tracking lost 재시도는 `pose_idx` 유지 (= 같은 hint 재사용).
 - 정상 완료 후 사용자 [Enter] 시만 `pose_idx += 1`.
 
-### 5.3 적용 메커니즘
+### 5.3 적용 메커니즘 — centroid pivot (2026-05-14 업데이트)
 
-`_merge_into_master` 가 IScan 을 master 에 추가 직전, hint 있으면 모든 frame
-transformation 에 inv(R_phys) 좌측 곱:
+**문제 (초기 버전)**: 단순 `T_new = inv(R_phys) @ T_old` 만 적용하면 회전이 scan
+world 원점 (= Spider 카메라 위치) 을 pivot 으로 일어남. 카메라가 객체에서 ~30cm
+떨어져 있으니 90° 회전 시 객체 중심이 42cm 이동 — 정합 완전히 깨짐.
+
+**해결**: 객체 centroid 를 pivot 으로 회전. Pass 1 의 centroid 를 master 기준점
+`c_master` 로 lock, Pass N 의 centroid `c_pass` 와 매칭:
 
 ```python
-T_pre = inv(pose_physical_rotations[pose_idx])    # 물리 회전의 역
+T_pre = np.eye(4)
+T_pre[:3, :3] = inv(R_phys)[:3, :3]
+T_pre[:3, 3]  = c_master - inv(R_phys)[:3, :3] @ c_pass
+
 for i in range(scan.frame_count()):
     T_old = scan.get_frame_transformation(i)
     T_new = T_pre @ T_old
     scan.set_frame_transformation(i, T_new)
 ```
 
+해석: `T_pre(c_pass) = c_master` (객체 중심은 자기 자리), `T_pre(c_pass + p) =
+c_master + inv(R_phys) @ p` (회전은 body offset 에만 적용). 사용자가 객체를 살짝
+어긋나게 놓아도 centroid 매칭으로 흡수.
+
 **왜 inverse?** 사용자가 Ry(+90°) 로 객체를 회전시키면 Pass N 의 scan 데이터는
 Pass 1 좌표계 대비 Ry(+90°) 만큼 회전돼있음. 그걸 Pass 1 좌표계로 가져오려면
 Ry(-90°) = inv(Ry(+90°)) 적용.
+
+**Centroid 계산** — `_compute_model_centroid`: scan 의 frame mesh vertices 를
+frame_transformation 적용 후 평균. 성능을 위해 scan 당 frame 50개로 subsample.
+
+**GlobalReg auto-skip** — `hints_applied=True` 면 system.py 의 artec_process 가
+post-merge GlobalRegistration 자동 skip. Hint 가 authoritative 이므로 GlobalReg 가
+다시 흩뜨리는 것 방지.
 
 ### 5.4 main_artec.py 의 default 3-pose
 
@@ -260,9 +279,13 @@ MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
 
 ### 5.7 Failure modes
 
-- 회전축이 다른 경우 → wrong basin. 진단: GlobalReg final cost 가 비정상 시
-  로그 출력 후 "회전축 확인" 안내.
+- 회전축이 다른 경우 → wrong basin. 진단: 로그의 `c_master/c_pass` translation
+  값이 비정상이면 의심. 축 부호 (+90° vs -90°) 또는 회전축 (y vs x) 변경 시도.
 - Hint matrix 가 invalid (det ≠ ±1, 또는 inverse 불가) → log warning + hint 무시.
+- **비대칭 객체의 centroid 이동** — 길쭉한 객체를 옆으로 눕히면 surface vertex
+  centroid 가 body 기준 다른 위치로 이동 (예: 세로 cylinder 의 centroid 가
+  중심에서 옆면 중앙으로). Centroid = body 중심 가정이 어긋남.
+  향후 보완: OBB (oriented bounding box) center 사용 — body-fixed 한 pivot 제공.
 
 ---
 

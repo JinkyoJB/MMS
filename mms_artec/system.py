@@ -274,6 +274,13 @@ class ArtecMMS:
                       f"{multi_result.n_passes} passes, "
                       f"{multi_result.n_total_frames} total frames "
                       f"({model.scan_count()} scan(s))")
+                # Hints 가 적용됐다면 GlobalReg 가 hint 를 흐트러뜨릴 수 있음.
+                # hint 가 authoritative 이므로 post-merge GlobalReg 자동 skip.
+                if multi_result.hints_applied and s.do_global_registration:
+                    print("[artec_process] ⓘ hints_applied=True → "
+                          "post-merge GlobalRegistration 자동 skip "
+                          "(hint 가 authoritative)")
+                    s.do_global_registration = False
             else:
                 from mms_artec.nbv.artec_streaming_scan_session import (
                     ArtecStreamingScanSession,

@@ -100,7 +100,8 @@
       "Bash(rm -rf \"C:/Users/user/workspace/MMS/mms_artec/sensor/build\")",
       "Bash(cmake -B build -G \"Visual Studio 18 2026\" -A x64)",
       "Bash(PYTHONIOENCODING=utf-8 python -)",
-      "Bash(cmake --build build --config Release --target artec_scanning_py)"
+      "Bash(cmake --build build --config Release --target artec_scanning_py)",
+      "WebFetch(domain:www.artec3d.com)"
     ]
   }
 }

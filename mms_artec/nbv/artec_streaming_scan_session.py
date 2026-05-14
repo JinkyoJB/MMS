@@ -325,7 +325,7 @@ class TurntableController:
 
             consecutive_pos_fail = 0
             # drive 통신 사망 watchdog — N회 연속 getActualPos 실패하면
-            # turntable 사망으로 간주하고 abort. 50ms × 30 = 1.5s.
+            # turntable 사망으로 간주하고 abort. poll_s 0.1s × 30 = 3s 허용.
             POS_FAIL_LIMIT = 30
 
             while True:
@@ -340,6 +340,13 @@ class TurntableController:
                             f"getActualPos 연속 {consecutive_pos_fail}회 실패 — "
                             f"drive 통신 사망 또는 alarm trip 추정"
                         )
+                        # 모터가 마지막 move_velocity 로 계속 도는 중일 수 있음.
+                        # stop() 만으론 부족 — emergency_stop 시도 (servo_off).
+                        try:
+                            r = self.turntable.emergency_stop()
+                            print(f"\n  [Turntable] emergency_stop tried: {r}")
+                        except Exception as e:
+                            print(f"\n  [Turntable] emergency_stop 예외: {e}")
                         # 다른 thread 들도 끊기게 stop_event set
                         self.stop_event.set()
                         break
@@ -381,6 +388,10 @@ class ArtecStreamingScanResult:
     loss_reason: str = ""
     frames_ok: int = 0
     frames_failed: int = 0
+    # Recovery 용: tracking 이 살아있었던 (reg_err >= 0) 마지막 timeline sample 의
+    # turntable 각도 (rad). lost 발생 시 safe-back rollback 기준점.
+    # tracking 이 한 번도 안 잡혔으면 0.0.
+    last_good_theta_rad: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -514,6 +525,7 @@ class ArtecStreamingScanSession:
         timeout_s = s.rotation_duration_s + 10.0
         end_reason = "unknown"
         timeline: List[dict] = []      # (t, theta, scanning_flag, ...) 기록
+        last_good_theta_rad: float = 0.0   # reg_err >= 0 였던 마지막 sample 의 θ
         try:
             while True:
                 now = time.time()
@@ -539,6 +551,12 @@ class ArtecStreamingScanSession:
                     "consec_lost": tracking.consecutive_lost,
                     "last_state": tracking.last_state.name if tracking.last_state else "",
                 })
+                # last-good θ — tracking 이 SDK 기준 살아있는 동안의 마지막 각도.
+                # multipass recovery 가 safe-back rollback 시 기준으로 사용.
+                if (tracking.tracking_established
+                        and tracking.last_reg_error >= 0.0
+                        and tracking.consecutive_reg_err == 0):
+                    last_good_theta_rad = theta_rad
 
                 # tracking lost 체크 — 네 종류
                 #   (1) FrameState 기반 정합 실패 연속
@@ -562,13 +580,13 @@ class ArtecStreamingScanSession:
 
                 # turntable thread 자체 abort (move_velocity 실패, drive 통신
                 # 사망 등). aborted_reason 만 보고 break — stop_event 가 이미
-                # set 됐을 수도 있음 (turntable 의 watchdog 가 set). 이전엔
-                # `not stop_event.is_set()` 체크 때문에 이 분기 미진입 후 빈
-                # 캡처 계속되는 버그.
+                # set 됐을 수도 있음 (turntable 의 watchdog 가 set).
                 if tt_ctrl.aborted_reason and not tt_ctrl.completed:
                     end_reason = f"turntable abort: {tt_ctrl.aborted_reason}"
-                    if not tracking.stop_event.is_set():
-                        tracking.request_stop(end_reason)
+                    # 항상 last_loss_reason 을 turntable abort 사유로 override —
+                    # multipass 가 "drive 통신 사망/alarm trip" 키워드 보고
+                    # retry 안 띄우고 즉시 종료하도록.
+                    tracking.request_stop(end_reason)
                     print(f"\n  ⚠ {end_reason} — scanning 즉시 중단")
                     break
 
@@ -663,6 +681,7 @@ class ArtecStreamingScanSession:
             loss_reason=tracking.last_loss_reason,
             frames_ok=tracking.frames_ok,
             frames_failed=tracking.frames_failed,
+            last_good_theta_rad=last_good_theta_rad,
         )
 
     # ── 유틸 ──────────────────────────────────────────────────────────
@@ -717,6 +736,19 @@ class ArtecStreamingScanSession:
 
         if not ok:
             print(f"  [Turntable] ✘ clearpos 실패 — drive alarm trip 의심")
+            # 모터가 계속 도는 중일 수 있음 — emergency_stop 시도
+            try:
+                r = self.turntable.emergency_stop()
+                print(f"  [Turntable] emergency_stop tried: {r}")
+            except Exception as e:
+                print(f"  [Turntable] emergency_stop 예외: {e}")
             print(f"  [Turntable]   복구: EziSERVO drive 물리 전원 OFF→5s 대기→ON")
             return False
+
+        # 5. ★ Servo 재활성화 — emergency_stop / drive 재연결 후엔 servo OFF
+        # 상태일 수 있어 다음 move_velocity 가 거부됨. 항상 ON 강제.
+        try:
+            self.turntable.set_servo_on(True)
+        except Exception as e:
+            print(f"  [Turntable] set_servo_on(True) 예외 (무시): {e}")
         return True

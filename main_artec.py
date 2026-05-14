@@ -16,6 +16,10 @@ from mms_artec.nbv.artec_multipass_scan_session import (
     ArtecMultiPassScanSessionSettings,
     make_axis_physical_rotations,
 )
+from mms_artec.nbv.recovery_pose_selector import (
+    LocalJitterSelector,
+    CentroidVectorSelector,
+)
 from utils.robot.xarm_interface import XArmInterface
 from utils.turntable import Turntable
 
@@ -68,12 +72,45 @@ SCAN_SETTINGS = ArtecScanSessionSettings(
     turntable_vel_rad_s=TURNTABLE_VEL_RAD_S,
 )
 
-# ── Multi-pass: Phase 1 + 2 통합 (3-pose default) ─────────────────────
-#   Pose 0: 객체 canonical (face1 = top)
-#   Pose 1: Y축 +90° 회전 — face5 가 face1 자리로
-#   Pose 2: Y축 +180° 회전 — face6 (바닥) 가 위로
-#   docs/8_artec_phase2_pose_disambiguation.md §3.1 의 pre-rotation hint 적용.
+# ── Multi-pass: Phase 1 + Phase 2 통합 (3-pose default) ────────────────
+#   docs/7_artec_phase.md 의 Phase 1 (5면) + Phase 2 (바닥면 + 정합) 을
+#   한 multi-pass 흐름에서 처리.
+#
+#   Pose 0 (Phase 1):  객체 canonical (face1 = top, 5면 캡처)
+#   Pose 1 (Phase 2a): Y축 +90° 회전 — face5 가 face1 자리로 (overlap 옆면)
+#   Pose 2 (Phase 2b): Y축 +180° 회전 — face6 (바닥) 가 위로
+#
+#   정합: docs/8_artec_phase2_pose_disambiguation.md §5.3 의 centroid-pivot
+#   pre-rotation hint 적용. hints_applied=True 이면 post-merge GlobalReg 자동 skip.
 POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
+
+# ── Tracking-lost auto-recovery ────────────────────────────────────────
+#   tracking lost 발생 시 자동으로:
+#     (a) last-good θ + 10° 만큼 turntable 역회전
+#     (b) selector 가 새 카메라 pose 결정 → robot 이동
+#     (c) 다음 streaming pass 진행 (pose_idx 유지)
+#   같은 pose 안에서 연속 3회까지 시도, 초과 시 user prompt 로 fallback.
+#
+# RECOVERY_STRATEGY:
+#   "local_jitter"     — Method A: 현재 pose 주변 ±3cm/±8° N candidate raycast,
+#                        master overlap 최대 후보 선택 (exploitation)
+#   "centroid_vector"  — Method B: master centroid 의 반대편 stand-off 250mm
+#                        에서 centroid 향함 (exploration)
+#   None               — 자동 recovery 비활성 (user prompt 만)
+RECOVERY_STRATEGY: str | None = "local_jitter"
+
+if RECOVERY_STRATEGY == "local_jitter":
+    RECOVERY_SELECTOR = LocalJitterSelector(
+        n_candidates=9,       # 9 random + 1 current = 10 후보
+        trans_mm=30.0,
+        rot_deg=8.0,
+        include_current=True,
+        seed=None,            # None → 매 호출마다 새 분포
+    )
+elif RECOVERY_STRATEGY == "centroid_vector":
+    RECOVERY_SELECTOR = CentroidVectorSelector(stand_off_mm=250.0)
+else:
+    RECOVERY_SELECTOR = None
 
 MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
     streaming_settings=STREAM_SETTINGS,
@@ -82,6 +119,12 @@ MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
     prompt_before_first_pass=True,
     prompt_between_passes=True,
     prompt_on_tracking_lost=True,
+    # auto-recovery
+    recovery_selector=RECOVERY_SELECTOR,
+    max_recovery_retries=3,
+    safe_back_margin_deg=10.0,
+    recovery_robot_speed_deg_s=10.0,
+    recovery_turntable_vel_rad_s=float(np.radians(30.0)),
 )
 
 # ── ArtecProcess pipeline (Studio §4 의 1, 3-6 단계) ──────────────────
@@ -122,7 +165,7 @@ def _flush_stdin() -> None:
 def connect_turntable() -> Turntable:
     """턴테이블 연결 + 서보 ON. 이전 run 잔여 회전 있으면 즉시 정지."""
     tt = Turntable(bd_id=TURNTABLE_BD_ID, ip=TURNTABLE_IP, pulses_per_rev=50000)
-    tt.connect(comm_type=0)
+    tt.connect(comm_type=1)   # 1=UDP (TCP 는 sustained polling 에서 socket sucked)
     tt.check_drive_info()
     tt.check_drive_err()
     # 이전 run 이 비정상 종료해서 모터가 계속 돌고 있을 수 있음 — 즉시 정지
