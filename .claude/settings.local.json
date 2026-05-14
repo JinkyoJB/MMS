@@ -92,7 +92,15 @@
       "Bash(mv scripts/turntable_frame_init.py scripts/phoxi/turntable_frame_init.py)",
       "Bash(sed -i 's/parents\\\\[1\\\\]/parents[2]/g' scripts/phoxi/turntable_frame_init.py)",
       "Bash(PYTHONIOENCODING=utf-8 python scripts/phoxi/go_home.py --help)",
-      "Bash(PYTHONIOENCODING=utf-8 python scripts/artec/go_home.py --help)"
+      "Bash(PYTHONIOENCODING=utf-8 python scripts/artec/go_home.py --help)",
+      "Bash(grep -E \"\\\\.\\(pyd|sln\\)$\")",
+      "Read(//c/Program Files/Microsoft Visual Studio//**)",
+      "Bash(cmake --version)",
+      "Bash(cmake --build build --config Release --target artec_base_py)",
+      "Bash(rm -rf \"C:/Users/user/workspace/MMS/mms_artec/sensor/build\")",
+      "Bash(cmake -B build -G \"Visual Studio 18 2026\" -A x64)",
+      "Bash(PYTHONIOENCODING=utf-8 python -)",
+      "Bash(cmake --build build --config Release --target artec_scanning_py)"
     ]
   }
 }

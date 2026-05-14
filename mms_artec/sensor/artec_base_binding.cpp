@@ -47,7 +47,6 @@
 
 #include "artec_common.h"
 
-#include <fstream>
 #include <vector>
 
 #include <artec/sdk/base/TRef.h>
@@ -61,6 +60,7 @@
 #include <artec/sdk/base/ICompositeContainer.h>
 #include <artec/sdk/base/IMesh.h>
 #include <artec/sdk/base/Matrix.h>
+#include <artec/sdk/base/io/ObjIO.h>
 
 #include <artec/sdk/capturing/IScanner.h>
 #include <artec/sdk/capturing/IFrame.h>
@@ -368,6 +368,9 @@ static void model_add_scan(py::capsule model_cap, py::capsule scan_cap)
     check_ec(model->add(scan), "model::add");
 }
 
+// Save composite mesh as OBJ via the official Artec SDK IO. Writes the
+// .obj plus a sibling .mtl and a PNG texture image when the composite is
+// textured (saveTexCoords=true). saveNormals=true emits `vn` lines too.
 static void model_save_obj(py::capsule cap, const std::string& path)
 {
     base::ICompositeMesh* cm = get_first_composite(cap);
@@ -375,27 +378,17 @@ static void model_save_obj(py::capsule cap, const std::string& path)
         throw std::runtime_error(
             "[artec_base] No composite mesh. Run algorithms before saving.");
 
-    base::IArrayPoint3F*      pts  = cm->getPoints();
-    base::IArrayIndexTriplet* tris = cm->getTriangles();
-    int nv = pts  ? pts->getSize()  : 0;
-    int nf = tris ? tris->getSize() : 0;
+    std::wstring wpath = utf8_to_wcs(path);
+    if (wpath.empty())
+        throw std::runtime_error("[artec_base] Empty/invalid OBJ path: " + path);
 
-    std::ofstream ofs(path);
-    if (!ofs)
-        throw std::runtime_error("[artec_base] Cannot open file: " + path);
-
-    ofs << "# Artec SDK export — artec_base\n";
-    ofs << "# vertices: " << nv << "  faces: " << nf << "\n\n";
-
-    const base::Point3F*      vp = pts  ? pts->getPointer()  : nullptr;
-    const base::IndexTriplet* tp = tris ? tris->getPointer() : nullptr;
-
-    for (int i = 0; i < nv; ++i)
-        ofs << "v " << vp[i].x << " " << vp[i].y << " " << vp[i].z << "\n";
-    for (int i = 0; i < nf; ++i)
-        ofs << "f " << (tp[i].x + 1) << " "
-                    << (tp[i].y + 1) << " "
-                    << (tp[i].z + 1) << "\n";
+    check_ec(
+        base::io::saveObjCompositeToFile(
+            wpath.c_str(), cm,
+            /*progr=*/nullptr, /*cncl=*/nullptr,
+            /*saveNormals=*/true, /*saveTexCoords=*/true,
+            /*imageFormat=*/L"png"),
+        "saveObjCompositeToFile");
 }
 
 // ============================================================

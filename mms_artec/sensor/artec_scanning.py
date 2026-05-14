@@ -211,13 +211,20 @@ class FrameEvent:
 
     Attributes
     ----------
-    frame_state  : FrameState — 프레임 처리 결과
-    frame_mesh   : FrameMeshHandle | None — OK 상태일 때 mesh
-    scan_index   : int | None — 번들에서 스캐너 인덱스 (0 = 단일 스캐너)
+    frame_state        : FrameState — 프레임 처리 결과
+    frame_mesh         : FrameMeshHandle | None — OK 상태일 때 mesh
+    scan_index         : int | None — 번들에서 스캐너 인덱스 (0 = 단일 스캐너)
+    registration_error : float — SDK native: < 0 이면 registration 실패
+                                 (Artec Studio 의 'tracking lost' 시그널과 동일)
+    geometry_keyframe  : bool — 이 프레임이 geometry keyframe 인가
+    texture_keyframe   : bool — 이 프레임이 texture keyframe 인가
     """
-    frame_state:  FrameState
-    frame_mesh:   Optional[object]  # artec_base_py.FrameMeshHandle | None
-    scan_index:   Optional[int] = None
+    frame_state:         FrameState
+    frame_mesh:          Optional[object]  # artec_base_py.FrameMeshHandle | None
+    scan_index:          Optional[int] = None
+    registration_error:  float = 0.0
+    geometry_keyframe:   bool = False
+    texture_keyframe:    bool = False
 
 
 # ==============================================================
@@ -370,6 +377,9 @@ class ScanSession:
                 frame_state=FrameState(d["frame_state"]),
                 frame_mesh=fmh,
                 scan_index=d.get("scanner_index"),
+                registration_error=float(d.get("registration_error", 0.0)),
+                geometry_keyframe=bool(d.get("geometry_keyframe", False)),
+                texture_keyframe=bool(d.get("texture_keyframe", False)),
             )
             events.append(ev)
             if self._frame_callback is not None:

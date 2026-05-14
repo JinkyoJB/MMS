@@ -1,13 +1,21 @@
 import msvcrt
 import traceback
+from datetime import datetime
 
 import numpy as np
 
 from utils import PROJECT_ROOT
+
+# 모든 output 파일에 같은 타임스탬프(_YYYYMMDD_HHMMSS) 붙여 run 별 구분.
+RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 from mms_artec.system import ArtecMMS, ArtecMMSConfig, ArtecProcessSettings
 from mms_artec.sensor.artec_client import ArtecConfig
 from mms_artec.nbv.artec_scan_session import ArtecScanSessionSettings
 from mms_artec.nbv.artec_streaming_scan_session import ArtecStreamingScanSessionSettings
+from mms_artec.nbv.artec_multipass_scan_session import (
+    ArtecMultiPassScanSessionSettings,
+    make_axis_physical_rotations,
+)
 from utils.robot.xarm_interface import XArmInterface
 from utils.turntable import Turntable
 
@@ -42,6 +50,8 @@ STREAM_SETTINGS = ArtecStreamingScanSessionSettings(
     preview_settle_s=1.5,
     post_record_settle_s=0.5,
     reset_to_zero_first=True,
+    # 시계열 로그 — t, theta, scanning_flag, ... → CSV
+    timeline_csv_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}_timeline.csv"),
 )
 
 # ── (Legacy) Discrete Phase 1 — reference 만, use_streaming_scan=False 일 때 사용 ──
@@ -58,6 +68,22 @@ SCAN_SETTINGS = ArtecScanSessionSettings(
     turntable_vel_rad_s=TURNTABLE_VEL_RAD_S,
 )
 
+# ── Multi-pass: Phase 1 + 2 통합 (3-pose default) ─────────────────────
+#   Pose 0: 객체 canonical (face1 = top)
+#   Pose 1: Y축 +90° 회전 — face5 가 face1 자리로
+#   Pose 2: Y축 +180° 회전 — face6 (바닥) 가 위로
+#   docs/8_artec_phase2_pose_disambiguation.md §3.1 의 pre-rotation hint 적용.
+POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
+
+MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
+    streaming_settings=STREAM_SETTINGS,
+    pose_physical_rotations=POSE_ROTATIONS,
+    max_passes=8,                       # 3 pose + 재시도 여유
+    prompt_before_first_pass=True,
+    prompt_between_passes=True,
+    prompt_on_tracking_lost=True,
+)
+
 # ── ArtecProcess pipeline (Studio §4 의 1, 3-6 단계) ──────────────────
 #   1.  Scanning            — Phase 1 만 (위 SCAN_SETTINGS)
 #   2.  Cleaning            — skip (Outliers Removal 이 대체)
@@ -65,19 +91,25 @@ SCAN_SETTINGS = ArtecScanSessionSettings(
 #   4.  Registration        — GlobalRegistration  (scan 1개라 사실상 no-op)
 #   5.  Fusion              — PoissonFusion       (watertight mesh)
 #   6.  Postprocessing      — Outliers + SmallObjects + (Simplify off) + Texturize
+# ★ Dev mode 토글 — True 면 OutliersRemoval / Simplify 자동 skip (5분+ → 1분 이하).
+#   Production export 시 False 로.
+DEV_MODE = True
+
 PROCESS_SETTINGS = ArtecProcessSettings(
+    dev_mode=DEV_MODE,
     use_streaming_scan=True,                # ★ IScanningProcedure (연속 회전)
     scan_settings=SCAN_SETTINGS,
     streaming_scan_settings=STREAM_SETTINGS,
+    multipass_settings=MULTIPASS_SETTINGS,
     do_serial_registration=False,           # streaming 이 SDK 안에서 이미 reg 함
     do_global_registration=True,
     fusion="poisson",
-    do_outliers_removal=True,
+    do_outliers_removal=True,               # dev_mode=True 면 자동 False
     do_small_objects_filter=True,
     do_simplify=False,
     do_texturize=True,
-    export_obj_path=str(PROJECT_ROOT / "output/artec_phase1.obj"),
-    export_sproj_path=str(PROJECT_ROOT / "output/artec_phase1.sproj"),
+    export_obj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.obj"),
+    export_sproj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.sproj"),
 )
 
 
@@ -198,8 +230,10 @@ def main() -> None:
             result = None
             try:
                 result = mms.artec_process(robot, turntable, settings=PROCESS_SETTINGS)
-                ctx = result.ctx
-                print(f"\n[main] Phase 1 완료 — frames={ctx.n_frames}  "
+                # streaming 모드에선 result.ctx=None. model 에서 직접 집계.
+                n_frames = sum(result.model.get_scan(i).frame_count()
+                               for i in range(result.model.scan_count()))
+                print(f"\n[main] Phase 1 완료 — frames={n_frames}  "
                       f"scans={result.model.scan_count()}")
             except KeyboardInterrupt:
                 print("\n[main] ⚠ KeyboardInterrupt — 현재 상태까지 보존")

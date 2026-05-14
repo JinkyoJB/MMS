@@ -258,14 +258,33 @@ class ArtecMMS:
         # ── 0. Scanning ─────────────────────────────────────────────────
         ctx = None
         if s.use_streaming_scan:
-            from mms_artec.nbv.artec_streaming_scan_session import (
-                ArtecStreamingScanSession,
-            )
-            session = ArtecStreamingScanSession(self, robot, turntable, s.streaming_scan_settings)
-            stream_result = session.run()
-            model = stream_result.model
-            print(f"\n[artec_process] Streaming Scan — {stream_result.n_frames} frames "
-                  f"({stream_result.fps_actual:.1f} fps)")
+            if s.use_multipass_scan:
+                # Multi-pass: Phase 1 재진행 (tracking lost recovery) + Phase 2
+                # (flip 후 바닥면 스캔). 모든 IScan 이 master IModel 에 누적되고
+                # 아래 GlobalRegistration 단계에서 정합됨.
+                from mms_artec.nbv.artec_multipass_scan_session import (
+                    ArtecMultiPassScanSession,
+                )
+                session = ArtecMultiPassScanSession(
+                    self, robot, turntable, s.multipass_settings,
+                )
+                multi_result = session.run()
+                model = multi_result.model
+                print(f"\n[artec_process] Multi-pass Scan — "
+                      f"{multi_result.n_passes} passes, "
+                      f"{multi_result.n_total_frames} total frames "
+                      f"({model.scan_count()} scan(s))")
+            else:
+                from mms_artec.nbv.artec_streaming_scan_session import (
+                    ArtecStreamingScanSession,
+                )
+                session = ArtecStreamingScanSession(
+                    self, robot, turntable, s.streaming_scan_settings,
+                )
+                stream_result = session.run()
+                model = stream_result.model
+                print(f"\n[artec_process] Streaming Scan — {stream_result.n_frames} frames "
+                      f"({stream_result.fps_actual:.1f} fps)")
         else:
             from mms_artec.nbv.artec_scan_session import ArtecScanSession
             session = ArtecScanSession(self, robot, turntable, s.scan_settings)
@@ -361,10 +380,21 @@ class ArtecMMS:
 class ArtecProcessSettings:
     """`ArtecMMS.artec_process()` 통합 설정."""
 
+    # ── 개발/Production 모드 ──────────────────────────────────────────
+    # dev_mode=True 면 무거운 후처리 (OutliersRemoval, Simplify) 를 자동 skip.
+    # 빠른 iteration 용. 본 export 에선 False 로 되돌릴 것.
+    # __post_init__ 에서 do_* 플래그를 강제 override 함 (dev_mode 가 우선).
+    dev_mode: bool = False
+
     use_streaming_scan: bool = True
+    # Multi-pass: tracking-lost 재진행 + Phase 2 (flip 후 바닥면 스캔). True 가
+    # 새 default — 한 번에 끝내고 싶으면 multipass_settings.prompt_*_=False 로
+    # 끄거나 use_multipass_scan=False 로 단일 streaming session 사용.
+    use_multipass_scan: bool = True
 
     scan_settings: Optional["ArtecScanSessionSettings"] = None              # type: ignore[name-defined]
     streaming_scan_settings: Optional["ArtecStreamingScanSessionSettings"] = None    # type: ignore[name-defined]
+    multipass_settings: Optional["ArtecMultiPassScanSessionSettings"] = None         # type: ignore[name-defined]
 
     do_serial_registration: bool = True
     do_global_registration: bool = True
@@ -388,6 +418,24 @@ class ArtecProcessSettings:
                 ArtecStreamingScanSessionSettings as _SS,
             )
             self.streaming_scan_settings = _SS()
+        if self.multipass_settings is None:
+            from mms_artec.nbv.artec_multipass_scan_session import (
+                ArtecMultiPassScanSessionSettings as _MPS,
+            )
+            # multipass 안의 streaming_settings 가 위 streaming_scan_settings 와
+            # 같은 인스턴스를 공유하도록 — main_artec.py 의 사용자 설정이 그대로 반영.
+            self.multipass_settings = _MPS(
+                streaming_settings=self.streaming_scan_settings,
+            )
+
+        # Dev mode 강제 override — 무거운 단계 skip.
+        if self.dev_mode:
+            self.do_outliers_removal = False    # frame 별 neighborhood, 5분+
+            self.do_simplify = False            # mesh simplification
+            # do_small_objects_filter / do_texturize 는 유지 — 비교적 빠르고
+            # 결과 검증에 도움. PoissonFusion 도 유지 (mesh 결과 자체).
+            print("[ArtecProcessSettings] ⚡ dev_mode ON — "
+                  "do_outliers_removal=False, do_simplify=False")
 
 
 @dataclass

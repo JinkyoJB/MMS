@@ -71,9 +71,12 @@ namespace cap      = artec::sdk::capturing;
 
 struct FrameEventData
 {
-    int              frame_state   = 0;      // scanning::FrameState value
-    int              scanner_index = 0;
-    base::IFrameMesh* frame_mesh   = nullptr; // addRef'd; NULL이면 mesh 없음
+    int              frame_state        = 0;      // scanning::FrameState value
+    int              scanner_index      = 0;
+    base::IFrameMesh* frame_mesh        = nullptr; // addRef'd; NULL이면 mesh 없음
+    double           registration_error = 0.0;    // SDK native: <0 = registration failed
+    bool             geometry_keyframe  = false;
+    bool             texture_keyframe   = false;
 };
 
 // ============================================================
@@ -95,8 +98,11 @@ public:
         if (!info) return;
 
         FrameEventData ev;
-        ev.frame_state   = static_cast<int>(info->frameState);
-        ev.scanner_index = info->scannerIndex;
+        ev.frame_state        = static_cast<int>(info->frameState);
+        ev.scanner_index      = info->scannerIndex;
+        ev.registration_error = info->registrationError;
+        ev.geometry_keyframe  = info->geometryKeyFrame;
+        ev.texture_keyframe   = info->textureKeyFrame;
 
         // frame 은 콜백 반환 전까지만 유효 → addRef로 수명 연장
         if (info->frame && info->frameState == scanning::FrameState_Ok)
@@ -459,8 +465,11 @@ static py::list session_poll_events(py::capsule sess_cap)
     for (auto& ev : events)
     {
         py::dict d;
-        d["frame_state"]   = ev.frame_state;
-        d["scanner_index"] = ev.scanner_index;
+        d["frame_state"]        = ev.frame_state;
+        d["scanner_index"]      = ev.scanner_index;
+        d["registration_error"] = ev.registration_error;
+        d["geometry_keyframe"]  = ev.geometry_keyframe;
+        d["texture_keyframe"]   = ev.texture_keyframe;
         // frame_mesh: IFrameMesh* capsule or None
         // Python 쪽(artec_scanning.py)에서 artec_base.FrameMeshHandle(cap)으로 래핑.
         if (ev.frame_mesh)
