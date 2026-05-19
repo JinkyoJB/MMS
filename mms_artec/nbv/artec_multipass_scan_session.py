@@ -37,7 +37,14 @@ from mms_artec.nbv.artec_streaming_scan_session import (
 )
 from mms_artec.nbv.recovery_pose_selector import (
     RecoveryPoseSelector,
+    CentroidVectorSelector,
     master_points_in_base_frame,
+    look_at_axes,
+    calibrate_camera_axes_from_preview,
+    SPIDER_HALF_FOV_H,
+    SPIDER_HALF_FOV_V,
+    SPIDER_NEAR_MM,
+    SPIDER_FAR_MM,
 )
 from utils.transforms import pose_mat_to_6d
 
@@ -141,6 +148,68 @@ class ArtecMultiPassScanSessionSettings:
     # Recovery turntable 역회전 속도 (rad/s).
     recovery_turntable_vel_rad_s: float = float(np.radians(30.0))
 
+    # ── 라이브 뷰어 ───────────────────────────────────────────────────
+    # True 면 모든 pass(Phase1 + Phase2) 동안 누적 컬러 포인트클라우드를
+    # 실시간 표시. open3d 필요. 창을 닫아도 스캔은 계속됨. 절대 스캔
+    # 성능/안정성에 영향 주지 않도록 모든 viewer 경로가 예외 격리됨.
+    enable_live_viewer: bool = False
+
+    # ── 물체-적응 사전 포지셔닝 (Phase 1, run() 시작 1회) ──────────────
+    # True 면 회전 전 PREVIEW 로 물체 크기/위치 추정 → 스캐너를 최적
+    # 작업거리·조준으로 이동. 회전 중에는 robot 고정. 실패해도 home 유지로
+    # 진행(스캔에 영향 없음). 상세: docs/artec_scanning_pipeline.md §3.0.
+    adaptive_phase1_positioning: bool = True
+    adaptive_target_standoff_mm: float = 225.0   # 최적대역 중앙 목표 거리
+    adaptive_min_preview_verts: int = 1500       # preview 유효 최소 정점
+    adaptive_robot_speed_deg_s: float = 15.0
+
+    # ── Phase 1 고도각(elevation) 탐색 ────────────────────────────────
+    # adaptive_phase1_positioning=True 일 때만 의미. True 면 거리뿐 아니라
+    # 물체중심 둘레 zx평면 호를 따라 여러 고도각 후보를 preview·스코어해
+    # 최적 1개 선택 후 robot 고정 (회전 중 불변식 유지). False 면 기존
+    # 거리-only 적응(home orientation + 시선 ray 평행이동).
+    # 재조준은 hardcoded +Z 가정의 look_at 이 아니라 home preview 로
+    # 경험적 캘리브된 광축(look_at_axes)을 써서 mis-aim bug 회피.
+    # 상세: docs/artec_scanning_pipeline.md §3.0.
+    phase1_elevation_search: bool = True
+    # 적응형 coarse→fine (docs §3.0 step 6). 2026-05-19 실측: 최적이 −10°
+    # 부근 peak, +φ 측은 허공 조준 낭비, −15° 는 너무 깊어 턴테이블 상판
+    # 미관측 → 범위 [−10°,+10°] 대칭 5° grid (fine 이 음측 보완).
+    # coarse: home_dist(비퇴행) + 아래 오프셋. fine: coarse best φ* 주변
+    # φ*±fine_step (range clamp, ε중복 skip, best=home_dist 면 생략).
+    elevation_range_deg: tuple = (-10.0, 10.0)        # 탐색범위 clamp
+    elevation_coarse_offsets_deg: List[float] = field(
+        default_factory=lambda: [-10.0, -5.0, 0.0, 5.0, 10.0])
+    elevation_fine_step_deg: float = 2.5              # best 주변 ± 미세조정
+    # v1 스코어: 분리된 '물체점' 중 최적 작업거리 밴드(mm) ∩ 카메라 FOV
+    # 안의 개수. (배경/턴테이블/바닥은 isolation 단계에서 이미 빠짐.)
+    elevation_optimal_band_mm: tuple = (200.0, 250.0)
+
+    # ── Phase 1 턴테이블 회전 차분 물체 probe (docs §3.0 선행1) ─────────
+    # 단일뷰 RANSAC isolation 폐기 (Spider 협FOV → 부분 패치라 원리적
+    # 불가, memory project_spider_partial_view_no_scene_segmentation).
+    # 대신: robot=home 고정, 턴테이블을 step 회전하며 preview 캡처 →
+    # voxel frame-support 로 static(회전대칭 디스크·정적 배경) 제거 →
+    # moving = 물체. 명령각으로 회전축·envelope(수직 실린더) 자동 산출.
+    # scan 데이터 무영향 (조준 결정용 preview 전용).
+    phase1_motion_probe: bool = True
+    probe_total_deg: float = 150.0            # probe 총 회전각
+    probe_steps: int = 6                      # 분할 수(프레임 K=steps+1)
+    probe_turntable_vel_rad_s: float = float(np.radians(20.0))
+    probe_settle_s: float = 0.4               # 정지 후 캡처 전 안정화
+    probe_vox_mm: float = 4.0                 # static/moving voxel 크기
+    probe_static_support_frac: float = 0.7    # voxel 점유 step ≥ frac·K → static
+    probe_cluster_eps_mm: float = 8.0         # moving DBSCAN 반경
+    probe_cluster_min_pts: int = 20           # moving DBSCAN 최소점
+    probe_min_moving_pts: int = 300           # 미만이면 probe 실패→fallback
+    probe_axis_resid_max_mm: float = 25.0     # centroid-circle 잔차 한계
+    env_r_margin_mm: float = 8.0              # envelope 반경 여유
+    env_z_margin_mm: float = 6.0              # envelope z 여유
+    # 디버그: probe step별 static/moving + 최종 object 색상 PLY 덤프.
+    # 기본 OFF — scan/성능 무영향. CloudCompare 로 검증. docs §3.0.
+    probe_debug_dump: bool = False
+    iso_debug_dir: str = "output/iso_debug"
+
     def __post_init__(self):
         if self.streaming_settings is None:
             self.streaming_settings = ArtecStreamingScanSessionSettings()
@@ -225,10 +294,629 @@ class ArtecMultiPassScanSession:
             print(f"  [multipass] ⚠ T_BC 캡처 실패 ({e}) — "
                   f"hints scan-world frame 그대로 적용 (좌표축 안 맞을 가능성)")
 
+    # ── 물체-적응 사전 포지셔닝 (Phase 1, run() 시작 1회) ──────────────
+
+    def _capture_preview_verts(self, sensor, min_verts: int):
+        """PREVIEW 최대 3회, 정점 최다 프레임 채택. C 프레임 mm (N,3) or None."""
+        v_mm = None
+        for _ in range(3):
+            try:
+                fmh = sensor.capture_frame()
+                vv = fmh.vertices() if fmh is not None else None
+            except Exception:
+                vv = None
+            if vv is not None and vv.shape[0] > 0:
+                if v_mm is None or vv.shape[0] > v_mm.shape[0]:
+                    v_mm = vv
+            if v_mm is not None and v_mm.shape[0] >= min_verts:
+                break
+        if v_mm is None or v_mm.shape[0] < min_verts:
+            return None
+        return v_mm.astype(np.float64)
+
+    @staticmethod
+    def _est_from_points(xo: np.ndarray) -> dict:
+        """물체점 (B,m) → center/h/r robust 통계."""
+        center_xy = np.median(xo[:, :2], axis=0)
+        zlo, zhi = np.percentile(xo[:, 2], 5), np.percentile(xo[:, 2], 95)
+        return dict(
+            cx=float(center_xy[0]), cy=float(center_xy[1]),
+            z_lo=float(zlo), z_hi=float(zhi),
+            z_mid=float(0.5 * (zlo + zhi)),
+            h_obj=float(zhi - zlo),
+            r_obj=float(np.percentile(
+                np.linalg.norm(xo[:, :2] - center_xy, axis=1), 95)),
+        )
+
+    def _robust_center_from_preview(self, sensor, T_CB):
+        """fallback 전용 — preview 한 장 전체 robust 통계 (배경 편향 감수)."""
+        vC = self._capture_preview_verts(
+            sensor, self.s.adaptive_min_preview_verts)
+        if vC is None:
+            return None
+        xB = ((vC / 1000.0) @ np.asarray(T_CB[:3, :3], float).T
+              + np.asarray(T_CB[:3, 3], float))
+        return self._est_from_points(xB)
+
+    @staticmethod
+    def _fit_circle_center(P):
+        """프레임별 물체 수평 centroid 가 그리는 원의 중심 = 회전축(c_x,c_y).
+        반환 (center(2,), resid_m). 대칭 물체(centroid≈축)면 mean 으로 안정화."""
+        P = np.asarray(P, float)
+        if P.shape[0] < 3:
+            c = P.mean(axis=0) if P.shape[0] else np.zeros(2)
+            r = (float(np.std(np.linalg.norm(P - c, axis=1)))
+                 if P.shape[0] else 0.0)
+            return c, r
+        spread = float(np.mean(np.std(P, axis=0)))
+        if spread < 0.003:                  # centroid 거의 정지 → 축≈mean
+            c = P.mean(axis=0)
+            return c, float(np.std(np.linalg.norm(P - c, axis=1)))
+        x, y = P[:, 0], P[:, 1]
+        A = np.c_[2 * x, 2 * y, np.ones(len(P))]
+        b = x ** 2 + y ** 2
+        try:
+            sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+            c = np.array([sol[0], sol[1]])
+            rr = np.sqrt(max(sol[2] + c @ c, 0.0))
+            if not np.isfinite(c).all():
+                raise ValueError("nonfinite center")
+            resid = float(np.sqrt(np.mean(
+                (np.linalg.norm(P - c, axis=1) - rr) ** 2)))
+            return c, resid
+        except Exception:
+            c = P.mean(axis=0)
+            return c, float(np.std(np.linalg.norm(P - c, axis=1)))
+
+    def _in_object_envelope(self, xB, env) -> np.ndarray:
+        """envelope(수직 실린더) 멤버십 bool mask. pose 무관·견고."""
+        s = self.s
+        ax = np.asarray(env["axis_xy"], float)
+        rad = np.linalg.norm(xB[:, :2] - ax, axis=1)
+        return (
+            (rad <= env["r_obj"] + s.env_r_margin_mm / 1000.0)
+            & (xB[:, 2] >= env["z_lo"] - s.env_z_margin_mm / 1000.0)
+            & (xB[:, 2] <= env["z_hi"] + s.env_z_margin_mm / 1000.0)
+        )
+
+    def _dump_probe_ply(self, valid, static, vox, obj_all, stage) -> None:
+        """probe 디버그 PLY — static(회)·moving(파)·object(초). 예외 격리."""
+        try:
+            import os
+            import open3d as o3d
+            d = getattr(self.s, "iso_debug_dir", "output/iso_debug")
+            if not os.path.isabs(d):                 # cwd 가 utils/turntable
+                try:                                  # 로 바뀌므로 절대경로
+                    from utils import PROJECT_ROOT
+                    d = os.path.join(str(PROJECT_ROOT), d)
+                except Exception:
+                    d = os.path.abspath(d)
+            os.makedirs(d, exist_ok=True)
+            pts, cols = [], []
+            for (_k, xB, _v) in valid:
+                keys = np.floor(xB / vox).astype(np.int64)
+                isst = np.fromiter(
+                    (tuple(r) in static for r in keys),
+                    dtype=bool, count=len(keys))
+                c = np.where(isst[:, None],
+                             np.array([0.5, 0.5, 0.5]),
+                             np.array([0.2, 0.4, 0.9]))
+                pts.append(xB)
+                cols.append(c)
+            if obj_all is not None and len(obj_all):
+                pts.append(np.asarray(obj_all, float))
+                cols.append(np.tile([0.1, 0.95, 0.2],
+                                    (len(obj_all), 1)))
+            P = np.vstack(pts)
+            C = np.vstack(cols)
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(P)
+            pcd.colors = o3d.utility.Vector3dVector(C)
+            self._probe_n = getattr(self, "_probe_n", 0) + 1
+            fn = os.path.join(
+                d, f"probe_{self._probe_n:02d}_{stage}.ply")
+            okw = bool(o3d.io.write_point_cloud(fn, pcd))
+            sz = os.path.getsize(fn) if os.path.isfile(fn) else 0
+            print(f"  [probe.dbg] {'OK' if okw and sz > 0 else '✘ FAIL'} "
+                  f"{fn} ({sz}B) static={len(static)}vox "
+                  f"obj={0 if obj_all is None else len(obj_all)}")
+        except Exception as e:
+            print(f"  [probe.dbg] dump 실패 ({type(e).__name__}: {e})")
+
+    def _motion_probe_object(self, T_CB_home) -> dict:
+        """
+        턴테이블 회전 차분으로 물체 envelope 추정 (docs §3.0 선행1).
+        robot=home 고정, 턴테이블 step 회전하며 preview 캡처 → voxel
+        frame-support 로 static(회전대칭 디스크·정적 배경) 제거 → moving
+        DBSCAN 최대 클러스터 = 물체 swept set → centroid-circle 로
+        회전축·envelope(수직 실린더) 산출. probe 후 시작각 복귀.
+
+        Returns {ok, center_B, axis_xy, z_lo/z_hi/z_mid, h_obj, r_obj,
+                 z_table, obj_vC(C mm 캘리브용), n_moving, axis_resid_mm,
+                 moving_centroid_B}. ok=False → caller fallback.
+        """
+        s = self.s
+        out = {"ok": False}
+        sensor = getattr(self.mms, "sensor", None)
+        if sensor is None or not hasattr(sensor, "capture_frame"):
+            print("  [probe] sensor 없음 — skip")
+            return out
+        try:
+            import open3d as o3d
+        except Exception as e:
+            print(f"  [probe] open3d 없음 ({e}) — skip")
+            return out
+
+        R_CB = np.asarray(T_CB_home[:3, :3], float)
+        t_CB = np.asarray(T_CB_home[:3, 3], float)
+        K = int(s.probe_steps) + 1
+        dstep = np.radians(float(s.probe_total_deg)
+                           / max(int(s.probe_steps), 1))
+        vel = float(s.probe_turntable_vel_rad_s)
+
+        try:
+            self.turntable.stop()
+            time.sleep(0.1)
+            self.turntable.check_drive_err()
+            self.turntable.set_servo_on(True)
+            time.sleep(0.1)
+            th0 = self.turntable.getActualPos()
+            th0 = (float(th0) if not isinstance(th0, bool)
+                   and th0 is not None else 0.0)
+        except Exception as e:
+            print(f"  [probe] 턴테이블 준비 실패 ({e}) — skip")
+            return out
+
+        frames_B, frames_C = [], []
+        for k in range(K):
+            time.sleep(float(s.probe_settle_s))
+            vC = self._capture_preview_verts(sensor, 300)
+            if vC is None:
+                print(f"  [probe] step {k}: preview 부족")
+                frames_B.append(None)
+                frames_C.append(None)
+            else:
+                frames_B.append((vC / 1000.0) @ R_CB.T + t_CB)
+                frames_C.append(vC)
+            if k < K - 1:
+                try:
+                    ok = self.turntable.move_abs(
+                        th0 + (k + 1) * dstep, vel)
+                    if not ok:
+                        print(f"  [probe] move_abs 실패(step {k}) — 조기종료")
+                        break
+                    if hasattr(self.turntable, "wait_motion_done"):
+                        self.turntable.wait_motion_done(timeout_s=15.0)
+                    else:
+                        time.sleep(abs(dstep) / max(vel, 0.1) + 0.5)
+                except Exception as e:
+                    print(f"  [probe] 회전 예외(step {k}): {e}")
+                    break
+
+        try:                                # 시작각 복귀
+            self.turntable.stop()
+            time.sleep(0.05)
+            self.turntable.move_abs(th0, vel)
+            if hasattr(self.turntable, "wait_motion_done"):
+                self.turntable.wait_motion_done(timeout_s=20.0)
+        except Exception as e:
+            print(f"  [probe] ⚠ 시작각 복귀 실패 ({e}) "
+                  f"— streaming reset 가 보정")
+
+        valid = [(k, frames_B[k], frames_C[k])
+                 for k in range(len(frames_B)) if frames_B[k] is not None]
+        if len(valid) < 3:
+            print(f"  [probe] 유효 프레임 {len(valid)} <3 — fallback")
+            return out
+
+        # voxel frame-support → static / moving
+        vox = s.probe_vox_mm / 1000.0
+        support = {}
+        for (k, xB, _v) in valid:
+            for key in {tuple(r) for r in
+                        np.floor(xB / vox).astype(np.int64)}:
+                support.setdefault(key, set()).add(k)
+        Kv = len(valid)
+        thr = int(np.ceil(s.probe_static_support_frac * Kv))
+        static = {key for key, fs in support.items() if len(fs) >= thr}
+
+        moving_chunks, moving_by_frame = [], []
+        for (k, xB, vC) in valid:
+            keys = np.floor(xB / vox).astype(np.int64)
+            mv = np.fromiter((tuple(r) not in static for r in keys),
+                             dtype=bool, count=len(keys))
+            if mv.any():
+                moving_chunks.append(xB[mv])
+                moving_by_frame.append((k, vC, mv))
+        if not moving_chunks:
+            print("  [probe] moving 점 0 — fallback")
+            return out
+        moving_all = np.vstack(moving_chunks)
+        if moving_all.shape[0] < s.probe_min_moving_pts:
+            print(f"  [probe] moving {moving_all.shape[0]} < "
+                  f"{s.probe_min_moving_pts} — fallback")
+            if s.probe_debug_dump:
+                self._dump_probe_ply(valid, static, vox, None, "lowmoving")
+            return out
+
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(moving_all)
+        lbl = np.asarray(pc.cluster_dbscan(
+            s.probe_cluster_eps_mm / 1000.0, s.probe_cluster_min_pts))
+        if lbl.size == 0 or lbl.max() < 0:
+            print("  [probe] moving 클러스터 없음 — fallback")
+            if s.probe_debug_dump:
+                self._dump_probe_ply(valid, static, vox, None, "noclust")
+            return out
+        vals, cnts = np.unique(lbl[lbl >= 0], return_counts=True)
+        obj_all = moving_all[lbl == vals[int(np.argmax(cnts))]]
+
+        # 회전축 = 프레임별 물체 수평 centroid 의 원중심 (centroid-circle)
+        cents = np.asarray([
+            frames_B[k][mv][:, :2].mean(axis=0)
+            for (k, _vC, mv) in moving_by_frame])
+        axis_xy, axis_resid = self._fit_circle_center(cents)
+        if axis_resid > s.probe_axis_resid_max_mm / 1000.0:
+            print(f"  [probe] axis resid {axis_resid*1000:.1f}mm > "
+                  f"{s.probe_axis_resid_max_mm:.0f} — fallback")
+            if s.probe_debug_dump:
+                self._dump_probe_ply(valid, static, vox, obj_all, "axisbad")
+            return out
+
+        rad = np.linalg.norm(obj_all[:, :2] - axis_xy, axis=1)
+        r_obj = float(np.percentile(rad, 95))
+        zlo = float(np.percentile(obj_all[:, 2], 5))
+        zhi = float(np.percentile(obj_all[:, 2], 95))
+        z_mid = 0.5 * (zlo + zhi)
+
+        # 캘리브용: envelope 안 물체점 최다 프레임의 C verts
+        best_k, best_n, best_vC = None, -1, None
+        for (k, vC, mv) in moving_by_frame:
+            xBk = frames_B[k][mv]
+            inenv = (
+                (np.linalg.norm(xBk[:, :2] - axis_xy, axis=1)
+                 <= r_obj + s.env_r_margin_mm / 1000.0)
+                & (xBk[:, 2] >= zlo - s.env_z_margin_mm / 1000.0)
+                & (xBk[:, 2] <= zhi + s.env_z_margin_mm / 1000.0))
+            if int(inenv.sum()) > best_n:
+                best_n = int(inenv.sum())
+                best_vC = vC[np.nonzero(mv)[0][inenv]]
+                best_k = k
+        if best_vC is None or best_vC.shape[0] < 50:
+            print(f"  [probe] 캘리브용 C 물체점 부족 ({best_n}) — fallback")
+            if s.probe_debug_dump:
+                self._dump_probe_ply(valid, static, vox, obj_all, "calibfew")
+            return out
+
+        if s.probe_debug_dump:
+            self._dump_probe_ply(valid, static, vox, obj_all, "ok")
+        print(f"  [probe] frames={Kv} moving={moving_all.shape[0]} "
+              f"obj={obj_all.shape[0]} axis=({axis_xy[0]:+.3f},"
+              f"{axis_xy[1]:+.3f}) resid={axis_resid*1000:.1f}mm "
+              f"r={r_obj*1000:.0f}mm z=[{zlo:+.3f},{zhi:+.3f}] "
+              f"h={(zhi-zlo)*1000:.0f}mm calib_frame={best_k}")
+        out.update(
+            ok=True,
+            center_B=np.array([axis_xy[0], axis_xy[1], z_mid]),
+            axis_xy=np.asarray(axis_xy, float),
+            z_lo=zlo, z_hi=zhi, z_mid=float(z_mid),
+            h_obj=float(zhi - zlo), r_obj=r_obj, z_table=zlo,
+            obj_vC=best_vC.astype(np.float64),
+            n_moving=int(moving_all.shape[0]),
+            axis_resid_mm=float(axis_resid * 1000.0),
+            moving_centroid_B=moving_all.mean(axis=0),
+        )
+        return out
+
+    def _standoff_distance(self, h_obj: float, r_obj: float):
+        """단일 band stand-off backoff → (d_m, partial). 거리만 적응."""
+        s = self.s
+        tan_hv = np.tan(float(SPIDER_HALF_FOV_V))
+        margin = 0.010                                  # 10mm 여유
+        near = SPIDER_NEAR_MM / 1000.0
+        far = SPIDER_FAR_MM / 1000.0
+
+        def _fits(d):
+            return (h_obj + 2.0 * margin) <= (2.0 * d * tan_hv)
+
+        d = max(s.adaptive_target_standoff_mm / 1000.0, near + r_obj)
+        if not _fits(d):
+            d_need = (0.5 * h_obj + margin) / max(tan_hv, 1e-6)
+            d = min(max(d, d_need), far)
+        d = float(min(max(d, near + r_obj), far))
+        return d, (not _fits(d))
+
+    def _move_robot_to_T_CB(self, T_CB_target: np.ndarray,
+                            speed_deg_s: float) -> int:
+        """T_CB → T_EB → xArm set_position. 반환 = xArm code (0=OK).
+        실패 시 fault 를 clear (이후 robot 동작이 막히지 않게)."""
+        T_EB_target = T_CB_target @ self._T_EC
+        p = pose_mat_to_6d(T_EB_target)
+        self.robot.enable_motion()
+        code = self.robot.arm.set_position(
+            x=float(p[0] * 1000.0), y=float(p[1] * 1000.0),
+            z=float(p[2] * 1000.0),
+            roll=float(p[3]), pitch=float(p[4]), yaw=float(p[5]),
+            is_radian=True, speed=float(speed_deg_s), wait=True,
+        )
+        if code != 0:
+            try:
+                self.robot.enable_motion()
+            except Exception:
+                pass
+        return int(code)
+
+    def _recapture_T_BC(self, tag: str) -> None:
+        """이동 후 T_BC/T_CB 재캡처 (recovery hint 일관성)."""
+        T_EB_after = self.robot.get_ee_pose_mat()
+        self._T_BC = self._T_EC @ np.linalg.inv(T_EB_after)
+        self._T_CB = np.linalg.inv(self._T_BC)
+        tb = self._T_BC[:3, 3]
+        print(f"  [{tag}] ✓ 이동 완료 — T_BC 재캡처 "
+              f"(t=({tb[0]*1000:+.1f},{tb[1]*1000:+.1f},"
+              f"{tb[2]*1000:+.1f})mm)")
+
+    @staticmethod
+    def _rot_about_axis(axis: np.ndarray, ang_rad: float) -> np.ndarray:
+        """Rodrigues — 단위축 기준 3x3 회전."""
+        a = np.asarray(axis, float)
+        a = a / max(np.linalg.norm(a), 1e-12)
+        c, sn = np.cos(ang_rad), np.sin(ang_rad)
+        K = np.array([[0.0, -a[2], a[1]],
+                      [a[2], 0.0, -a[0]],
+                      [-a[1], a[0], 0.0]])
+        return np.eye(3) * c + np.outer(a, a) * (1.0 - c) + K * sn
+
+    def _phase1_view_score(self, verts_C_mm, T_CB_cand,
+                           fwd_C, up_C, env) -> tuple:
+        """
+        한 후보 preview 의 v1 품질 스코어.
+        후보 preview 를 candidate C→B 변환 후 **envelope 멤버십**
+        (`_in_object_envelope`, pose 무관)으로 물체점만 추려
+          최적 작업거리 밴드 ∩ 카메라 FOV 안의 개수.
+        배경/턴테이블은 envelope 밖이라 점수에 안 들어옴. (입사각 v2.)
+
+        Returns (score, n_obj) — n_obj = envelope 안 물체점 수(진단용).
+        """
+        s = self.s
+        v_all = np.asarray(verts_C_mm, float)
+        xB = ((v_all / 1000.0) @ np.asarray(T_CB_cand[:3, :3], float).T
+              + np.asarray(T_CB_cand[:3, 3], float))
+        mask = self._in_object_envelope(xB, env)
+        if not mask.any():
+            return 0, 0
+        v = v_all[mask]                                  # 물체점, C mm
+        # 캘리브된 광학 정규직교 기저 (fwd, up⟂, right)
+        e1 = fwd_C / max(np.linalg.norm(fwd_C), 1e-12)
+        e2 = up_C - (up_C @ e1) * e1
+        e2 = e2 / max(np.linalg.norm(e2), 1e-12)
+        e3 = np.cross(e1, e2)
+        depth = v @ e1
+        lat = v @ e3
+        vert = v @ e2
+        band_lo, band_hi = s.elevation_optimal_band_mm
+        pos = depth > 1.0
+        m = (
+            (depth >= band_lo) & (depth <= band_hi)
+            & (np.abs(lat) <= depth * np.tan(SPIDER_HALF_FOV_H))
+            & (np.abs(vert) <= depth * np.tan(SPIDER_HALF_FOV_V))
+            & pos
+        )
+        return int(np.sum(m)), int(mask.sum())
+
+    def _distance_only_position(self, T_CB_home, est) -> None:
+        """기존 거리-only 적응 — home orientation 유지 + 시선 ray 평행이동."""
+        s = self.s
+        cam_pos_home = np.asarray(T_CB_home[:3, 3], float)   # B, m
+        center_B = np.array([est["cx"], est["cy"], est["z_mid"]])
+        f = center_B - cam_pos_home
+        nf = np.linalg.norm(f)
+        if nf < 1e-6:
+            print("  [adaptive] 카메라-물체 거리 ≈0 — skip (home 유지)")
+            return
+        f = f / nf
+        d, partial = self._standoff_distance(est["h_obj"], est["r_obj"])
+        T_CB_target = np.eye(4)
+        T_CB_target[:3, :3] = np.asarray(T_CB_home[:3, :3], float)
+        T_CB_target[:3, 3] = center_B - f * d
+        print(f"  [adaptive] stand-off d={d*1000:.0f}mm "
+              f"(target {s.adaptive_target_standoff_mm:.0f}, "
+              f"range [{SPIDER_NEAR_MM:.0f},{SPIDER_FAR_MM:.0f}])"
+              + ("  ⚠ 높이 초과 — 부분 커버(상/하단 일부 누락)"
+                 if partial else ""))
+        code = self._move_robot_to_T_CB(
+            T_CB_target, s.adaptive_robot_speed_deg_s)
+        if code != 0:
+            print(f"  [adaptive] ✘ set_position 실패 (code={code}) "
+                  f"— home 유지로 진행")
+            return
+        self._recapture_T_BC("adaptive")
+
+    def _elevation_search(self, T_CB_home, env) -> None:
+        """
+        probe envelope 기준 물체중심 피벗 zx평면 호 고도각을 적응형
+        coarse→fine 으로 탐색 (coarse: home_dist + 오프셋, fine: best
+        주변 ±fine_step). 후보별 preview 를 envelope 멤버십으로 물체점
+        판정 → v1 스코어 → best. 재조준 = probe 물체점 경험적 캘리브
+        광축(look_at_axes) → mis-aim 회피. 비퇴행: home_dist baseline,
+        유효후보 없으면 home 복귀. docs §3.0 step 5~7.
+        """
+        s = self.s
+        sensor = self.mms.sensor
+        world_z = np.array([0.0, 0.0, 1.0])
+        cam_home = np.asarray(T_CB_home[:3, 3], float)       # B, m
+        center_B = np.asarray(env["center_B"], float)
+        est_env = {"cx": center_B[0], "cy": center_B[1],
+                   "z_mid": center_B[2], "h_obj": env["h_obj"],
+                   "r_obj": env["r_obj"]}
+
+        # 1. C-프레임 광축 경험적 캘리브 (probe 물체점)
+        try:
+            fwd_C, up_C, info = calibrate_camera_axes_from_preview(
+                env["obj_vC"], T_CB_home, center_B, world_z)
+        except Exception as e:
+            print(f"  [elev] ⚠ C-frame 캘리브 실패 ({e}) — 거리-only fallback")
+            self._distance_only_position(T_CB_home, est_env)
+            return
+        print(f"  [elev] C-frame 캘리브: fwd_C=({fwd_C[0]:+.3f},"
+              f"{fwd_C[1]:+.3f},{fwd_C[2]:+.3f}) "
+              f"crosscheck={info['crosscheck_deg']:.1f}° "
+              f"closure={info['closure_rot_deg']:.1f}°")
+        if (not np.isnan(info["crosscheck_deg"])
+                and info["crosscheck_deg"] > 20.0):
+            print(f"  [elev] ⚠ fwd_C 교차검증 {info['crosscheck_deg']:.1f}° "
+                  f"(>20°) — preview 점군/조준 의심, 그래도 진행")
+        if (not np.isnan(info["closure_rot_deg"])
+                and info["closure_rot_deg"] > 15.0):
+            print(f"  [elev] ⚠ closure {info['closure_rot_deg']:.1f}° "
+                  f"(>15°) — 캘리브 신뢰도 낮음, 그래도 진행")
+
+        # recovery selector(centroid_vector)에 캘리브 축 주입 (latent bug 해소)
+        if isinstance(s.recovery_selector, CentroidVectorSelector):
+            s.recovery_selector.fwd_C = fwd_C
+            s.recovery_selector.up_C = up_C
+            print(f"  [elev] centroid_vector selector 에 캘리브 축 주입")
+
+        # 2. 피벗축 = world_z 와 radial_horizontal 에 모두 ⟂ 인 수평축
+        #    (네가 말한 zx평면 = 현재 시선을 품은 수직면. yaml 미사용.)
+        radial = cam_home - center_B
+        radial_h = radial.copy()
+        radial_h[2] = 0.0
+        if np.linalg.norm(radial_h) < 1e-6:
+            print(f"  [elev] ⚠ 카메라가 물체 바로 위 — 호 정의 불가, "
+                  f"거리-only fallback")
+            self._distance_only_position(T_CB_home, est_env)
+            return
+        a_B = np.cross(world_z, radial_h)
+        a_B = a_B / np.linalg.norm(a_B)
+
+        d, partial = self._standoff_distance(
+            env["h_obj"], env["r_obj"])
+        print(f"  [elev] stand-off d={d*1000:.0f}mm"
+              + ("  ⚠ 높이 초과 — 부분 커버" if partial else ""))
+
+        # 3. 적응형 coarse→fine 후보 탐색 (docs §3.0 step 6).
+        f_home = center_B - cam_home
+        f_home = f_home / max(np.linalg.norm(f_home), 1e-12)
+        T_home_dist = np.eye(4)
+        T_home_dist[:3, :3] = np.asarray(T_CB_home[:3, :3], float)
+        T_home_dist[:3, 3] = center_B - f_home * d
+
+        def _pose_for_phi(phi_deg):
+            R = self._rot_about_axis(a_B, np.radians(phi_deg))
+            dir_phi = R @ radial
+            dir_phi = dir_phi / max(np.linalg.norm(dir_phi), 1e-12)
+            return look_at_axes(center_B + dir_phi * d,
+                                center_B, fwd_C, up_C, world_z)
+
+        score_min = max(300, s.adaptive_min_preview_verts // 3)
+        best = None    # (score, tag, T_CB)
+
+        def _eval(tag, T_cand):
+            nonlocal best
+            code = self._move_robot_to_T_CB(
+                T_cand, s.adaptive_robot_speed_deg_s)
+            if code != 0:
+                print(f"  [elev] {tag}: set_position code={code} "
+                      f"(도달불가) — skip")
+                return
+            vC = self._capture_preview_verts(sensor, score_min)
+            if vC is None:
+                print(f"  [elev] {tag}: preview 부족 — score 0")
+                return
+            sc, n_obj = self._phase1_view_score(
+                vC, T_cand, fwd_C, up_C, env)
+            print(f"  [elev] {tag}: score={sc} (물체점 {n_obj})")
+            if best is None or sc > best[0]:
+                best = (sc, tag, T_cand)
+
+        lo_r, hi_r = s.elevation_range_deg
+
+        # 3a. coarse — home_dist(비퇴행 baseline) + 음측 dense 오프셋
+        _eval("home_dist", T_home_dist)
+        evaluated = []          # 평가한 φ (fine 중복 방지)
+        for p in s.elevation_coarse_offsets_deg:
+            phi = float(np.clip(p, lo_r, hi_r))
+            if any(abs(phi - q) < 0.5 for q in evaluated):
+                continue
+            _eval(f"c{phi:+.1f}", _pose_for_phi(phi))
+            evaluated.append(phi)
+
+        # 3b. fine — coarse best φ*(≠home_dist) 주변 ±fine_step
+        if best is not None and best[1] != "home_dist" and best[0] > 0:
+            phi_star = float(best[1][1:])     # "c-10.0" → -10.0
+            step = float(s.elevation_fine_step_deg)
+            for phi in (phi_star - step, phi_star + step):
+                phi = float(np.clip(phi, lo_r, hi_r))
+                if any(abs(phi - q) < 0.5 for q in evaluated):
+                    continue
+                _eval(f"f{phi:+.1f}", _pose_for_phi(phi))
+                evaluated.append(phi)
+
+        # 4. best 선택·이동. 유효후보 없으면 home 복귀 (비퇴행).
+        if best is None or best[0] <= 0:
+            print(f"  [elev] 유효 후보 없음 — home 복귀")
+            self._move_robot_to_T_CB(
+                T_CB_home, s.adaptive_robot_speed_deg_s)
+            return
+        print(f"  [elev] ★ 선택 = {best[1]} (score={best[0]})")
+        code = self._move_robot_to_T_CB(
+            best[2], s.adaptive_robot_speed_deg_s)
+        if code != 0:
+            print(f"  [elev] ✘ best 이동 실패 (code={code}) — home 복귀")
+            self._move_robot_to_T_CB(
+                T_CB_home, s.adaptive_robot_speed_deg_s)
+            return
+        self._recapture_T_BC("elev")
+
+    def _adaptive_prescan_position(self) -> None:
+        """
+        회전 전 PREVIEW 로 물체 크기/위치 추정 → 스캐너(EE)를 최적
+        작업거리·(고도각)으로 이동. 상세: docs/artec_scanning_pipeline.md §3.0.
+        실패/예외는 모두 삼키고 home 유지 — 스캔에 영향 0.
+        """
+        s = self.s
+        try:
+            if self.robot is None or self._T_EC is None:
+                print("  [adaptive] robot/T_EC 없음 — skip (home 유지)")
+                return
+            sensor = getattr(self.mms, "sensor", None)
+            if sensor is None or not hasattr(sensor, "capture_frame"):
+                print("  [adaptive] sensor.capture_frame 없음 — skip")
+                return
+
+            T_EB_home = self.robot.get_ee_pose_mat()        # E→B (m)
+            T_CB_home = self.mms.T_CB(T_EB_home)            # C→B (m)
+
+            # 턴테이블 회전 차분 probe 로 물체 envelope 추정 (docs §3.0).
+            env = (self._motion_probe_object(T_CB_home)
+                   if s.phase1_motion_probe else {"ok": False})
+            if env.get("ok") and s.phase1_elevation_search:
+                self._elevation_search(T_CB_home, env)
+            else:
+                # probe 실패/비활성 → preview robust center + 거리-only
+                # (look_at 재조준 안 함 → 스윙 방지).
+                if not env.get("ok"):
+                    print(f"  [adaptive] probe 실패/비활성 — 거리-only fallback")
+                est = self._robust_center_from_preview(sensor, T_CB_home)
+                if est is None:
+                    print(f"  [adaptive] preview 부족 — skip (home 유지)")
+                    return
+                print(f"  [adaptive] fallback center=({est['cx']:+.3f},"
+                      f"{est['cy']:+.3f}) h={est['h_obj']*1000:.0f}mm "
+                      f"r={est['r_obj']*1000:.0f}mm")
+                self._distance_only_position(T_CB_home, est)
+        except Exception as e:
+            print(f"  [adaptive] ⚠ 예외 ({type(e).__name__}: {e}) "
+                  f"— home 유지로 진행")
+            return
+
     # ── Entry ──────────────────────────────────────────────────────────
 
     def run(self) -> ArtecMultiPassScanResult:
         s = self.s
+        if s.adaptive_phase1_positioning:
+            self._adaptive_prescan_position()
         master_model = artec_base.create_model()
         pass_results: List[ArtecStreamingScanResult] = []
         user_quit = False
@@ -247,8 +935,26 @@ class ArtecMultiPassScanSession:
         next_T_BC_pending: Optional[np.ndarray] = None
         next_skip_clearpos = False
 
+        # ── 라이브 뷰어 (옵션) — 모든 pass 가 한 화면에 누적 ──────────
+        # 생성/사용/종료 모두 예외 격리. 실패해도 스캔에 영향 없음.
+        live_viewer = None
+        if s.enable_live_viewer:
+            try:
+                from mms_artec.nbv.live_scan_viewer import LiveScanViewer
+                live_viewer = LiveScanViewer()
+            except Exception as e:
+                print(f"  [live] ⚠ viewer 생성 실패 "
+                      f"({type(e).__name__}: {e}) — 라이브 표시 없이 진행")
+                live_viewer = None
+
         while n_pass < s.max_passes:
             self._print_pass_banner(n_pass + 1, s.max_passes, pose_idx)
+            if live_viewer is not None:
+                try:
+                    live_viewer.new_pass(
+                        f"Pass {n_pass + 1} (pose {pose_idx})")
+                except Exception:
+                    pass
 
             # 첫 pass 만 따로 prompt — Studio 시작 위치 확인 등.
             if n_pass == 0 and s.prompt_before_first_pass:
@@ -270,6 +976,7 @@ class ArtecMultiPassScanSession:
             try:
                 single = ArtecStreamingScanSession(
                     self.mms, self.robot, self.turntable, s.streaming_settings,
+                    live_viewer=live_viewer,
                 )
                 sub_result = single.run()
             finally:
@@ -448,6 +1155,12 @@ class ArtecMultiPassScanSession:
                     break
                 pose_idx += 1   # 정상 완료 시만 advance
 
+        if live_viewer is not None:
+            try:
+                live_viewer.close()
+            except Exception:
+                pass
+
         if n_pass >= s.max_passes:
             aborted_reason = aborted_reason or f"max_passes={s.max_passes} 도달"
             print(f"\n  ⓘ {aborted_reason}")
@@ -570,7 +1283,7 @@ class ArtecMultiPassScanSession:
         # ── 3. Master 점운 → selector ──────────────────────────────────
         try:
             master_pts_B = master_points_in_base_frame(
-                master_model, self._T_BC, max_points=30_000,
+                master_model, self._T_CB, max_points=30_000,
             )
         except Exception as e:
             print(f"  ⚠ master_points_in_base_frame 예외: {e} — selector skip")

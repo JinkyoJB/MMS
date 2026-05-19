@@ -101,7 +101,14 @@
       "Bash(cmake -B build -G \"Visual Studio 18 2026\" -A x64)",
       "Bash(PYTHONIOENCODING=utf-8 python -)",
       "Bash(cmake --build build --config Release --target artec_scanning_py)",
-      "WebFetch(domain:www.artec3d.com)"
+      "WebFetch(domain:www.artec3d.com)",
+      "Bash(powershell -NoProfile -Command \"\\(Get-Content mms_artec/sensor/artec_base.py | Measure-Object -Line\\).Lines; \\(Get-Content mms_artec/sensor/artec_scanning.py | Measure-Object -Line\\).Lines\")",
+      "Bash(powershell *)",
+      "Bash(cmake *)",
+      "Bash(git rm *)",
+      "Bash(conda env *)",
+      "PowerShell(conda activate *)",
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; & C:\\\\Users\\\\user\\\\miniconda3\\\\envs\\\\mms-env\\\\python.exe -X utf8 -c \"import main_artec; import numpy as np; import mms_artec.nbv.recovery_pose_selector as r; T=r.look_at_axes\\(np.array\\([0.3,0,0.3]\\), np.zeros\\(3\\), np.array\\([0,0,1.0]\\), np.array\\([0,-1.0,0]\\)\\); assert T.shape==\\(4,4\\); import inspect; print\\('look_at_axes_translation', np.round\\(T[:3,3],3\\).tolist\\(\\)\\); print\\('calib_sig', str\\(inspect.signature\\(r.calibrate_camera_axes_from_preview\\)\\)\\); from mms_artec.nbv.artec_multipass_scan_session import ArtecMultiPassScanSessionSettings as S; s=S\\(\\); print\\('phase1_elevation_search', s.phase1_elevation_search\\); print\\('offsets', s.elevation_search_offsets_deg\\); print\\('band', s.elevation_optimal_band_mm\\); print\\('IMPORT_CHAIN_OK'\\)\")"
     ]
   }
 }

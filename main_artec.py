@@ -125,6 +125,23 @@ MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
     safe_back_margin_deg=10.0,
     recovery_robot_speed_deg_s=10.0,
     recovery_turntable_vel_rad_s=float(np.radians(30.0)),
+    # 스캔 도중 누적 컬러 포인트클라우드 실시간 표시 (Phase1 + Phase2 모든
+    # pass). 노이즈/정합 멈춤을 눈으로 인지하기 위함. 창을 닫아도 스캔은
+    # 계속됨. open3d 없으면 자동 skip.
+    enable_live_viewer=True,
+    # 회전 전 1회 PREVIEW 로 물체 크기/위치 추정 → 스캐너를 최적 작업거리·
+    # 조준으로 이동 (docs/artec_scanning_pipeline.md §3.0). 실패 시 home 유지.
+    adaptive_phase1_positioning=True,
+    # True: 거리뿐 아니라 물체중심 둘레 zx평면 호 고도각을 적응형
+    #       coarse→fine 으로 preview·스코어해 최적 1개 선택 (look_at 재조준
+    #       — home preview 경험적 캘리브 광축, mis-aim 회피). 비퇴행 =
+    #       home_dist baseline. 범위·오프셋·fine step 은 MULTIPASS_SETTINGS
+    #       의 elevation_* 에서 튜닝. False: 기존 거리-only 적응.
+    phase1_elevation_search=True,
+    # [디버그] 회전차분 probe 결과 색상 PLY 를 output/iso_debug/ 에 덤프
+    # (static=회·moving=파·object=초). CloudCompare 로 물체 분리/회전축
+    # 검증. 진단 끝나면 False 로. scan/성능 무영향.
+    probe_debug_dump=True,
 )
 
 # ── ArtecProcess pipeline (Studio §4 의 1, 3-6 단계) ──────────────────
@@ -178,12 +195,65 @@ def connect_turntable() -> Turntable:
     return tt
 
 
-def _show_composite_mesh(result, mms, title: str = "Artec Phase 1") -> None:
+def _show_textured_obj(obj_path: str, title: str) -> bool:
     """
-    Composite mesh 가 있으면 그걸로 시각화.
-    없으면 IModel 안 frame transformations 으로 vertices 를 누적해 PointCloud.
+    Texturize 된 export OBJ(.obj + .mtl + 텍스처 png)를 텍스처 그대로 표시.
+
+    성공하면 True. 파일 없음 / 텍스처 없음 / 로드 실패면 False (호출측이
+    단색 fallback 으로 넘어감).
+    """
+    import os
+
+    import open3d as o3d
+
+    if not obj_path or not os.path.isfile(obj_path):
+        print(f"[main] textured OBJ 없음 ({obj_path}) — 단색 fallback")
+        return False
+    try:
+        mesh = o3d.io.read_triangle_mesh(obj_path, enable_post_processing=True)
+    except Exception as e:
+        print(f"[main] OBJ 로드 실패 ({type(e).__name__}: {e}) — 단색 fallback")
+        return False
+
+    if len(mesh.triangles) == 0:
+        print("[main] OBJ 에 삼각형 없음 — 단색 fallback")
+        return False
+
+    mesh.compute_vertex_normals()
+    has_tex = mesh.has_textures() and mesh.has_triangle_uvs()
+    print(f"[main] textured OBJ: verts={len(mesh.vertices):,} "
+          f"faces={len(mesh.triangles):,} textured={has_tex}")
+    if not has_tex:
+        # 텍스처 없으면 단색 fallback 이 더 깔끔
+        return False
+
+    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
+    disc = o3d.geometry.TriangleMesh.create_cylinder(
+        radius=0.12, height=0.001, resolution=64)
+    disc.paint_uniform_color([0.20, 0.35, 0.80])
+    disc.compute_vertex_normals()
+
+    print("[main] 텍스처 입은 최종 mesh 표시 — Q/ESC 로 닫기.")
+    # draw_geometries(legacy) 는 triangle-uv 텍스처를 렌더함.
+    o3d.visualization.draw_geometries(
+        [mesh, axis, disc], window_name=f"{title} (textured)",
+        width=1280, height=720, mesh_show_back_face=True,
+    )
+    return True
+
+
+def _show_composite_mesh(result, mms, title: str = "Artec Phase 1",
+                         obj_path: str | None = None) -> None:
+    """
+    1순위: texturize 된 export OBJ 를 텍스처 그대로 표시.
+    2순위: composite mesh (단색).
+    3순위: IModel frame transformations 으로 vertices 누적 PointCloud (단색).
     """
     import open3d as o3d
+
+    # ── 1순위: 텍스처 OBJ ─────────────────────────────────────────────
+    if obj_path is not None and _show_textured_obj(obj_path, title):
+        return
 
     model = result.model
     ctx = result.ctx                          # streaming 모드면 None
@@ -285,7 +355,10 @@ def main() -> None:
                 traceback.print_exc()
 
             if result is not None:
-                _show_composite_mesh(result, mms)
+                _show_composite_mesh(
+                    result, mms,
+                    obj_path=PROCESS_SETTINGS.export_obj_path,
+                )
 
     finally:
         # ── 턴테이블 안전 정지 (CRITICAL) ─────────────────────────────

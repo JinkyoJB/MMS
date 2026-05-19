@@ -16,7 +16,7 @@
 #       → exploration: 보지 못한 면 우선.
 #
 # Spider v1 spec (artec3d.com/portable-3d-scanners/old/spider):
-#   - Working distance 200–300mm
+#   - Working distance 170–350mm (optimal ~200–250mm)
 #   - Angular FOV 30° × 21° (H × V)
 #   - 3D resolution 0.1mm
 #
@@ -41,10 +41,12 @@ SPIDER_HALF_FOV_H = np.radians(SPIDER_FOV_H_DEG / 2.0)   # 15°
 SPIDER_HALF_FOV_V = np.radians(SPIDER_FOV_V_DEG / 2.0)   # 10.5°
 
 # Depth range — points outside [near, far] are not seen by Spider.
-SPIDER_NEAR_MM = 200.0
-SPIDER_FAR_MM = 300.0
+# Full working range 170–350mm (not the optimal sub-band) so that recovery
+# scoring isn't starved by a too-thin depth shell.
+SPIDER_NEAR_MM = 170.0
+SPIDER_FAR_MM = 350.0
 
-# Default stand-off for Method B (middle of working range).
+# Default stand-off for Method B — kept in the optimal ~200–250mm sub-band.
 SPIDER_DEFAULT_STANDOFF_MM = 250.0
 
 
@@ -54,7 +56,7 @@ SPIDER_DEFAULT_STANDOFF_MM = 250.0
 
 def master_points_in_base_frame(
     master_model,
-    T_BC_master: np.ndarray,
+    T_CB_master: np.ndarray,
     max_points: int = 30_000,
     rng: Optional[np.random.Generator] = None,
 ) -> np.ndarray:
@@ -62,7 +64,7 @@ def master_points_in_base_frame(
     Master IModel 안 모든 IScan 의 vertices 를 base frame B 로 변환해 반환 (mm).
 
     Master IScan 의 vertices 는 scan-world W1 frame (= 첫 pass 의 scan world).
-    `T_BC_master` 는 첫 pass 시점의 B → C transform (= multipass `_T_BC`).
+    `T_CB_master` 는 첫 pass 시점의 C → B transform (= multipass `_T_CB`).
     SDK 가 W1 ≈ C_at_start_of_first_pass 로 잡는다는 가정하에 W1 ≈ C 로 취급.
     잘못된 가정이어도 raycast scoring 은 상대 비교라 영향 작음.
 
@@ -70,8 +72,8 @@ def master_points_in_base_frame(
     ----------
     master_model : artec_base.ModelHandle
         IScans 누적된 master. scan_count() 가 0 이면 빈 배열 반환.
-    T_BC_master : (4,4) np.ndarray
-        첫 pass 시점의 B → C transform. translation 단위 m.
+    T_CB_master : (4,4) np.ndarray
+        첫 pass 시점의 C → B transform (= inv(T_BC)). translation 단위 m.
     max_points : int
         성능 위해 무작위 subsample 상한. 30k 면 raycast 빠름.
     rng : np.random.Generator or None
@@ -110,10 +112,11 @@ def master_points_in_base_frame(
     # W → C → B
     # 가정: SDK 가 첫 frame 의 카메라 frame 을 world 로 사용 → W ≈ C_first
     # 따라서 W frame 의 점 = C frame 좌표 그대로 (mm).
-    # x_B (mm) = T_BC_master[:3,:3] @ x_C (mm) + T_BC_master[:3,3] * 1000
-    R_BC = T_BC_master[:3, :3]
-    t_BC_mm = T_BC_master[:3, 3] * 1000.0     # m → mm
-    pts_B_mm = pts_W @ R_BC.T + t_BC_mm
+    # C → B 는 T_CB (= inv(T_BC)) 로:  x_B = R_CB @ x_C + t_CB.
+    # x_B (mm) = T_CB_master[:3,:3] @ x_C (mm) + T_CB_master[:3,3] * 1000
+    R_CB = T_CB_master[:3, :3]
+    t_CB_mm = T_CB_master[:3, 3] * 1000.0     # m → mm
+    pts_B_mm = pts_W @ R_CB.T + t_CB_mm
     return pts_B_mm
 
 
@@ -202,6 +205,159 @@ def look_at(eye_B: np.ndarray, target_B: np.ndarray,
     T[:3, 2] = z_axis
     T[:3, 3] = eye
     return T
+
+
+def look_at_axes(
+    eye_B: np.ndarray,
+    target_B: np.ndarray,
+    fwd_C: np.ndarray,
+    up_C: np.ndarray,
+    world_up_B: np.ndarray = np.array([0.0, 0.0, 1.0]),
+) -> np.ndarray:
+    """
+    Generalized look-at that respects the *actual* Artec C-frame optical-axis
+    convention instead of hardcoding `+Z_C = forward` (the documented mis-aim
+    bug — `look_at` 의 +Z 가정이 `T_EC_artec` C 프레임과 안 맞아 스캐너가
+    엉뚱한 면을 봄, 2026-05-19 실측; docs §3.0).
+
+    카메라를 `eye_B` 에 두고, orientation 을
+        R_CB @ fwd_C  →  unit(target_B - eye_B)     (광축이 target 을 향함)
+        R_CB @ up_C   →  world_up_B (가능한 한, in-plane)
+    이 되도록 잡는다. `fwd_C`, `up_C` 는 **C 프레임에서 표현된** 광축/이미지-up
+    방향 (단위 무관, `calibrate_camera_axes_from_preview` 가 경험적으로 산출).
+
+    Returns T_CB (4,4), translation in m.
+    """
+    eye = np.asarray(eye_B, dtype=float).reshape(3)
+    tgt = np.asarray(target_B, dtype=float).reshape(3)
+    g = tgt - eye
+    ng = np.linalg.norm(g)
+    if ng < 1e-9:
+        raise ValueError("eye == target — cannot look at self")
+    b1 = g / ng                                      # forward 가 향할 B 방향
+
+    # ── C 프레임 정규직교 기저 (fwd_C, up_C 로부터) ──────────────────────
+    e1 = np.asarray(fwd_C, dtype=float).reshape(3)
+    n1 = np.linalg.norm(e1)
+    if n1 < 1e-9:
+        raise ValueError("fwd_C 영벡터")
+    e1 = e1 / n1
+    u = np.asarray(up_C, dtype=float).reshape(3)
+    e2 = u - (u @ e1) * e1
+    if np.linalg.norm(e2) < 1e-9:                    # up_C ∥ fwd_C → 임의 보정
+        tmp = np.array([1.0, 0.0, 0.0])
+        if abs(tmp @ e1) > 0.999:
+            tmp = np.array([0.0, 1.0, 0.0])
+        e2 = tmp - (tmp @ e1) * e1
+    e2 = e2 / np.linalg.norm(e2)
+    e3 = np.cross(e1, e2)
+
+    # ── B 프레임 목표 기저 (b1=광축, b2≈world up) ────────────────────────
+    w = np.asarray(world_up_B, dtype=float).reshape(3)
+    b2 = w - (w @ b1) * b1
+    if np.linalg.norm(b2) < 1e-9:                    # 광축 ∥ world up
+        tmp = np.array([1.0, 0.0, 0.0])
+        if abs(tmp @ b1) > 0.999:
+            tmp = np.array([0.0, 1.0, 0.0])
+        b2 = tmp - (tmp @ b1) * b1
+    b2 = b2 / np.linalg.norm(b2)
+    b3 = np.cross(b1, b2)
+
+    # R_CB @ [e1 e2 e3] = [b1 b2 b3]  →  R_CB = B_basis @ C_basis^T
+    C_basis = np.column_stack([e1, e2, e3])
+    B_basis = np.column_stack([b1, b2, b3])
+    R_CB = B_basis @ C_basis.T
+
+    T = np.eye(4)
+    T[:3, :3] = R_CB
+    T[:3, 3] = eye
+    return T
+
+
+def calibrate_camera_axes_from_preview(
+    verts_C_mm: np.ndarray,
+    T_CB_home: np.ndarray,
+    object_center_B_m: np.ndarray,
+    world_up_B: np.ndarray = np.array([0.0, 0.0, 1.0]),
+) -> tuple:
+    """
+    Artec C-프레임 광축 컨벤션을 home preview 로 **경험적** 산출.
+    SDK intrinsic 의 +Z (실측 불일치) 도, turntable_frame.yaml (stale) 도
+    의존하지 않음. 가정 = "home 은 사용자가 물체를 보도록 맞춰둔 검증된 자세".
+
+    - fwd_C  (1차, 물리적): Spider 가 반환하는 점군은 광축 중심 frustum 을
+      채우므로 `unit(median(verts_C))` ≈ 광축. 조준 품질·물체 위치와 무관해
+      견고.
+    - fwd_C 교차검증: `R_BC_home @ unit(center_B - cam_pos_home_B)`.
+      물체중심이 광축 위에 있다는 (근사) 가정에서의 독립 추정. 두 추정의
+      사잇각을 info 로 반환 (크면 경고 권장).
+    - up_C : `R_BC_home @ world_up_B` 의 fwd_C ⟂ 성분. 이렇게 잡으면 home
+      eye/target 에서 `look_at_axes` 가 home orientation 을 재현 (info 의
+      closure rotation error 로 sanity check).
+
+    Parameters
+    ----------
+    verts_C_mm : (N,3)  home preview 정점, C 프레임 mm.
+    T_CB_home  : (4,4)  home 의 C → B (translation m).
+    object_center_B_m : (3,) 물체중심, base frame m.
+
+    Returns
+    -------
+    (fwd_C, up_C, info)
+      fwd_C, up_C : (3,) 단위벡터, C 프레임.
+      info : dict — crosscheck_deg, closure_rot_deg, n_verts.
+    """
+    v = np.asarray(verts_C_mm, dtype=np.float64)
+    if v.ndim != 2 or v.shape[0] < 1:
+        raise ValueError("verts_C_mm 비어있음 — 캘리브 불가")
+
+    R_BC = np.asarray(T_CB_home[:3, :3], float).T          # B → C (rot)
+    cam_pos_B = np.asarray(T_CB_home[:3, 3], float)         # B, m
+    center_B = np.asarray(object_center_B_m, float).reshape(3)
+
+    # 1차: frustum 축 ≈ 점군 median 방향
+    med = np.median(v, axis=0)
+    nm = np.linalg.norm(med)
+    if nm < 1e-9:
+        raise ValueError("preview median ≈ 원점 — 광축 추정 불가")
+    fwd_C = med / nm
+
+    # 교차검증: home 시선벡터를 C 로
+    g_B = center_B - cam_pos_B
+    ng = np.linalg.norm(g_B)
+    crosscheck_deg = float("nan")
+    if ng > 1e-9:
+        fwd_C_chk = R_BC @ (g_B / ng)
+        fwd_C_chk /= max(np.linalg.norm(fwd_C_chk), 1e-12)
+        crosscheck_deg = float(np.degrees(
+            np.arccos(np.clip(fwd_C @ fwd_C_chk, -1.0, 1.0))))
+
+    # up_C = (R_BC @ world_up) 의 fwd_C ⟂ 성분
+    u_C = R_BC @ np.asarray(world_up_B, float).reshape(3)
+    up_C = u_C - (u_C @ fwd_C) * fwd_C
+    if np.linalg.norm(up_C) < 1e-9:
+        # world up 이 광축과 평행 — base X 로 대체
+        u_C = R_BC @ np.array([1.0, 0.0, 0.0])
+        up_C = u_C - (u_C @ fwd_C) * fwd_C
+    up_C = up_C / np.linalg.norm(up_C)
+
+    # closure: home eye/target 에서 look_at_axes 가 home R 을 재현하는가
+    closure_rot_deg = float("nan")
+    if ng > 1e-9:
+        try:
+            T_chk = look_at_axes(cam_pos_B, center_B, fwd_C, up_C, world_up_B)
+            R_rel = T_chk[:3, :3].T @ np.asarray(T_CB_home[:3, :3], float)
+            closure_rot_deg = float(np.degrees(np.arccos(
+                np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0))))
+        except Exception:
+            pass
+
+    info = {
+        "crosscheck_deg": crosscheck_deg,
+        "closure_rot_deg": closure_rot_deg,
+        "n_verts": int(v.shape[0]),
+    }
+    return fwd_C, up_C, info
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,9 +485,16 @@ class CentroidVectorSelector:
         centroid → 카메라 거리. Spider working range 중간값 250mm.
     up_hint_B : (3,) np.ndarray
         look_at 의 up 힌트 (base frame). default = world Z up.
+    fwd_C, up_C : Optional[(3,)] np.ndarray
+        둘 다 주어지면 hardcoded +Z 가정의 `look_at` 대신 경험적 캘리브된
+        축으로 `look_at_axes` 사용 → memory 의 centroid_vector latent
+        bug(광축 mis-aim) 해소. default None = 기존 동작 그대로 (recovery
+        기본 거동 불변). multipass 가 캘리브 후 주입.
     """
     stand_off_mm: float = SPIDER_DEFAULT_STANDOFF_MM
     up_hint_B: np.ndarray = None
+    fwd_C: Optional[np.ndarray] = None
+    up_C: Optional[np.ndarray] = None
     name: str = "centroid_vector"
 
     def __post_init__(self):
@@ -362,7 +525,13 @@ class CentroidVectorSelector:
         # 반대편 = centroid 에서 -v_failed 방향
         eye_B_m = centroid_B_m + (-v_failed) * (self.stand_off_mm / 1000.0)
 
-        T_CB_target = look_at(eye_B_m, centroid_B_m, up_hint=self.up_hint_B)
+        if self.fwd_C is not None and self.up_C is not None:
+            # 경험적 캘리브된 광축 — mis-aim bug 회피
+            T_CB_target = look_at_axes(
+                eye_B_m, centroid_B_m, self.fwd_C, self.up_C,
+                world_up_B=self.up_hint_B)
+        else:
+            T_CB_target = look_at(eye_B_m, centroid_B_m, up_hint=self.up_hint_B)
 
         # score — frustum 안 master 점 개수 (참고용, 결정엔 미사용)
         score = visible_point_count(master_pts_B_mm, T_CB_target)

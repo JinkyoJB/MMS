@@ -30,6 +30,7 @@ from mms_artec.sensor.artec_client import ArtecClient
 
 if TYPE_CHECKING:
     from mms_artec.system import ArtecMMS as MMS
+    from mms_artec.nbv.live_scan_viewer import LiveScanViewer
     from utils.robot.xarm_interface import XArmInterface
     from utils.turntable.turntable_interface import Turntable
 
@@ -410,11 +411,15 @@ class ArtecStreamingScanSession:
         robot: Optional["XArmInterface"],
         turntable: "Turntable",
         settings: Optional[ArtecStreamingScanSessionSettings] = None,
+        live_viewer: Optional["LiveScanViewer"] = None,
     ):
         self.mms = mms
         self.robot = robot
         self.turntable = turntable
         self.s = settings or ArtecStreamingScanSessionSettings()
+        # 선택적 라이브 뷰어 — multipass 가 pass 들 사이에 재사용하라고 넘김.
+        # None 이면 모든 viewer 경로 no-op. 절대 스캔을 깨뜨리지 않음.
+        self.live_viewer = live_viewer
 
         if not isinstance(mms.sensor, ArtecClient):
             raise RuntimeError("ArtecClient 만 지원.")
@@ -521,11 +526,22 @@ class ArtecStreamingScanSession:
         )
         tt_ctrl.start()
 
+        # 6.5 라이브 뷰어 — Artec SDK 정합행렬(FrameEvent.transformation)을
+        #     그대로 누적. θ / hand-eye / turntable_frame.yaml 의존 없음.
+        live = self.live_viewer
+        live_ok = live is not None
+        if live_ok:
+            print(f"  [live] viewer 활성 — SDK 정합행렬 기반 누적")
+
         # 7. Main loop — event drain + 종료 조건 검사 + 시계열 로그
         timeout_s = s.rotation_duration_s + 10.0
         end_reason = "unknown"
         timeline: List[dict] = []      # (t, theta, scanning_flag, ...) 기록
         last_good_theta_rad: float = 0.0   # reg_err >= 0 였던 마지막 sample 의 θ
+        # 라이브 뷰어 진단 카운터 — 검은 화면 디버깅용
+        _lv_ev = 0          # 받은 총 이벤트
+        _lv_okmesh = 0      # OK + frame_mesh 있는 이벤트 (= viewer 에 공급)
+        _lv_feederr = ""    # 첫 feed 예외 메시지
         try:
             while True:
                 now = time.time()
@@ -536,11 +552,35 @@ class ArtecStreamingScanSession:
                     break
 
                 # Spider event drain — SDK 큐 비움 (freeze 방지)
-                session.poll_events()
+                events = session.poll_events()
 
                 # ── Time-synchronized 기록 ──────────────────────────────
                 theta_rad = float(tt_ctrl.actual_pos_rad)
                 flag = tracking.scanning_flag
+
+                # ── 라이브 뷰어 공급 (메인 스레드, race 없음) ───────────
+                # OK 프레임의 frame_mesh + SDK 정합행렬(ev.transformation)을
+                # scan-world 로 누적. 예외는 viewer 내부에서 삼킴 → 스캔 영향 0.
+                if events:
+                    _lv_ev += len(events)
+                if live is not None and live_ok and events:
+                    try:
+                        FS = artec_scanning.FrameState
+                        for ev in events:
+                            if (ev.frame_state == FS.OK
+                                    and ev.frame_mesh is not None
+                                    and ev.transformation is not None):
+                                _lv_okmesh += 1
+                                live.add_frame(ev.frame_mesh,
+                                               ev.transformation)
+                    except Exception as e:
+                        if not _lv_feederr:
+                            _lv_feederr = f"{type(e).__name__}: {e}"
+                if live is not None and live_ok:
+                    try:
+                        live.tick(flag)
+                    except Exception:
+                        pass
                 timeline.append({
                     "t": elapsed,
                     "theta_rad": theta_rad,
@@ -603,6 +643,19 @@ class ArtecStreamingScanSession:
                           f"errLo={tracking.consecutive_reg_err}  "
                           f"errHi={tracking.consecutive_high_err}  "
                           f"trk={estab}  last={last_name}")
+                    if live is not None:
+                        _pts = getattr(live, "_n_buffered", -1)
+                        _ing = getattr(live, "_frames_ingested", -1)
+                        _dead = getattr(live, "_dead", "?")
+                        _rej = getattr(live, "_reject", "")
+                        _bb = getattr(live, "_bbox_str", "")
+                        print(f"           [live] ok={live_ok} ev={_lv_ev} "
+                              f"okmesh={_lv_okmesh} ingest={_ing} "
+                              f"pts={_pts} dead={_dead}"
+                              + (f"  AABB[{_bb}]" if _bb else "")
+                              + (f"  reject={_rej}" if _rej else "")
+                              + (f"  feedErr={_lv_feederr}"
+                                 if _lv_feederr else ""))
 
                 time.sleep(s.poll_interval_s)
         finally:

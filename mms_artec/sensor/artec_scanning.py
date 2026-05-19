@@ -225,6 +225,9 @@ class FrameEvent:
     registration_error:  float = 0.0
     geometry_keyframe:   bool = False
     texture_keyframe:    bool = False
+    # RegistrationInfo.transformation — frame(sensor 좌표) → scan-world 정합 행렬.
+    # (4,4) float64. SDK SLAM 결과 그 자체 (scan.get_frame_transformation 과 동일).
+    transformation:      Optional[object] = None  # np.ndarray (4,4) | None
 
 
 # ==============================================================
@@ -380,6 +383,7 @@ class ScanSession:
                 registration_error=float(d.get("registration_error", 0.0)),
                 geometry_keyframe=bool(d.get("geometry_keyframe", False)),
                 texture_keyframe=bool(d.get("texture_keyframe", False)),
+                transformation=d.get("transformation"),
             )
             events.append(ev)
             if self._frame_callback is not None:
