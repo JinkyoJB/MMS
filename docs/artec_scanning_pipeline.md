@@ -36,8 +36,8 @@ main_artec.py
 `main_artec.py` 기본값 (현재): `use_streaming_scan=True`,
 `use_multipass_scan=True`(system.py 기본), `POSE_ROTATIONS =
 make_axis_physical_rotations("y",[0,90,180])`, `max_passes=8`,
-`RECOVERY_STRATEGY="local_jitter"`, `enable_live_viewer=True`,
-`dev_mode=True`(Outliers/Simplify skip), `fusion="poisson"`.
+`enable_live_viewer=True`, `dev_mode=True`(Outliers/Simplify skip),
+`fusion="poisson"`. Recovery = 자동 트리거 (selector 폐기, §6 참고).
 
 > PhoXi 경로와 평행 분리. Artec 은 SDK native 자료구조를 그대로 차용
 > (변환/래핑 없음). streaming 모드에선 `result.ctx=None` (legacy discrete
@@ -91,12 +91,28 @@ Phase 1/2 모두 같은 피드백 위에서 동작.
 한 바퀴 돌며 frame-by-frame 정합. 한 번의 360° 회전으로 **5면**(윗면+옆면4)
 관찰; 바닥면은 디스크에 닿아 캡처 불가 → Phase 2 에서.
 
-### 3.0 물체-적응 사전 포지셔닝 (object-adaptive pre-positioning)
+**시작 자세 = home 그대로** (2026-05-20 rule 변경). 사용자가 사전에
+robot 을 사람 눈으로 물체에 조준해놓은 EE 자세에서 그대로 360° 회전.
+사전 probe/elevation search 는 **수행하지 않음** — 첫 시도가 잘 안 갔을
+때(tracking lost)만 recovery 흐름이 동일 적응 메커니즘을 발동(§6).
 
-회전 시작 **전 1회**, 물체 크기/위치를 보고 스캐너(EE) 를 그 물체에 맞는
-거리·방향으로 이동. 회전 중에는 robot 고정(Phase 1 불변식 유지) — pre-position
-만 신규. `ArtecMultiPassScanSession._adaptive_prescan_position()` (run() 시작,
-pass 루프 전; `adaptive_phase1_positioning=True` 기본).
+> 변경 배경: 사전 probe + elevation 은 모든 scan 에 ~1~2분 overhead.
+> 사용자가 이미 사람 손으로 well-aimed 한 자세면 대부분 잘 동작 →
+> overhead 가 낭비. lost 가 나야 비로소 자세가 안 좋다는 신호이므로
+> 그때 한 번 비싸게 적응 자세 탐색이 합리적.
+
+### 3.0 물체-적응 자세 재선정 (recovery 전용)
+
+이 단원의 알고리즘 (probe + envelope + (r,z) profile + elevation search) 은
+**Phase 1 첫 시작에서는 호출되지 않는다**. Recovery 흐름 (§6) 에서
+호출돼 새 robot 자세를 결정.
+
+`ArtecMultiPassScanSession._adaptive_prescan_position(recovery=True)` —
+recovery flag 일 때 elevation 후보 수를 줄임 (`recovery_elevation_offsets_deg`
+기본 `[-5°, 0°, +5°]`, fine search skip) → 일반 ~1분에서 ~30초로 단축.
+
+> 회전 중에는 여전히 robot 고정(Phase 1 불변식 유지). recovery 가 새 자세
+> 로 이동 후, 다음 streaming pass 가 그 자세에서 시작.
 
 **목표 함수 (중요)** — "FOV 최대(넓게 보기)" 가 **아님**. Spider 는
 close-range 라 멀리 빼면 FOV 는 넓어져도 해상도·정확도 급락 + 350mm 초과 시
@@ -108,11 +124,10 @@ max FPS)** 에서 나온다. 정합을 망치는 실제 요인은 (a) 작업거�
 
 거리는 stand-off backoff 로 이미 적응. **추가된 축 = 고도각(elevation)**:
 물체중심 둘레 zx평면(= 현재 시선을 품은 수직면) 호를 따라 여러 고도각
-후보를 **적응형 coarse→fine** 으로 preview·스코어해 최적 1개 선택
-(탐색범위 `elevation_range_deg`=[−10°,+10°]). 재조준은 `look_at` 의 hardcoded
-`+Z_C` 가정 대신 **경험적 캘리브된 광축**(`look_at_axes`)을 사용 →
-mis-aim bug 회피. `phase1_elevation_search=True`(기본).
-`False` 면 거리-only(`_distance_only_position`).
+후보를 preview·스코어해 최적 1개 선택 (탐색범위 `elevation_range_deg`=
+[−10°,+10°]). 재조준은 `look_at` 의 hardcoded `+Z_C` 가정 대신 **경험적
+캘리브된 광축**(`look_at_axes`)을 사용 → mis-aim bug 회피. 후보 수는
+호출 모드에 따라 달라짐 (recovery 일 때 축소, §6.3).
 
 #### 선행 — 왜 단일뷰 isolation 을 버렸나 (2026-05-19)
 
@@ -146,11 +161,22 @@ plane=0 ↔ 10085, object=2.4k ↔ 16k → 탐색이 턴테이블 보는 자세 
   산출, `axis_fit_resid_mm` 보고). envelope = 수직 실린더:
   `r_obj`=축까지 수평거리 95pct, `z_bot/z_top`=swept z 5/95pct,
   `z_table`≈`z_bot`. **피벗 = (c_x,c_y,z_mid)**.
+- **(r,z) 축대칭 occupancy 프로파일** (2026-05-20 추가): 위에서 만든
+  cylinder 는 over-bound — 물체가 실린더 안에 있다는 보장은 줘도
+  "실린더 안 = 물체" 의 역은 거짓(턴테이블 평면이 같은 cylinder 안에서
+  z_bot 근처에 위치). cylinder 와 별도로 moving voxel 들을 축
+  `(c_x,c_y)` 기준 `(r-bin, z-bin)` 2D 점유 맵으로도 reduce
+  (`profile_bin_mm`, 기본=`probe_vox_mm`). 축 둘레 360° **회전대칭화**
+  되어있어 probe 가 150° 만 돌아도 어느 candidate θ 에서나 멤버십
+  성립. envelope dict 에 `rz_occ`(bool 2D), `r_bins`/`z_bins`,
+  `bin_mm`, `z_table` 동봉.
 - **fallback**: moving 점 < `probe_min_moving_pts` 또는 axis resid 과대
   → `_distance_only_position`(center = moving centroid 있으면 그것,
   없으면 home preview median; 경고). look_at 스윙 금지.
-- 진단: `probe_debug_dump=True` 면 step별 static/moving + envelope 를
-  색상 PLY 로 `iso_debug_dir` 에 덤프(CloudCompare). 기본 OFF, scan 무영향.
+- 진단: `probe_debug_dump=True` 면 (a) step별 static/moving + envelope
+  를 색상 PLY 로 `iso_debug_dir` 에 덤프, (b) elevation 후보별 preview
+  를 **통과(녹)·턴테이블 floor 제외(빨강)·profile 밖(회)** 색칠해
+  `cand_<seq>_<tag>.ply` 로 덤프 (CloudCompare). 기본 OFF, scan 무영향.
 
 #### 선행 2 — C-프레임 광축 경험적 캘리브 (`calibrate_camera_axes_from_preview`)
 
@@ -175,21 +201,41 @@ intrinsic·yaml 신뢰 안 함. **probe 의 물체점(θ0 frame, C)** 으로:
    `h_obj+2·margin ≤ 2·d·tan(HALF_FOV_V)`(h_obj=`z_top−z_bot`) 만족하는
    ~225mm, 안 되면 필요한 d 로 증가하되 `[SPIDER_NEAR+r_obj,
    SPIDER_FAR]` clamp. 한계 초과 → 부분 커버 수용 + 경고.
-5. **φ 후보 — 적응형 coarse→fine** (탐색범위
+5. **φ 후보 — 호출 모드별 coarse(+옵션 fine)** (탐색범위
    `elevation_range_deg`=**[−10°,+10°]**). 각 φ:
    `eye_B = center_B + R(a_B,φ)·unit(radial)·d`, orientation =
    `look_at_axes(eye_B, center_B, fwd_C, up_C, world_Z)`.
-   - **coarse**: `home_dist`(거리-only pose, 비퇴행 baseline) +
-     `elevation_coarse_offsets_deg`(기본 `[−10,−5,0,+5,+10]`).
-   - **fine**: coarse best φ*(≠home_dist) 주변 `φ*±elevation_fine_step_deg`
-     (기본 ±2.5°), range clamp, ε중복 skip. best=home_dist 면 생략.
+   - **coarse**: `home_dist`(거리-only pose, 비퇴행 baseline) + 호출자가
+     넘긴 `offsets_deg`. recovery 호출 시 기본 `[−5,0,+5]`
+     (`recovery_elevation_offsets_deg`). recovery 외 호출(현재 없음, 차후
+     확장용)은 풀그리드 `[−10,−5,0,+5,+10]`.
+   - **fine**: `fine_search_enabled=True` 일 때만. coarse best φ*(≠home_dist)
+     주변 `φ*±elevation_fine_step_deg` (기본 ±2.5°), range clamp, ε중복 skip.
+     recovery 는 기본 `False` (`recovery_elevation_fine_search_enabled`).
 6. **후보 평가** (coarse·fine 공통) — robot 이동(`_move_robot_to_T_CB`,
-   code≠0 → skip) → preview → **envelope 멤버십**으로 물체점 판정
-   (`_in_object_envelope`: 축까지 수평거리 ≤ `r_obj+env_r_margin` ∧
-   z∈[`z_bot−env_z_margin`,`z_top+env_z_margin`]) — **pose 무관·견고,
-   매 preview RANSAC 안 함**. **v1 스코어** = 그 물체점 ∩
-   최적거리밴드[200,250]mm ∩ 카메라 FOV(fwd_C/up_C 기저) 개수. 로그에
-   `물체점 N` 병기. (입사각 항 v2.)
+   code≠0 → skip) → preview → **물체 멤버십 판정**(`_in_object_profile`):
+   - (i) **턴테이블 평면 hard floor** — `z > z_table + table_clear_mm`
+     (`table_clear_mm` 기본 8mm, ≈ probe voxel 2칸). 물체가 디스크 위에
+     얹혀있어 `z_bot≈z_table` 이라 cylinder 만으로는 디스크 표면이
+     "물체점"으로 새는 문제가 있어 hard 제외. 평평한 물체 바닥 일부는
+     이 안에 들어가 잘리는 비용 수용(Phase 2 가 바닥 면 따로 캡처).
+   - (ii) **(r,z) 축대칭 profile lookup** — 축까지 수평거리 r, 높이 z
+     로 probe `rz_occ` 셀(`bin_mm` ± `profile_r_margin_mm`/
+     `profile_z_margin_mm` dilation) 점유 검사. cylinder envelope
+     은 안전한 pre-clip 으로만 (envelope 밖이면 lookup skip). 실제
+     단면 그대로 — overhang/패임이 있는 비-실린더 물체에도 정확.
+   매 preview RANSAC/normal 추정 없음. **v1.5 스코어**(2026-05-20):
+   ```
+   score = Σ_p∈objpts  w_band(depth_p) · 1_FOV(p)
+   w_band(d) = exp(-((d − d*)/σ_d)²),  d* = adaptive_target_standoff_mm,
+                                       σ_d ≈ (band_hi − band_lo)/4
+   ```
+   d* (~225mm) 근처가 가장 무겁고 band 끝(200/250mm)은 약 e⁻¹ 가중,
+   band 밖은 사실상 0. 같은 개수라도 "최적거리에 더 많은 점이 모인
+   각도" 가 이김. 로그에 `score / N_obj / N_excluded_table` 병기.
+   (입사각 항은 여전히 v2 — 별도 PR.)
+   > 단계별 알고리즘·가중치 곡선·진단 해석·한계는
+   > `docs/artec_phase1_view_score.md` 분리 정리.
 7. **선택·확정** — coarse ∪ fine ∪ `home_dist` argmax. 유효 후보 없음
    → **home 복귀**(비퇴행). best 이동 성공 → `self._T_BC/_T_CB`
    **재캡처**(recovery hint 일관성).
@@ -198,7 +244,20 @@ intrinsic·yaml 신뢰 안 함. **probe 의 물체점(θ0 frame, C)** 으로:
 > robot 고정) + 고도각 ~8 move·preview. 수십초~1분대.
 > 회전 중 robot 고정이라 streaming/recovery 기존 로직 불변.
 > pose 1/2(flip)은 같은 robot pose 유지. 구 `_isolate_object`/`iso_*`
-> (단일뷰 RANSAC)는 폐기 — envelope 멤버십이 대체.
+> (단일뷰 RANSAC)는 폐기 — (r,z) profile + table floor 가 대체.
+
+#### 후속 — 왜 cylinder envelope 만으론 부족했나 (2026-05-20)
+
+초기 elevation search 가 "물체점이 더 많은" 각도가 아니라 "턴테이블이 더
+잘 보이는" 각도를 자꾸 best 로 골랐던 회귀가 있었다. 원인:
+1. envelope cylinder 의 아래쪽 여유(`env_z_margin_mm`=6mm)가 `z_lo`
+   (≈`z_table`) 아래로 내려가 **턴테이블 디스크 표면(실린더 안쪽)** 이
+   "물체점"으로 카운트됨. 카메라를 더 내려다본 자세일수록 그 면이 FOV
+   안에 더 많이 들어와 score 가 상승 → 잘못된 best.
+2. r_obj 안쪽 디스크 면적이 물체 측면적보다 크다(특히 작은/낮은 물체).
+이 두 가지를 동시에 잡으려면 cylinder bounding 만으론 부족하고, probe
+가 본 **실제 회전 신호** (moving voxel) 의 (r,z) 단면이 그대로 멤버십
+판정에 들어와야 한다. cylinder 는 fast pre-clip 으로만 유지.
 
 ### Why Artec ≠ PhoXi (설계 근본 차이)
 
@@ -235,6 +294,11 @@ last_good_theta_rad`(reg_err≥0 였던 마지막 timeline θ — recovery rollb
 `ArtecMultiPassScanSession` 이 Phase 1+2 를 통합 오케스트레이션. 사용자가
 객체를 물리적으로 회전시키며 여러 pose 를 새 IScan 으로 캡처, master IModel 에
 누적.
+
+> **시작 자세 = home 그대로** (Phase 1 과 동일, 2026-05-20 rule). 사용자가
+> 객체 자세를 바꾼 뒤 [Enter] 누르면 robot 은 그 시점의 home 자세에서
+> 그대로 360° 회전 시작. 사전 probe/elevation 없음. tracking lost 시에만
+> §6 의 recovery 흐름이 fresh probe + 축소 elevation 으로 자세 재선정.
 
 - Pose 0: canonical (face1=top)         — Phase 1
 - Pose 1: Ry(+90°) — face5 가 위로       — 옆면 보강
@@ -301,27 +365,33 @@ Phase 1+2 mesh 품질 검증 후. gripper 기반 임의자세(코드8 §3.5)와 
 fallback (lost 시그널이 object-presence 와 1:1 이 아니라 무한 retry 는 엉뚱
 데이터 누적 위험). 정상 pass 나오면 retry 카운터 0 reset.
 
-### 6.1 _attempt_recovery 흐름 (multipass)
+### 6.1 _attempt_recovery 흐름 (multipass, 2026-05-20 재설계)
 
 ```
 tracking_lost
  ├─ drive-alarm short-circuit (통신 사망 / alarm trip → 즉시 종료, 물리 전원안내)
- └─ selector 있고 retry<3:
+ └─ retry<3:
      1. safe_back_target_rad 계산 (§6.2)
      2. turntable: stop → check_drive_err → set_servo_on → move_abs → wait
-     3. master_pts_B = master_points_in_base_frame(model, self._T_CB, 30k)
-        (비어있으면 turntable safe-back 만으로 같은 자리 재시도)
-     4. T_CB_now = T_EC @ inv(T_EB_now)
-     5. decision = selector.select(T_CB_now, master_pts_B)
-        (None 이면 같은 자리 재시도)
-     6. Δ<2mm 면 robot 이동 skip; 아니면 xArm.set_position(T_CB_target @ T_EC)
-     7. T_BC_recovery 캡처 → next_T_BC_pending 로 다음 merge 의
-        camera-motion hint override
+     3. _adaptive_prescan_position(recovery=True)
+        ├─ _motion_probe_object (fresh, robot 현재 자세 기준)
+        │   → envelope (axis_xy, r_obj, z_lo/z_hi, z_table) + (r,z) profile
+        ├─ calibrate_camera_axes_from_preview (fwd_C/up_C 캘리브)
+        └─ _elevation_search (recovery 축소):
+              candidates = recovery_elevation_offsets_deg (기본 [-5,0,+5])
+              fine_search = recovery_elevation_fine_search_enabled (기본 False)
+              best φ argmax score (§artec_phase1_view_score.md) → robot 이동
+     4. _recapture_T_BC("recovery") — 다음 merge 의 camera-motion hint 용
 ```
 
 다음 iteration: `next_skip_clearpos=True` (이미 safe-back 위치) +
 merge 단계에서 `T_pre = T_BC_master @ inv(T_BC_recovery)` (translation ×1000,
 R_phys hint 보다 우선).
+
+> **selector(LocalJitterSelector·CentroidVectorSelector)** 는 폐기됨.
+> 통합된 probe+elevation 경로가 selector 의 두 가지(exploitation/exploration)
+> 모두를 대체 — probe 가 객체 envelope 을 객관적으로 측정하고 elevation
+> search 가 best 자세를 직접 골라낸다. master point cloud 의존도 사라짐.
 
 ### 6.2 Safe-back 각도
 
@@ -339,19 +409,25 @@ safe_back_target_rad = (last_good_rad - final_rad) - scan_dir_sign*margin_rad
 (= last-good 보다 10° 더 뒤). `last_good_rad==0 & final≠0` (tracking 한 번도
 안 잡힘) → recovery skip, user prompt.
 
-### 6.3 RecoveryPoseSelector (`recovery_pose_selector.py`)
+### 6.3 Recovery 의 적응 자세 결정 — 핵심 메커니즘
 
-`main_artec.py` 의 `RECOVERY_STRATEGY` 토글: `"local_jitter"` /
-`"centroid_vector"` / `None`. swap 가능 Protocol:
-`select(T_CB_current, master_pts_B_mm) -> Optional[RecoveryPoseDecision]`.
+Recovery 시 새 robot 자세 결정은 §3.0 의 동일 알고리즘을 **재호출**.
+다만 시간 제약을 위해 elevation 후보를 축소:
 
-- **Method A — LocalJitterSelector** (exploitation): 현재 pose 주변
-  ±30mm/±8° 로 N개(=9) candidate, master point cloud 를 frustum raycast
-  (occlusion 무시, 속도 우선) → 가시점 최대 선택. master 와 overlap 보장.
-- **Method B — CentroidVectorSelector** (exploration): master centroid 기준
-  마지막 실패 방향 반대편 stand-off 250mm 에서 centroid 응시 (`look_at`).
+| 항목 | 첫 시작 (deprecated) | Recovery (현행) |
+|---|---|---|
+| trigger | scan 시작 직전 1회 | tracking lost 시마다 |
+| probe | 매번 fresh (~30s) | 매번 fresh (~30s) |
+| elevation coarse | [-10,-5,0,+5,+10] (5점) | [-5,0,+5] (3점) |
+| elevation fine | best ± fine_step (2점) | skip |
+| 총 candidate 수 | ~7 | 3 |
+| 대략 소요 | ~1분 | ~30초 |
 
-Spider v1 광학 상수 (`recovery_pose_selector.py` 상단, 코드 기준):
+> 첫 시작에서 빼면서 평상시 overhead 0. 자세가 적합하면 recovery 도 안
+> 트리거되어 영구히 0. lost 가 나야 비로소 비용 지불.
+
+Spider v1 광학 상수 (`recovery_pose_selector.py` 상단, helper 함수와 함께
+유지 — selector 클래스는 제거됨):
 
 | 상수 | 값 |
 |---|---|
@@ -360,10 +436,6 @@ Spider v1 광학 상수 (`recovery_pose_selector.py` 상단, 코드 기준):
 | 최적 작업거리 | ~200–250 mm |
 | `SPIDER_DEFAULT_STANDOFF_MM` | 250 |
 | 3D resolution / accuracy | 0.1 / 0.05 mm |
-
-> `master_points_in_base_frame` 는 **C→B = `T_CB`(=inv(T_BC))** 사용
-> (과거 T_BC 순방향 오용 버그 수정됨). depth gate 도 100mm→180mm 폭으로
-> 완화(170–350)되어 selector 가 후보 0 으로 굶지 않음.
 
 ---
 
@@ -410,6 +482,38 @@ model_add_scan` (`artec_base_binding.cpp`). composite 는 fusion 후
   (sensor→scan-world; `artec_scanning_binding.cpp` 에 노출 추가).
   `x_world_mm = v_mm @ T[:3,:3].T + T[:3,3]`, /1000 → m. θ /
   turntable_frame.yaml / hand-eye 의존 **없음** → 화면 = SDK SLAM 결과 그 자체.
+
+#### 8.1 노이즈·배경 제거 (A+B, 2026-05-19)
+
+진단: 화면이 거친 건 transform 문제가 **아님**(코드·스크린샷의 일관된
+박스 구조가 transform 정상임을 증명). 원인 = (i) Spider raw flying-pixel
+노이즈를 필터 0 으로 누적(흰 눈발), (ii) 물체 isolation 없이 턴테이블·
+배경까지 누적, (iii) Studio 는 증분 fused mesh 인데 우리는 raw 점 dump
+(구조적 차이, Open3D 제약 §8 으로 의도된 선택).
+
+- **A. per-frame outlier 제거** (`add_frame`, 누적 전; "writer 는
+  Open3D 미접촉" 원칙 유지 → numpy 전용): `live_denoise_vox_mm`(기본
+  6mm) 로 프레임 voxel 화, 점수 < `live_denoise_min_pts`(기본 4) 인
+  voxel 의 점 제거(고립 flying-pixel). frame-local, 결합 0.
+- **B. object-envelope gate** (옵션, fail-open): Phase1
+  `_motion_probe_object` envelope(축 `axis_xy`,`r_obj`,`z_lo/z_hi`,
+  base B). Phase1 회전 중 robot 고정 → scan-time `T_CB` 상수. 프레임
+  sensor verts → `T_CB` 로 base B → **수직 실린더 멤버십**(축까지
+  수평거리 ≤ `r_obj+env_r_margin` ∧ z∈[`z_lo-env_z_margin`,
+  `z_hi+env_z_margin`]) 통과만 누적. **실린더가 턴테이블 축 대칭이라
+  물체가 돌아도(base 에서 이동) 멤버십 불변** → 단일 고정 `T_CB` 로 전
+  회전 게이트 성립. **누적 좌표계는 그대로 SDK scan-world** (B 는 표시
+  필터일 뿐, 누적 변환 불변). env/`T_CB` 없으면(probe 실패/skip) gate
+  자동 OFF = A 만 동작.
+- 결합 주의: §8 첫 원칙("hand-eye/θ/turntable 무의존")에 B 가 **표시
+  필터 한정**의 약결합을 추가(fail-open — 없으면 기존 거동). 주입 =
+  `LiveScanViewer.set_object_gate(T_CB, env)` (multipass `run()` 이
+  probe 성공 시 1회).
+- 새 설정(`ArtecMultiPassScanSessionSettings`→LiveScanViewer 전달):
+  `live_denoise_vox_mm`, `live_denoise_min_pts`, `live_object_gate`
+  (기본 True). gate 여유는 `env_r_margin_mm`/`env_z_margin_mm` 재사용.
+- 한계: Studio 급 fused-textured-mesh 아님(무거운 C 옵션 보류). A+B
+  목표 = "흰 눈발 제거된 **물체만** 점군".
 - **아키텍처 (검증된 유일 구성)**:
   - 파이프라인측 `LiveScanViewer` = 컨트롤러만. Open3D/Popen 안 함. 매 OK
     프레임 누적 → `output/_live_latest.npy` atomic write
@@ -420,8 +524,9 @@ model_add_scan` (`artec_base_binding.cpp`). composite 는 fusion 후
     백그라운드 스레드가 snapshot mtime 폴링 → `post_to_main_thread`.
 - 실행: 터미널A `python main_artec.py` / 터미널B `python
   scripts/artec/live_scan_view.py` (순서 무관, A 종료 시 B 자동 종료,
-  정합 끊기면 배경 빨강). 튜닝: `LiveScanViewer(voxel_mm=…)`,
-  `live_scan_view.py` 상단 `GAMMA`/`POINT_SIZE`.
+  정합 끊기면 배경 빨강). 튜닝: `voxel_mm`,
+  `live_denoise_vox_mm`/`live_denoise_min_pts`(A), `live_object_gate`
+  + `env_*_margin_mm`(B), `live_scan_view.py` 상단 `GAMMA`/`POINT_SIZE`.
 - **금지 (확정 실패 경로)**: legacy `o3d.visualization.Visualizer` 는 이
   환경에서 동적 PointCloud 못 그림(메쉬는 됨). Popen 으로 띄운 자식
   Filament 창은 즉시 죽음. → 뷰어는 사용자가 별도 터미널 실행.

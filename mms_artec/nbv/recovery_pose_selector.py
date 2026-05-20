@@ -1,19 +1,18 @@
 # mms_artec/nbv/recovery_pose_selector.py
 #
-# Tracking-lost recovery 시 스캐너 (= xArm EE) 를 어디로 이동시킬지 결정.
+# Spider v1 광학 상수 + 광축 캘리브/look-at 헬퍼.
 #
-# 두 전략을 swap 가능한 인터페이스로 제공:
-#   Method A — LocalJitterSelector:
-#       현재 camera pose 주변 ±3cm translation, ±8° rotation 으로 N 개 candidate
-#       샘플. 각 candidate 에서 master point cloud 를 카메라 frustum 에 raycast
-#       (occlusion 무시 — 속도 우선) 해 가시 점 개수 최대인 후보 선택.
-#       → exploitation: 마스터와 overlap 보장.
+# 2026-05-20 rule 변경: 옛 selector 패턴(LocalJitterSelector·CentroidVectorSelector)
+# 폐기. tracking-lost recovery 는 `ArtecMultiPassScanSession._attempt_recovery`
+# → `_adaptive_prescan_position(recovery=True)` (fresh probe + 축소 elevation
+# search) 로 통합 처리. 자세한 흐름은 docs/artec_scanning_pipeline.md §6.
 #
-#   Method B — CentroidVectorSelector:
-#       마스터 mesh 의 centroid 를 base frame 으로 변환. 마지막 실패 카메라 방향의
-#       반대편 위치 (centroid 기준) 에서 centroid 를 향하도록 카메라 pose 계산.
-#       Stand-off 거리는 Spider v1 working range (200–300mm) 중간값 250mm.
-#       → exploration: 보지 못한 면 우선.
+# 이 모듈은 그 통합 경로가 쓰는 공용 헬퍼·상수 보관소:
+#   - Spider v1 광학 상수 (FOV, working range, default stand-off)
+#   - look_at / look_at_axes : C 프레임 광축 컨벤션을 존중하는 look-at
+#   - calibrate_camera_axes_from_preview : home preview 로 광축 경험적 캘리브
+#   - master_points_in_base_frame / visible_point_count : raycast 유틸
+#     (현 selector-less 경로에선 미사용이지만 호환·테스트용으로 보존)
 #
 # Spider v1 spec (artec3d.com/portable-3d-scanners/old/spider):
 #   - Working distance 170–350mm (optimal ~200–250mm)
@@ -24,8 +23,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Optional
 
 import numpy as np
 
@@ -361,184 +359,8 @@ def calibrate_camera_axes_from_preview(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Protocol
+# 옛 Selector 패턴 (RecoveryPoseDecision / RecoveryPoseSelector Protocol /
+# LocalJitterSelector / CentroidVectorSelector) 은 2026-05-20 제거됨.
+# tracking-lost recovery 는 ArtecMultiPassScanSession._attempt_recovery 가
+# _adaptive_prescan_position(recovery=True) 를 호출하는 통합 경로로 일원화.
 # ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class RecoveryPoseDecision:
-    """selector 가 반환하는 결정."""
-    T_CB_target: np.ndarray             # 4x4, camera C → B (translation m)
-    score: float = 0.0                  # selector 별 의미 (높을수록 좋음)
-    debug_info: str = ""                # 로그용
-
-
-class RecoveryPoseSelector(Protocol):
-    """Tracking-lost 발생 시 새 camera pose 를 결정하는 인터페이스."""
-
-    name: str
-
-    def select(
-        self,
-        T_CB_current: np.ndarray,       # 현재 (lost 직전) camera pose, C → B
-        master_pts_B_mm: np.ndarray,    # master point cloud (M,3), base frame mm
-    ) -> Optional[RecoveryPoseDecision]:
-        """후보 없거나 평가 불가면 None — multipass 가 fallback 처리."""
-        ...
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Method A — Local jitter + raycast scoring
-# ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class LocalJitterSelector:
-    """
-    현재 pose 주변에서 무작위 N 개 candidate 샘플 → raycast scoring → top-1.
-
-    exploitation 계열: 마스터와 overlap 보장이 목적.
-
-    Parameters
-    ----------
-    n_candidates : int
-        무작위 샘플 개수. 큰 값은 더 좋은 후보 가능성 ↑ 이지만 raycast 시간 ∝.
-    trans_mm : float
-        translation jitter 의 균등분포 반경 (각 축, ±). default 30mm.
-    rot_deg : float
-        rotation jitter 의 균등분포 반경 (roll/pitch/yaw, ±). default 8°.
-    include_current : bool
-        candidate 에 "현재 pose 그대로" 도 포함할지. True 면 jitter 가 모두
-        나쁜 경우 "이동 안 함" 선택지 보존.
-    seed : Optional[int]
-        재현 가능한 jitter 위해.
-    """
-    n_candidates: int = 9
-    trans_mm: float = 30.0
-    rot_deg: float = 8.0
-    include_current: bool = True
-    seed: Optional[int] = None
-    name: str = "local_jitter"
-
-    def select(
-        self,
-        T_CB_current: np.ndarray,
-        master_pts_B_mm: np.ndarray,
-    ) -> Optional[RecoveryPoseDecision]:
-        if master_pts_B_mm.shape[0] == 0:
-            return None
-
-        rng = np.random.default_rng(self.seed)
-        trans_m = self.trans_mm / 1000.0     # mm → m (T_CB translation 은 m)
-        rot_rad = np.radians(self.rot_deg)
-
-        # candidate 0 = 현재 pose (옵션)
-        candidates = []
-        if self.include_current:
-            candidates.append(T_CB_current.copy())
-        for _ in range(self.n_candidates):
-            dx = rng.uniform(-trans_m, trans_m)
-            dy = rng.uniform(-trans_m, trans_m)
-            dz = rng.uniform(-trans_m, trans_m)
-            rrx = rng.uniform(-rot_rad, rot_rad)
-            rry = rng.uniform(-rot_rad, rot_rad)
-            rrz = rng.uniform(-rot_rad, rot_rad)
-            dT = np.eye(4)
-            dT[:3, :3] = _rot_xyz(rrx, rry, rrz)
-            dT[:3, 3] = [dx, dy, dz]
-            # jitter 를 카메라 frame 에서 적용 (camera-local) → T_CB_new = T_CB @ dT
-            candidates.append(T_CB_current @ dT)
-
-        scores = [
-            visible_point_count(master_pts_B_mm, T_cand)
-            for T_cand in candidates
-        ]
-        best_idx = int(np.argmax(scores))
-        best_score = scores[best_idx]
-        if best_score == 0:
-            return None
-
-        # current 가 best 면 같은 자리 — multipass 가 처리 (no-op 이동)
-        cand = candidates[best_idx]
-        tag = "current" if (self.include_current and best_idx == 0) else f"j{best_idx}"
-        return RecoveryPoseDecision(
-            T_CB_target=cand,
-            score=float(best_score),
-            debug_info=f"local_jitter top={tag} visible={best_score} "
-                       f"(of {len(candidates)} cand)",
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Method B — Centroid-vector, opposite of failed direction
-# ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class CentroidVectorSelector:
-    """
-    Master centroid 를 기준으로 마지막 실패 방향의 반대편에 stand_off_mm 떨어진
-    위치에서 centroid 를 바라보는 카메라 pose.
-
-    exploration 계열: 보지 못한 면 우선.
-
-    Parameters
-    ----------
-    stand_off_mm : float
-        centroid → 카메라 거리. Spider working range 중간값 250mm.
-    up_hint_B : (3,) np.ndarray
-        look_at 의 up 힌트 (base frame). default = world Z up.
-    fwd_C, up_C : Optional[(3,)] np.ndarray
-        둘 다 주어지면 hardcoded +Z 가정의 `look_at` 대신 경험적 캘리브된
-        축으로 `look_at_axes` 사용 → memory 의 centroid_vector latent
-        bug(광축 mis-aim) 해소. default None = 기존 동작 그대로 (recovery
-        기본 거동 불변). multipass 가 캘리브 후 주입.
-    """
-    stand_off_mm: float = SPIDER_DEFAULT_STANDOFF_MM
-    up_hint_B: np.ndarray = None
-    fwd_C: Optional[np.ndarray] = None
-    up_C: Optional[np.ndarray] = None
-    name: str = "centroid_vector"
-
-    def __post_init__(self):
-        if self.up_hint_B is None:
-            self.up_hint_B = np.array([0.0, 0.0, 1.0])
-
-    def select(
-        self,
-        T_CB_current: np.ndarray,
-        master_pts_B_mm: np.ndarray,
-    ) -> Optional[RecoveryPoseDecision]:
-        if master_pts_B_mm.shape[0] == 0:
-            return None
-
-        centroid_B_mm = master_pts_B_mm.mean(axis=0)     # (3,) mm
-        centroid_B_m = centroid_B_mm / 1000.0
-
-        # 현재 카메라 위치 (B frame, m)
-        cam_pos_B_m = T_CB_current[:3, 3]
-        # 현재 카메라 → centroid 벡터 (= "실패했던 방향")
-        v_cam_to_centroid = centroid_B_m - cam_pos_B_m
-        d = np.linalg.norm(v_cam_to_centroid)
-        if d < 1e-6:
-            # 카메라가 centroid 위에 있음 — 위쪽으로 도망
-            v_failed = np.array([0.0, 0.0, -1.0])
-        else:
-            v_failed = v_cam_to_centroid / d
-        # 반대편 = centroid 에서 -v_failed 방향
-        eye_B_m = centroid_B_m + (-v_failed) * (self.stand_off_mm / 1000.0)
-
-        if self.fwd_C is not None and self.up_C is not None:
-            # 경험적 캘리브된 광축 — mis-aim bug 회피
-            T_CB_target = look_at_axes(
-                eye_B_m, centroid_B_m, self.fwd_C, self.up_C,
-                world_up_B=self.up_hint_B)
-        else:
-            T_CB_target = look_at(eye_B_m, centroid_B_m, up_hint=self.up_hint_B)
-
-        # score — frustum 안 master 점 개수 (참고용, 결정엔 미사용)
-        score = visible_point_count(master_pts_B_mm, T_CB_target)
-        return RecoveryPoseDecision(
-            T_CB_target=T_CB_target,
-            score=float(score),
-            debug_info=f"centroid_vector centroid_B=({centroid_B_mm[0]:+.1f}, "
-                       f"{centroid_B_mm[1]:+.1f}, {centroid_B_mm[2]:+.1f})mm "
-                       f"eye→stand_off={self.stand_off_mm:.0f}mm score={score}",
-        )

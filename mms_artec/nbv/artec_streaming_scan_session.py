@@ -67,7 +67,10 @@ class ArtecStreamingScanSessionSettings:
     sensitivity: Optional[float] = None
     scan_range_near_mm: Optional[float] = None
     scan_range_far_mm:  Optional[float] = None
-    ignore_registration_errors: bool = True
+    # ★ False: SDK 가 reg_err<0 프레임을 IScan 에 안 넣음 → 노이즈 감소.
+    # True 였을 땐 정합 실패 프레임도 IScan 에 우겨넣어 cloud 형상 망가짐.
+    # 단점: tracking_lost 가 정직하게 더 자주 trip 될 수 있음 (그게 맞는 신호).
+    ignore_registration_errors: bool = False
 
     # ── 트래킹 손실 정책 ──────────────────────────────────────────────
     # (1) 연속 N 프레임 정합 실패 → tracking_lost.
@@ -540,7 +543,7 @@ class ArtecStreamingScanSession:
         last_good_theta_rad: float = 0.0   # reg_err >= 0 였던 마지막 sample 의 θ
         # 라이브 뷰어 진단 카운터 — 검은 화면 디버깅용
         _lv_ev = 0          # 받은 총 이벤트
-        _lv_okmesh = 0      # OK + frame_mesh 있는 이벤트 (= viewer 에 공급)
+        _lv_okmesh = 0      # OK + frame_mesh + reg_err>=0 (= viewer 에 공급)
         _lv_feederr = ""    # 첫 feed 예외 메시지
         try:
             while True:
@@ -561,6 +564,13 @@ class ArtecStreamingScanSession:
                 # ── 라이브 뷰어 공급 (메인 스레드, race 없음) ───────────
                 # OK 프레임의 frame_mesh + SDK 정합행렬(ev.transformation)을
                 # scan-world 로 누적. 예외는 viewer 내부에서 삼킴 → 스캔 영향 0.
+                #
+                # ★ 필터는 SDK 가 IScan 에 넣는 기준과 동일하게만 — viewer 는
+                #   IScan 을 그대로 비추는 거울이어야 함 ([[feedback_live_viewer
+                #   _must_mirror_scan]]). ignore_registration_errors=False 일 때
+                #   SDK 가 reg_err<0 프레임을 IScan 에 안 넣음 → viewer 도 동일
+                #   기준으로 거름. 그 외 high-error / warm-up 같은 추가 게이트는
+                #   둘 다 IScan 에 들어가니 viewer 에서도 통과시켜야 거짓말 없음.
                 if events:
                     _lv_ev += len(events)
                 if live is not None and live_ok and events:
@@ -569,7 +579,8 @@ class ArtecStreamingScanSession:
                         for ev in events:
                             if (ev.frame_state == FS.OK
                                     and ev.frame_mesh is not None
-                                    and ev.transformation is not None):
+                                    and ev.transformation is not None
+                                    and float(ev.registration_error) >= 0.0):
                                 _lv_okmesh += 1
                                 live.add_frame(ev.frame_mesh,
                                                ev.transformation)

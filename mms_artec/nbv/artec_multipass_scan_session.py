@@ -29,16 +29,13 @@ from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
 
-from mms_artec.sensor import artec_base
+from mms_artec.sensor import artec_algorithm, artec_base
 from mms_artec.nbv.artec_streaming_scan_session import (
     ArtecStreamingScanSession,
     ArtecStreamingScanSessionSettings,
     ArtecStreamingScanResult,
 )
 from mms_artec.nbv.recovery_pose_selector import (
-    RecoveryPoseSelector,
-    CentroidVectorSelector,
-    master_points_in_base_frame,
     look_at_axes,
     calibrate_camera_axes_from_preview,
     SPIDER_HALF_FOV_H,
@@ -134,19 +131,28 @@ class ArtecMultiPassScanSessionSettings:
     pose_physical_rotations: List[Optional[np.ndarray]] = field(default_factory=list)
 
     # ── Tracking-lost auto-recovery ─────────────────────────────────────
-    # None 이면 기존 동작 (user prompt). 인스턴스 주면 자동 복구:
+    # 2026-05-20 재설계: selector(LocalJitter/CentroidVector) 폐기.
+    # tracking lost 발생 시:
     #   1. last-good 각도 + safe_back_margin_deg 까지 turntable 역회전
-    #   2. selector 가 다음 카메라 pose 결정 → robot 이동
+    #   2. _adaptive_prescan_position(recovery=True) 호출:
+    #        - fresh probe → envelope + (r,z) profile
+    #        - elevation search (recovery 축소 후보) → best 자세로 robot 이동
     #   3. 다음 streaming pass 진행 (pose_idx 유지)
     # 같은 pose 안에서 연속 max_recovery_retries 회까지 자동 시도, 초과하면
     # user prompt 로 fallback.
-    recovery_selector: Optional[RecoveryPoseSelector] = None
+    auto_recovery_enabled: bool = True
     max_recovery_retries: int = 3
     safe_back_margin_deg: float = 10.0
     # Recovery 시 robot 이동 속도 (deg/s) — collision 위험 최소화 위해 보수적.
     recovery_robot_speed_deg_s: float = 10.0
     # Recovery turntable 역회전 속도 (rad/s).
     recovery_turntable_vel_rad_s: float = float(np.radians(30.0))
+    # Recovery 시 elevation search 축소 — 시간 단축 (~1분 → ~30초).
+    # 첫 시작은 elevation 호출 안 함(home 그대로). recovery 일 때만 이 후보로.
+    # docs/artec_scanning_pipeline.md §6.3.
+    recovery_elevation_offsets_deg: List[float] = field(
+        default_factory=lambda: [-5.0, 0.0, 5.0])
+    recovery_elevation_fine_search_enabled: bool = False
 
     # ── 라이브 뷰어 ───────────────────────────────────────────────────
     # True 면 모든 pass(Phase1 + Phase2) 동안 누적 컬러 포인트클라우드를
@@ -154,45 +160,34 @@ class ArtecMultiPassScanSessionSettings:
     # 성능/안정성에 영향 주지 않도록 모든 viewer 경로가 예외 격리됨.
     enable_live_viewer: bool = False
 
-    # ── 물체-적응 사전 포지셔닝 (Phase 1, run() 시작 1회) ──────────────
-    # True 면 회전 전 PREVIEW 로 물체 크기/위치 추정 → 스캐너를 최적
-    # 작업거리·조준으로 이동. 회전 중에는 robot 고정. 실패해도 home 유지로
-    # 진행(스캔에 영향 없음). 상세: docs/artec_scanning_pipeline.md §3.0.
-    adaptive_phase1_positioning: bool = True
+    # ── 물체-적응 자세 재선정 (recovery 전용, 2026-05-20 rule) ──────────
+    # 첫 시작은 robot=home 그대로. tracking lost 시 recovery 흐름이
+    # _adaptive_prescan_position(recovery=True) 를 호출 → fresh probe +
+    # elevation search → 새 robot 자세. 상세: docs/artec_scanning_pipeline.md §6.
+    # 아래 키들은 그 알고리즘의 공통 파라미터.
     adaptive_target_standoff_mm: float = 225.0   # 최적대역 중앙 목표 거리
     adaptive_min_preview_verts: int = 1500       # preview 유효 최소 정점
     adaptive_robot_speed_deg_s: float = 15.0
 
-    # ── Phase 1 고도각(elevation) 탐색 ────────────────────────────────
-    # adaptive_phase1_positioning=True 일 때만 의미. True 면 거리뿐 아니라
-    # 물체중심 둘레 zx평면 호를 따라 여러 고도각 후보를 preview·스코어해
-    # 최적 1개 선택 후 robot 고정 (회전 중 불변식 유지). False 면 기존
-    # 거리-only 적응(home orientation + 시선 ray 평행이동).
-    # 재조준은 hardcoded +Z 가정의 look_at 이 아니라 home preview 로
-    # 경험적 캘리브된 광축(look_at_axes)을 써서 mis-aim bug 회피.
-    # 상세: docs/artec_scanning_pipeline.md §3.0.
-    phase1_elevation_search: bool = True
-    # 적응형 coarse→fine (docs §3.0 step 6). 2026-05-19 실측: 최적이 −10°
-    # 부근 peak, +φ 측은 허공 조준 낭비, −15° 는 너무 깊어 턴테이블 상판
-    # 미관측 → 범위 [−10°,+10°] 대칭 5° grid (fine 이 음측 보완).
-    # coarse: home_dist(비퇴행) + 아래 오프셋. fine: coarse best φ* 주변
-    # φ*±fine_step (range clamp, ε중복 skip, best=home_dist 면 생략).
+    # ── 고도각(elevation) 탐색 공통 파라미터 ───────────────────────────
+    # recovery 호출 시의 elevation search 범위·기본 offsets. 재조준은
+    # hardcoded +Z 가정의 look_at 이 아니라 probe preview 로 경험적 캘리브된
+    # 광축(look_at_axes)을 써서 mis-aim bug 회피.
+    # 상세: docs/artec_scanning_pipeline.md §3.0 / docs/artec_phase1_view_score.md.
     elevation_range_deg: tuple = (-10.0, 10.0)        # 탐색범위 clamp
-    elevation_coarse_offsets_deg: List[float] = field(
-        default_factory=lambda: [-10.0, -5.0, 0.0, 5.0, 10.0])
-    elevation_fine_step_deg: float = 2.5              # best 주변 ± 미세조정
-    # v1 스코어: 분리된 '물체점' 중 최적 작업거리 밴드(mm) ∩ 카메라 FOV
-    # 안의 개수. (배경/턴테이블/바닥은 isolation 단계에서 이미 빠짐.)
+    elevation_fine_step_deg: float = 2.5              # fine 활성 시 ±
+    # v1.5 스코어: 분리된 '물체점' 중 카메라 FOV 안 + Gaussian 거리가중 합.
+    # band 끝(200/250mm)은 약 e⁻¹ 가중, d* (225mm) 가 최대.
     elevation_optimal_band_mm: tuple = (200.0, 250.0)
 
-    # ── Phase 1 턴테이블 회전 차분 물체 probe (docs §3.0 선행1) ─────────
+    # ── 턴테이블 회전 차분 물체 probe (docs §3.0 선행1) ─────────────────
     # 단일뷰 RANSAC isolation 폐기 (Spider 협FOV → 부분 패치라 원리적
     # 불가, memory project_spider_partial_view_no_scene_segmentation).
-    # 대신: robot=home 고정, 턴테이블을 step 회전하며 preview 캡처 →
+    # 대신: robot 고정, 턴테이블을 step 회전하며 preview 캡처 →
     # voxel frame-support 로 static(회전대칭 디스크·정적 배경) 제거 →
     # moving = 물체. 명령각으로 회전축·envelope(수직 실린더) 자동 산출.
     # scan 데이터 무영향 (조준 결정용 preview 전용).
-    phase1_motion_probe: bool = True
+    # recovery 흐름에서 _adaptive_prescan_position 호출 시 매번 fresh probe.
     probe_total_deg: float = 150.0            # probe 총 회전각
     probe_steps: int = 6                      # 분할 수(프레임 K=steps+1)
     probe_turntable_vel_rad_s: float = float(np.radians(20.0))
@@ -205,10 +200,43 @@ class ArtecMultiPassScanSessionSettings:
     probe_axis_resid_max_mm: float = 25.0     # centroid-circle 잔차 한계
     env_r_margin_mm: float = 8.0              # envelope 반경 여유
     env_z_margin_mm: float = 6.0              # envelope z 여유
-    # 디버그: probe step별 static/moving + 최종 object 색상 PLY 덤프.
+    # ── 물체/턴테이블 분리 (2026-05-20, docs §3.0 step 6) ───────────────
+    # cylinder envelope 만으로는 z_bot≈z_table 부근 디스크 표면이 "물체점"
+    # 으로 새어 잘못된 best 가 뽑히는 회귀가 있어 두 가지를 추가:
+    #  (i) table_clear_mm: z ≤ z_table + table_clear_mm 점은 무조건 제외.
+    #      평평한 물체 바닥 일부 잘림은 Phase 2 가 별도 캡처해 보완.
+    #  (ii) (r,z) 축대칭 profile: moving voxel 의 (반경,높이) 2D 점유 맵을
+    #      만들어 cylinder lookup 대신 실제 단면을 본다. 축대칭화 되어 있어
+    #      probe 150° 만 돌아도 모든 θ candidate 에 멤버십 성립.
+    table_clear_mm: float = 8.0
+    profile_bin_mm: float = 0.0               # 0 = probe_vox_mm 재사용
+    profile_r_margin_mm: float = 6.0          # (r,z) 점유 반경 dilation
+    profile_z_margin_mm: float = 6.0          # (r,z) 점유 높이 dilation
+    # 디버그: probe step별 static/moving + 최종 object + elevation 후보별
+    # (통과 녹/턴테이블floor 빨강/profile 밖 회) 색상 PLY 덤프.
     # 기본 OFF — scan/성능 무영향. CloudCompare 로 검증. docs §3.0.
     probe_debug_dump: bool = False
     iso_debug_dir: str = "output/iso_debug"
+
+    # 병합 비교용: False 면 _merge_into_master 가 IScan frame_transformations 에
+    # T_pre 를 set 하지 않고 result.recorded_hints 에 (scan_index, T_pre) list 로만
+    # 기록. 후처리 단계에서 hint 적용 여부 / GlobalReg 타입을 swap 해가며 같은
+    # raw scan 데이터로 여러 variant 비교 가능 (scripts/artec/merge_compare.py).
+    # 기본 True = 기존 동작 (hint 즉시 적용).
+    apply_hints_to_frame_transformations: bool = True
+
+    # ── Hint ICP refine (2026-05-20, face-merging 회피용) ───────────────
+    # True 면 centroid-pivot T_pre 를 *init* 으로 Open3D colored ICP 를 돌려
+    # **측정된** T 를 얻고 그걸 IScan frame 에 박음. 사용자 손회전의 ±10° 오차를
+    # 흡수하면서 init 이 ambiguity 를 깨는 역할. 캔처럼 앞-뒤 유사한 객체에서
+    # SDK GlobalReg 가 두 면을 합치는 face-merging 문제 회피.
+    # apply_hints_to_frame_transformations=True 일 때만 의미. False (record-only)
+    # 모드에선 recorded_hints 에는 raw init T_pre 기록 + 후처리에서 별도 ICP 가능.
+    hint_icp_refine_mode: bool = False
+    icp_voxel_mm: float = 4.0           # downsample voxel (속도 ↔ 정확)
+    icp_max_iter: int = 60
+    icp_color_weight: float = 0.5       # colored ICP 의 색상 가중 (Open3D 0.6)
+    icp_corr_dist_mm: float = 30.0      # 대응 거리 한계 (init 이 좋으면 작게)
 
     def __post_init__(self):
         if self.streaming_settings is None:
@@ -228,6 +256,12 @@ class ArtecMultiPassScanResult:
     master_center_mm: Optional[np.ndarray] = None   # Pass 1 의 centroid (mm)
     n_recovery_attempts: int = 0                    # 자동 recovery 가 trigger 된 횟수
     n_recovery_succeeded: int = 0                   # recovery 후 정상 완료된 pass 수
+    # 병합 비교용 (apply_hints_to_frame_transformations=False 일 때만 채워짐).
+    # 각 entry = (master 내 scan_index, T_pre 4x4). 후처리에서 선택적 적용.
+    recorded_hints: List[tuple] = field(default_factory=list)
+    # Hint ICP refine 진단 (hint_icp_refine_mode=True 일 때 채워짐).
+    # 각 entry = (scan_index, T_init, T_measured, fitness, inlier_rmse_mm).
+    icp_refine_log: List[tuple] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,7 +403,9 @@ class ArtecMultiPassScanSession:
             return c, float(np.std(np.linalg.norm(P - c, axis=1)))
 
     def _in_object_envelope(self, xB, env) -> np.ndarray:
-        """envelope(수직 실린더) 멤버십 bool mask. pose 무관·견고."""
+        """envelope(수직 실린더) 멤버십 bool mask. cylinder pre-clip 용 —
+        candidate scoring 은 `_in_object_profile` (turntable floor +
+        (r,z) profile) 를 써야 한다."""
         s = self.s
         ax = np.asarray(env["axis_xy"], float)
         rad = np.linalg.norm(xB[:, :2] - ax, axis=1)
@@ -378,6 +414,50 @@ class ArtecMultiPassScanSession:
             & (xB[:, 2] >= env["z_lo"] - s.env_z_margin_mm / 1000.0)
             & (xB[:, 2] <= env["z_hi"] + s.env_z_margin_mm / 1000.0)
         )
+
+    def _in_object_profile(self, xB, env) -> tuple:
+        """
+        물체 멤버십 + 턴테이블 평면 hard floor. docs §3.0 step 6.
+          (i) cylinder pre-clip — 빠르고 보수적.
+          (ii) `z > z_table + table_clear_mm` hard floor — 디스크 표면
+               (z_bot≈z_table) 이 cylinder 안에서 "물체점"으로 새던 회귀를
+               차단. 평평한 물체 바닥 일부는 비용으로 수용 (Phase 2 가 따로).
+          (iii) probe (r,z) 점유 맵 lookup (`env['rz_occ']`) — moving voxel
+               의 실제 축대칭 단면. cylinder bounding 보다 정확
+               (overhang/패임 그대로). 맵 없으면 cylinder + floor 만.
+
+        Returns (mask_obj, mask_excluded_table) — 두 mask 가 disjoint.
+          mask_obj: 후보 스코어 산입 대상.
+          mask_excluded_table: cylinder 안인데 floor 에 잘린 점 (진단용,
+            "그 자세는 턴테이블을 얼마나 봤나" 지표).
+        """
+        s = self.s
+        ax = np.asarray(env["axis_xy"], float)
+        z = xB[:, 2]
+        rad = np.linalg.norm(xB[:, :2] - ax, axis=1)
+        in_cyl = (
+            (rad <= float(env["r_obj"]) + s.env_r_margin_mm / 1000.0)
+            & (z >= float(env["z_lo"]) - s.env_z_margin_mm / 1000.0)
+            & (z <= float(env["z_hi"]) + s.env_z_margin_mm / 1000.0)
+        )
+        z_floor = float(env["z_table"]) + s.table_clear_mm / 1000.0
+        above = z > z_floor
+        mask_excl_table = in_cyl & (~above)
+        rz_occ = env.get("rz_occ")
+        if rz_occ is None:
+            return in_cyl & above, mask_excl_table
+        bin_m = float(env["bin_mm"]) / 1000.0
+        r0 = float(env["r_origin_m"])
+        z0 = float(env["z_origin_m"])
+        nr, nz = rz_occ.shape
+        ri = np.floor((rad - r0) / bin_m).astype(np.int64)
+        zi = np.floor((z - z0) / bin_m).astype(np.int64)
+        in_b = (ri >= 0) & (ri < nr) & (zi >= 0) & (zi < nz)
+        cand = in_cyl & above & in_b
+        mask_obj = np.zeros(len(xB), dtype=bool)
+        if cand.any():
+            mask_obj[cand] = rz_occ[ri[cand], zi[cand]]
+        return mask_obj, mask_excl_table
 
     def _dump_probe_ply(self, valid, static, vox, obj_all, stage) -> None:
         """probe 디버그 PLY — static(회)·moving(파)·object(초). 예외 격리."""
@@ -422,6 +502,44 @@ class ArtecMultiPassScanSession:
                   f"obj={0 if obj_all is None else len(obj_all)}")
         except Exception as e:
             print(f"  [probe.dbg] dump 실패 ({type(e).__name__}: {e})")
+
+    def _dump_candidate_ply(
+        self, verts_C_mm, T_CB, env, seq, tag,
+    ) -> None:
+        """elevation 후보 preview 를 통과(녹)/turntable floor(빨강)/profile
+        밖(회) 으로 색칠해 PLY 덤프. probe_debug_dump=True 일 때만 호출.
+        scan/성능 무영향 — 예외는 모두 격리. docs §3.0."""
+        try:
+            import os
+            import open3d as o3d
+            xB = ((np.asarray(verts_C_mm, float) / 1000.0)
+                  @ np.asarray(T_CB[:3, :3], float).T
+                  + np.asarray(T_CB[:3, 3], float))
+            mask_obj, mask_excl = self._in_object_profile(xB, env)
+            cols = np.tile([0.6, 0.6, 0.6], (len(xB), 1))
+            cols[mask_excl] = [0.95, 0.15, 0.15]
+            cols[mask_obj] = [0.15, 0.95, 0.25]
+            d = getattr(self.s, "iso_debug_dir", "output/iso_debug")
+            if not os.path.isabs(d):
+                try:
+                    from utils import PROJECT_ROOT
+                    d = os.path.join(str(PROJECT_ROOT), d)
+                except Exception:
+                    d = os.path.abspath(d)
+            os.makedirs(d, exist_ok=True)
+            safe = (tag.replace("+", "p").replace("-", "m")
+                    .replace(".", "d"))
+            fn = os.path.join(d, f"cand_{seq:02d}_{safe}.ply")
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(xB)
+            pcd.colors = o3d.utility.Vector3dVector(cols)
+            okw = bool(o3d.io.write_point_cloud(fn, pcd))
+            sz = os.path.getsize(fn) if os.path.isfile(fn) else 0
+            print(f"  [elev.dbg] {'OK' if okw and sz > 0 else '✘ FAIL'} "
+                  f"{fn} ({sz}B) obj={int(mask_obj.sum())} "
+                  f"excl={int(mask_excl.sum())} tot={len(xB)}")
+        except Exception as e:
+            print(f"  [elev.dbg] dump 실패 ({type(e).__name__}: {e})")
 
     def _motion_probe_object(self, T_CB_home) -> dict:
         """
@@ -588,6 +706,11 @@ class ArtecMultiPassScanSession:
                 self._dump_probe_ply(valid, static, vox, obj_all, "calibfew")
             return out
 
+        # (r,z) 축대칭 occupancy — moving voxel 만으로 빌드. cylinder 와
+        # 별개의 "실제 단면" 멤버십 (docs §3.0 선행1, step 6).
+        rz_pack = self._build_rz_profile(
+            support, static, vox, axis_xy, r_obj, zlo, zhi)
+
         if s.probe_debug_dump:
             self._dump_probe_ply(valid, static, vox, obj_all, "ok")
         print(f"  [probe] frames={Kv} moving={moving_all.shape[0]} "
@@ -595,6 +718,12 @@ class ArtecMultiPassScanSession:
               f"{axis_xy[1]:+.3f}) resid={axis_resid*1000:.1f}mm "
               f"r={r_obj*1000:.0f}mm z=[{zlo:+.3f},{zhi:+.3f}] "
               f"h={(zhi-zlo)*1000:.0f}mm calib_frame={best_k}")
+        if rz_pack is not None:
+            print(f"  [probe] (r,z)profile bin={rz_pack['bin_mm']:.1f}mm "
+                  f"shape={rz_pack['rz_occ'].shape} "
+                  f"occ_cells={int(rz_pack['rz_occ'].sum())} "
+                  f"dilate=(r{s.profile_r_margin_mm:.0f},"
+                  f"z{s.profile_z_margin_mm:.0f})mm")
         out.update(
             ok=True,
             center_B=np.array([axis_xy[0], axis_xy[1], z_mid]),
@@ -606,7 +735,66 @@ class ArtecMultiPassScanSession:
             axis_resid_mm=float(axis_resid * 1000.0),
             moving_centroid_B=moving_all.mean(axis=0),
         )
+        if rz_pack is not None:
+            out.update(rz_pack)
         return out
+
+    def _build_rz_profile(
+        self, support, static, vox, axis_xy, r_obj, zlo, zhi,
+    ) -> Optional[dict]:
+        """
+        Moving voxel 들을 축 (axis_xy) 기준 (r-bin, z-bin) 2D 점유 맵으로
+        reduce — 축 둘레 360° **회전대칭화** 되어있어 probe 가 일부 각만
+        돌아도 모든 candidate θ 에서 멤버십 성립. docs §3.0 선행1.
+
+        Returns dict(rz_occ(bool,(nr,nz)), bin_mm, r_origin_m, z_origin_m)
+        또는 None (moving voxel 0 등 비정상).
+        """
+        s = self.s
+        moving_keys = [k for k, fs in support.items()
+                       if (k not in static) and len(fs) > 0]
+        if not moving_keys:
+            return None
+        bin_mm = (float(s.profile_bin_mm)
+                  if s.profile_bin_mm > 0 else float(s.probe_vox_mm))
+        bin_m = bin_mm / 1000.0
+        keys = np.asarray(moving_keys, dtype=np.int64)        # (M,3)
+        centers = (keys.astype(np.float64) + 0.5) * vox       # m, B 좌표
+        r = np.linalg.norm(centers[:, :2] - np.asarray(axis_xy), axis=1)
+        z = centers[:, 2]
+        r_origin = 0.0
+        z_origin = float(zlo) - 0.05            # 50mm below z_bot 안전여유
+        r_max = float(r_obj) + 0.030 + s.profile_r_margin_mm / 1000.0
+        z_max = float(zhi) + 0.05 + s.profile_z_margin_mm / 1000.0
+        nr = max(int(np.ceil((r_max - r_origin) / bin_m)), 1)
+        nz = max(int(np.ceil((z_max - z_origin) / bin_m)), 1)
+        ri = np.floor((r - r_origin) / bin_m).astype(np.int64)
+        zi = np.floor((z - z_origin) / bin_m).astype(np.int64)
+        in_b = (ri >= 0) & (ri < nr) & (zi >= 0) & (zi < nz)
+        if not in_b.any():
+            return None
+        rz_occ = np.zeros((nr, nz), dtype=bool)
+        rz_occ[ri[in_b], zi[in_b]] = True
+        r_d = int(np.ceil(s.profile_r_margin_mm / bin_mm))
+        z_d = int(np.ceil(s.profile_z_margin_mm / bin_mm))
+        if r_d > 0 or z_d > 0:
+            try:
+                from scipy.ndimage import binary_dilation
+                kernel = np.ones((2 * r_d + 1, 2 * z_d + 1), dtype=bool)
+                rz_occ = binary_dilation(rz_occ, structure=kernel)
+            except Exception:
+                dil = rz_occ.copy()
+                for dr in range(-r_d, r_d + 1):
+                    for dz in range(-z_d, z_d + 1):
+                        if dr == 0 and dz == 0:
+                            continue
+                        dil |= np.roll(
+                            np.roll(rz_occ, dr, axis=0), dz, axis=1)
+                rz_occ = dil
+        return dict(
+            rz_occ=rz_occ, bin_mm=float(bin_mm),
+            r_origin_m=float(r_origin), z_origin_m=float(z_origin),
+        )
 
     def _standoff_distance(self, h_obj: float, r_obj: float):
         """단일 band stand-off backoff → (d_m, partial). 거리만 적응."""
@@ -670,22 +858,26 @@ class ArtecMultiPassScanSession:
     def _phase1_view_score(self, verts_C_mm, T_CB_cand,
                            fwd_C, up_C, env) -> tuple:
         """
-        한 후보 preview 의 v1 품질 스코어.
-        후보 preview 를 candidate C→B 변환 후 **envelope 멤버십**
-        (`_in_object_envelope`, pose 무관)으로 물체점만 추려
-          최적 작업거리 밴드 ∩ 카메라 FOV 안의 개수.
-        배경/턴테이블은 envelope 밖이라 점수에 안 들어옴. (입사각 v2.)
+        후보 preview 의 v1.5 품질 스코어 (docs §3.0 step 6).
+        candidate C→B 변환 후 `_in_object_profile` (turntable floor +
+        (r,z) profile) 로 물체점 추출 → 카메라 FOV 안 점들을 Gaussian
+        거리가중으로 합산:
 
-        Returns (score, n_obj) — n_obj = envelope 안 물체점 수(진단용).
+            score = Σ_p∈objpts ∩ FOV  exp(-((depth_p − d*)/σ_d)²)
+            d*    = adaptive_target_standoff_mm (≈225mm)
+            σ_d   = (band_hi − band_lo) / 2     (band 끝 ≈ e⁻¹)
+
+        같은 개수라도 "최적 거리에 모인 각도" 가 이김.
+        Returns (score(float), n_obj, n_excl_table) — 진단 카운트 동봉.
         """
         s = self.s
         v_all = np.asarray(verts_C_mm, float)
         xB = ((v_all / 1000.0) @ np.asarray(T_CB_cand[:3, :3], float).T
               + np.asarray(T_CB_cand[:3, 3], float))
-        mask = self._in_object_envelope(xB, env)
-        if not mask.any():
-            return 0, 0
-        v = v_all[mask]                                  # 물체점, C mm
+        mask_obj, mask_excl = self._in_object_profile(xB, env)
+        if not mask_obj.any():
+            return 0.0, 0, int(mask_excl.sum())
+        v = v_all[mask_obj]                              # 물체점, C mm
         # 캘리브된 광학 정규직교 기저 (fwd, up⟂, right)
         e1 = fwd_C / max(np.linalg.norm(fwd_C), 1e-12)
         e2 = up_C - (up_C @ e1) * e1
@@ -695,14 +887,16 @@ class ArtecMultiPassScanSession:
         lat = v @ e3
         vert = v @ e2
         band_lo, band_hi = s.elevation_optimal_band_mm
-        pos = depth > 1.0
-        m = (
-            (depth >= band_lo) & (depth <= band_hi)
+        in_fov = (
+            (depth > 1.0)
             & (np.abs(lat) <= depth * np.tan(SPIDER_HALF_FOV_H))
             & (np.abs(vert) <= depth * np.tan(SPIDER_HALF_FOV_V))
-            & pos
         )
-        return int(np.sum(m)), int(mask.sum())
+        d_star = float(s.adaptive_target_standoff_mm)
+        sigma_d = max((band_hi - band_lo) / 2.0, 1.0)
+        w = np.exp(-((depth - d_star) / sigma_d) ** 2)
+        score = float(np.sum(np.where(in_fov, w, 0.0)))
+        return score, int(mask_obj.sum()), int(mask_excl.sum())
 
     def _distance_only_position(self, T_CB_home, est) -> None:
         """기존 거리-only 적응 — home orientation 유지 + 시선 ray 평행이동."""
@@ -732,14 +926,22 @@ class ArtecMultiPassScanSession:
             return
         self._recapture_T_BC("adaptive")
 
-    def _elevation_search(self, T_CB_home, env) -> None:
+    def _elevation_search(self, T_CB_home, env, offsets_deg,
+                          fine_search_enabled: bool) -> bool:
         """
-        probe envelope 기준 물체중심 피벗 zx평면 호 고도각을 적응형
-        coarse→fine 으로 탐색 (coarse: home_dist + 오프셋, fine: best
-        주변 ±fine_step). 후보별 preview 를 envelope 멤버십으로 물체점
-        판정 → v1 스코어 → best. 재조준 = probe 물체점 경험적 캘리브
-        광축(look_at_axes) → mis-aim 회피. 비퇴행: home_dist baseline,
-        유효후보 없으면 home 복귀. docs §3.0 step 5~7.
+        probe envelope 기준 물체중심 피벗 zx평면 호 고도각을 탐색.
+        - coarse: home_dist(비퇴행 baseline) + `offsets_deg` 후보
+        - fine: `fine_search_enabled` True 일 때만 coarse best φ* 주변
+                ±elevation_fine_step_deg 추가 평가
+        후보별 preview 를 envelope 멤버십으로 물체점 판정 → v1.5 스코어 →
+        best. 재조준 = probe 물체점 경험적 캘리브 광축(look_at_axes) →
+        mis-aim 회피. 유효후보 없으면 home 복귀. docs §3.0 / §6.
+
+        Returns
+        -------
+        moved : bool
+            True = best 자세로 robot 이동 완료, self._T_BC 재캡처됨.
+            False = home 유지 (또는 home 복귀).
         """
         s = self.s
         sensor = self.mms.sensor
@@ -770,12 +972,6 @@ class ArtecMultiPassScanSession:
                 and info["closure_rot_deg"] > 15.0):
             print(f"  [elev] ⚠ closure {info['closure_rot_deg']:.1f}° "
                   f"(>15°) — 캘리브 신뢰도 낮음, 그래도 진행")
-
-        # recovery selector(centroid_vector)에 캘리브 축 주입 (latent bug 해소)
-        if isinstance(s.recovery_selector, CentroidVectorSelector):
-            s.recovery_selector.fwd_C = fwd_C
-            s.recovery_selector.up_C = up_C
-            print(f"  [elev] centroid_vector selector 에 캘리브 축 주입")
 
         # 2. 피벗축 = world_z 와 radial_horizontal 에 모두 ⟂ 인 수평축
         #    (네가 말한 zx평면 = 현재 시선을 품은 수직면. yaml 미사용.)
@@ -811,9 +1007,11 @@ class ArtecMultiPassScanSession:
 
         score_min = max(300, s.adaptive_min_preview_verts // 3)
         best = None    # (score, tag, T_CB)
+        cand_seq = 0   # 디버그 PLY 시퀀스
 
         def _eval(tag, T_cand):
-            nonlocal best
+            nonlocal best, cand_seq
+            cand_seq += 1
             code = self._move_robot_to_T_CB(
                 T_cand, s.adaptive_robot_speed_deg_s)
             if code != 0:
@@ -824,26 +1022,30 @@ class ArtecMultiPassScanSession:
             if vC is None:
                 print(f"  [elev] {tag}: preview 부족 — score 0")
                 return
-            sc, n_obj = self._phase1_view_score(
+            sc, n_obj, n_excl = self._phase1_view_score(
                 vC, T_cand, fwd_C, up_C, env)
-            print(f"  [elev] {tag}: score={sc} (물체점 {n_obj})")
+            print(f"  [elev] {tag}: score={sc:.1f} "
+                  f"(obj {n_obj}, table_excl {n_excl})")
+            if s.probe_debug_dump:
+                self._dump_candidate_ply(vC, T_cand, env, cand_seq, tag)
             if best is None or sc > best[0]:
                 best = (sc, tag, T_cand)
 
         lo_r, hi_r = s.elevation_range_deg
 
-        # 3a. coarse — home_dist(비퇴행 baseline) + 음측 dense 오프셋
+        # 3a. coarse — home_dist(비퇴행 baseline) + offsets
         _eval("home_dist", T_home_dist)
         evaluated = []          # 평가한 φ (fine 중복 방지)
-        for p in s.elevation_coarse_offsets_deg:
-            phi = float(np.clip(p, lo_r, hi_r))
+        for p in offsets_deg:
+            phi = float(np.clip(float(p), lo_r, hi_r))
             if any(abs(phi - q) < 0.5 for q in evaluated):
                 continue
             _eval(f"c{phi:+.1f}", _pose_for_phi(phi))
             evaluated.append(phi)
 
-        # 3b. fine — coarse best φ*(≠home_dist) 주변 ±fine_step
-        if best is not None and best[1] != "home_dist" and best[0] > 0:
+        # 3b. fine (옵션) — coarse best φ*(≠home_dist) 주변 ±fine_step
+        if (fine_search_enabled and best is not None
+                and best[1] != "home_dist" and best[0] > 0):
             phi_star = float(best[1][1:])     # "c-10.0" → -10.0
             step = float(s.elevation_fine_step_deg)
             for phi in (phi_star - step, phi_star + step):
@@ -858,65 +1060,79 @@ class ArtecMultiPassScanSession:
             print(f"  [elev] 유효 후보 없음 — home 복귀")
             self._move_robot_to_T_CB(
                 T_CB_home, s.adaptive_robot_speed_deg_s)
-            return
-        print(f"  [elev] ★ 선택 = {best[1]} (score={best[0]})")
+            return False
+        print(f"  [elev] ★ 선택 = {best[1]} (score={best[0]:.1f})")
         code = self._move_robot_to_T_CB(
             best[2], s.adaptive_robot_speed_deg_s)
         if code != 0:
             print(f"  [elev] ✘ best 이동 실패 (code={code}) — home 복귀")
             self._move_robot_to_T_CB(
                 T_CB_home, s.adaptive_robot_speed_deg_s)
-            return
+            return False
         self._recapture_T_BC("elev")
+        return True
 
-    def _adaptive_prescan_position(self) -> None:
+    def _adaptive_prescan_position(self, recovery: bool = False) -> bool:
         """
-        회전 전 PREVIEW 로 물체 크기/위치 추정 → 스캐너(EE)를 최적
-        작업거리·(고도각)으로 이동. 상세: docs/artec_scanning_pipeline.md §3.0.
-        실패/예외는 모두 삼키고 home 유지 — 스캔에 영향 0.
+        현재 robot 자세에서 PREVIEW 로 물체 크기/위치 추정 → 스캐너(EE)를
+        최적 작업거리·고도각으로 이동.
+
+        2026-05-20 rule: scan 첫 시작에서는 호출되지 않음. tracking-lost
+        recovery 흐름에서만 호출 (`recovery=True`). recovery 시 elevation
+        후보 수를 축소(`recovery_elevation_offsets_deg` + fine skip)해 시간 단축.
+
+        실패/예외는 모두 삼키고 home 유지. Returns True iff robot 이동 완료.
+        docs/artec_scanning_pipeline.md §3.0 / §6.
         """
         s = self.s
         try:
             if self.robot is None or self._T_EC is None:
                 print("  [adaptive] robot/T_EC 없음 — skip (home 유지)")
-                return
+                return False
             sensor = getattr(self.mms, "sensor", None)
             if sensor is None or not hasattr(sensor, "capture_frame"):
                 print("  [adaptive] sensor.capture_frame 없음 — skip")
-                return
+                return False
 
             T_EB_home = self.robot.get_ee_pose_mat()        # E→B (m)
             T_CB_home = self.mms.T_CB(T_EB_home)            # C→B (m)
 
-            # 턴테이블 회전 차분 probe 로 물체 envelope 추정 (docs §3.0).
-            env = (self._motion_probe_object(T_CB_home)
-                   if s.phase1_motion_probe else {"ok": False})
-            if env.get("ok") and s.phase1_elevation_search:
-                self._elevation_search(T_CB_home, env)
+            # recovery 모드면 축소 offsets, 일반 모드면 풀그리드 (forward-compat).
+            if recovery:
+                offsets = list(s.recovery_elevation_offsets_deg)
+                fine_enabled = bool(s.recovery_elevation_fine_search_enabled)
             else:
-                # probe 실패/비활성 → preview robust center + 거리-only
-                # (look_at 재조준 안 함 → 스윙 방지).
-                if not env.get("ok"):
-                    print(f"  [adaptive] probe 실패/비활성 — 거리-only fallback")
-                est = self._robust_center_from_preview(sensor, T_CB_home)
-                if est is None:
-                    print(f"  [adaptive] preview 부족 — skip (home 유지)")
-                    return
-                print(f"  [adaptive] fallback center=({est['cx']:+.3f},"
-                      f"{est['cy']:+.3f}) h={est['h_obj']*1000:.0f}mm "
-                      f"r={est['r_obj']*1000:.0f}mm")
-                self._distance_only_position(T_CB_home, est)
+                offsets = [-10.0, -5.0, 0.0, 5.0, 10.0]
+                fine_enabled = True
+
+            # 턴테이블 회전 차분 probe 로 물체 envelope 추정 (매번 fresh).
+            env = self._motion_probe_object(T_CB_home)
+            if env.get("ok"):
+                return self._elevation_search(
+                    T_CB_home, env, offsets, fine_enabled)
+            # probe 실패 → preview robust center + 거리-only fallback
+            print(f"  [adaptive] probe 실패 — 거리-only fallback")
+            est = self._robust_center_from_preview(sensor, T_CB_home)
+            if est is None:
+                print(f"  [adaptive] preview 부족 — skip (home 유지)")
+                return False
+            print(f"  [adaptive] fallback center=({est['cx']:+.3f},"
+                  f"{est['cy']:+.3f}) h={est['h_obj']*1000:.0f}mm "
+                  f"r={est['r_obj']*1000:.0f}mm")
+            self._distance_only_position(T_CB_home, est)
+            return True
         except Exception as e:
             print(f"  [adaptive] ⚠ 예외 ({type(e).__name__}: {e}) "
                   f"— home 유지로 진행")
-            return
+            return False
 
     # ── Entry ──────────────────────────────────────────────────────────
 
     def run(self) -> ArtecMultiPassScanResult:
         s = self.s
-        if s.adaptive_phase1_positioning:
-            self._adaptive_prescan_position()
+        # 2026-05-20 rule: scan 첫 시작은 robot=home 그대로. 사전 probe/
+        # elevation 호출 없음. tracking-lost 시 _attempt_recovery 가 비로소
+        # _adaptive_prescan_position(recovery=True) 를 발동. (docs §3 / §6)
         master_model = artec_base.create_model()
         pass_results: List[ArtecStreamingScanResult] = []
         user_quit = False
@@ -933,6 +1149,11 @@ class ArtecMultiPassScanSession:
         n_recovery_attempts = 0           # 총 시도 (전체 run)
         n_recovery_succeeded = 0          # 총 성공
         next_T_BC_pending: Optional[np.ndarray] = None
+        recorded_hints: List[tuple] = []  # (master scan_index, T_pre)
+                                          # apply_hints=False 일 때만 채워짐
+        icp_refine_log: List[tuple] = []  # (scan_idx, T_init, T_measured,
+                                          # fitness, rmse_mm) — hint_icp_refine
+                                          # _mode=True 일 때만 채워짐
         next_skip_clearpos = False
 
         # ── 라이브 뷰어 (옵션) — 모든 pass 가 한 화면에 누적 ──────────
@@ -986,6 +1207,29 @@ class ArtecMultiPassScanSession:
                 next_skip_clearpos = False
             pass_results.append(sub_result)
             n_pass += 1
+
+            # ── Pass cleanup: SerialReg + OutlierRemoval ───────────────
+            # 멀티패스 끝까지 기다리지 말고 pass 마다 즉시 정합/이상점 제거.
+            # 이유: (a) hint 계산 (centroid) 이 깨끗한 데이터로 안정,
+            #       (b) live viewer 가 정합된 IScan 을 그대로 비춰서 사용자가
+            #           pass 별 형상 / 정합 품질을 즉시 검증 가능
+            #           ([[feedback_live_viewer_must_mirror_scan]]).
+            # Outliers 는 Fusion 전에 와야 함 ([[feedback_artec_pipeline_order]]).
+            # tracking_lost 면 partial IScan 이라 SerialReg 가 깨질 수 있어 skip.
+            if (not sub_result.tracking_lost
+                    and sub_result.model.scan_count() > 0):
+                try:
+                    cleaned = artec_algorithm.Algorithms.serial_registration(
+                        sub_result.model,
+                    )
+                    cleaned = artec_algorithm.Algorithms.outliers_removal(
+                        cleaned,
+                    )
+                    sub_result.model = cleaned
+                    print(f"\n  [pass cleanup] SerialReg + OutlierRemoval 완료")
+                except Exception as e:
+                    print(f"\n  [pass cleanup] ⚠ 실패 "
+                          f"({type(e).__name__}: {e}) — raw IScan 사용")
 
             # ── Pose hint 계산 (centroid-aware + base-frame aware) ─────
             # 1. R_phys 는 base frame B 에서 정의 (사용자 직관)
@@ -1048,12 +1292,55 @@ class ArtecMultiPassScanSession:
                     print(f"  [hint pose {pose_idx}] translation = ({T_pre[0,3]:+.1f}, "
                           f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm")
 
-            # Sub-model 의 IScan 들 → master_model (hint 적용 후)
-            n_added = self._merge_into_master(
-                sub_result.model, master_model, T_pre,
-            )
+            # Sub-model 의 IScan 들 → master_model.
+            # apply_hints_to_frame_transformations=False 일 때 hint 는 IScan 의
+            # frame_transformations 에 박지 않고 recorded_hints 에 기록만 (병합
+            # 비교용). 같은 raw scan 데이터로 후처리 단계에서 hint on/off 를
+            # swap 가능.
+            if T_pre is not None and not s.apply_hints_to_frame_transformations:
+                idx_before = master_model.scan_count()
+                n_added = self._merge_into_master(
+                    sub_result.model, master_model, None,  # hint 안 박음
+                )
+                for idx in range(idx_before, master_model.scan_count()):
+                    recorded_hints.append((idx, T_pre.copy()))
+                if n_added > 0:
+                    print(f"\n  [hint record] T_pre → scan_idx "
+                          f"{idx_before}..{master_model.scan_count() - 1} "
+                          f"(apply_hints=False, 후처리에서 선택 적용)")
+            else:
+                # Hint ICP refine — centroid-pivot T_pre 를 init 으로 colored
+                # ICP 돌려 측정된 T 로 교체. 사용자 손회전의 ±10° 오차 흡수.
+                # docs §4.2 face-merging 회피.
+                T_pre_to_apply = T_pre
+                if (T_pre is not None and s.hint_icp_refine_mode
+                        and master_model.scan_count() > 0):
+                    print(f"  [icp_refine] hint refine 시작 "
+                          f"(voxel={s.icp_voxel_mm}mm, "
+                          f"corr={s.icp_corr_dist_mm}mm, "
+                          f"color_w={s.icp_color_weight})")
+                    T_pre_refined, fit, rmse = self._hint_icp_refine(
+                        sub_result.model, T_pre, master_model)
+                    idx_for_log = master_model.scan_count()  # 곧 추가될 인덱스
+                    icp_refine_log.append(
+                        (idx_for_log, T_pre.copy(), T_pre_refined.copy(),
+                         fit, rmse))
+                    T_pre_to_apply = T_pre_refined
+                n_added = self._merge_into_master(
+                    sub_result.model, master_model, T_pre_to_apply,
+                )
             print(f"\n  [pass {n_pass} / pose {pose_idx}] {n_added} scan(s) → master "
                   f"(total scans={master_model.scan_count()})")
+
+            # Viewer 를 cleaned master_model 로 재구성 — pass 중 누적된 raw
+            # 점들 (정합 전 위치) 을 cleanup + T_pre 적용된 점들로 교체.
+            # viewer = scan 일관성 ([[feedback_live_viewer_must_mirror_scan]]).
+            if live_viewer is not None:
+                try:
+                    live_viewer.rebuild_from_model(master_model)
+                except Exception as e:
+                    print(f"  [live] ⚠ rebuild_from_model 호출 실패 "
+                          f"({type(e).__name__}: {e})")
 
             # Pass 1 (또는 첫 성공한 IScan) 후 master_center lock
             if master_center is None and master_model.scan_count() > 0:
@@ -1084,10 +1371,11 @@ class ArtecMultiPassScanSession:
                     break
 
                 # ── 자동 recovery 시도 ─────────────────────────────────
-                # selector 있고, max_recovery_retries 미만이면 turntable
-                # safe-back + scanner 재배치로 자동 재시도.
+                # auto_recovery_enabled 이고 max_recovery_retries 미만이면
+                # turntable safe-back + (probe + 축소 elevation search) 로
+                # 새 robot 자세 결정 후 자동 재시도. docs §6.
                 recovery_initiated = False
-                if (s.recovery_selector is not None
+                if (s.auto_recovery_enabled
                         and recovery_retry_count < s.max_recovery_retries):
                     ok, T_BC_new = self._attempt_recovery(
                         sub_result, master_model, recovery_retry_count,
@@ -1104,7 +1392,7 @@ class ArtecMultiPassScanSession:
                         recovery_initiated = True
                         print(f"  → recovery #{recovery_retry_count}/"
                               f"{s.max_recovery_retries} 진입 — 자동 재시도")
-                elif (s.recovery_selector is not None
+                elif (s.auto_recovery_enabled
                         and recovery_retry_count >= s.max_recovery_retries):
                     print(f"\n  ⓘ recovery 한계 도달 "
                           f"({recovery_retry_count}/{s.max_recovery_retries}) "
@@ -1193,6 +1481,8 @@ class ArtecMultiPassScanSession:
             master_center_mm=master_center,
             n_recovery_attempts=n_recovery_attempts,
             n_recovery_succeeded=n_recovery_succeeded,
+            recorded_hints=recorded_hints,
+            icp_refine_log=icp_refine_log,
         )
 
     # ── Recovery ───────────────────────────────────────────────────────
@@ -1204,25 +1494,24 @@ class ArtecMultiPassScanSession:
         retry_idx: int,
     ) -> tuple[bool, Optional[np.ndarray]]:
         """
-        Tracking lost 발생 시 자동 복구 시도.
+        Tracking lost 발생 시 자동 복구 시도 (2026-05-20 재설계).
 
-        흐름:
-          1. last-good θ + safe_back_margin_deg 만큼 turntable 역회전 (move_abs).
-          2. master point cloud → recovery_selector 가 다음 카메라 pose 결정.
-          3. xArm 으로 robot 이동, 새 T_BC 캡처.
+        흐름 (docs §6):
+          1. last-good θ + safe_back_margin_deg 만큼 turntable 역회전.
+          2. _adaptive_prescan_position(recovery=True) 호출 — fresh probe +
+             축소 elevation search 로 새 robot 자세 결정·이동. master point
+             cloud 비의존.
 
         Returns
         -------
         (ok, T_BC_new)
-          ok        — recovery 진입 성공 여부. False 면 호출측이 user-prompt 로 fallback.
-          T_BC_new  — robot 이동 후 새 B → C transform (next merge 의 T_pre 계산용).
-                      master 가 비었거나 selector 가 None 반환하면 None
-                      (turntable 만 safe-back, robot 미이동 의미).
+          ok        — recovery 진입 성공 여부 (False 면 user-prompt fallback).
+          T_BC_new  — robot 이동 후 새 B → C transform (next merge 의
+                      T_pre 계산용). 자세 변경 없으면 None.
         """
         s = self.s
-        sel = s.recovery_selector
-        if sel is None or self._T_EC is None or self._T_BC is None or self.robot is None:
-            print(f"  ⚠ recovery 조건 미충족: selector/T_EC/robot 확인")
+        if self._T_EC is None or self._T_BC is None or self.robot is None:
+            print(f"  ⚠ recovery 조건 미충족: T_EC/robot 확인")
             return False, None
 
         # ── 1. safe-back 각도 ──────────────────────────────────────────
@@ -1280,88 +1569,234 @@ class ArtecMultiPassScanSession:
             print(f"  ✘ safe-back 예외: {e}")
             return False, None
 
-        # ── 3. Master 점운 → selector ──────────────────────────────────
+        # ── 3. 적응형 자세 재선정 (fresh probe + 축소 elevation) ───────
+        print(f"  → adaptive 자세 재선정 (recovery 모드)")
+        moved = self._adaptive_prescan_position(recovery=True)
+        if not moved:
+            print(f"  ⓘ 자세 미변경 (probe 실패 또는 home 유지) — 같은 자리 재시도")
+            return True, None
+        # _adaptive_prescan_position 이 _recapture_T_BC 까지 끝냈으므로
+        # self._T_BC 가 새 값. 이걸 next merge 의 T_pre 계산용으로 반환.
+        T_BC_recovery = self._T_BC.copy() if self._T_BC is not None else None
+        if T_BC_recovery is not None:
+            t = T_BC_recovery[:3, 3]
+            print(f"  T_BC re-captured: trans = ({t[0]*1000:+.1f}, "
+                  f"{t[1]*1000:+.1f}, {t[2]*1000:+.1f}) mm")
+        return True, T_BC_recovery
+
+    # ── Hint ICP refine 헬퍼 (2026-05-20) ──────────────────────────────
+
+    @staticmethod
+    def _frame_vertex_colors(frame) -> Optional[np.ndarray]:
+        """FrameMeshHandle 의 (N,3) RGB 색상 [0,1] 추정 — uv·image 활용.
+        텍스처 없거나 uv 없으면 None."""
         try:
-            master_pts_B = master_points_in_base_frame(
-                master_model, self._T_CB, max_points=30_000,
+            uv = frame.uv()
+            img = frame.image()
+        except Exception:
+            return None
+        if uv is None or img is None:
+            return None
+        if uv.ndim != 2 or uv.shape[1] != 2:
+            return None
+        H, W = img.shape[:2]
+        u_px = np.clip((uv[:, 0] * W).astype(np.int32), 0, W - 1)
+        # v 좌표가 top-down 인지 bottom-up 인지 SDK 가 명세 없음 — 기본
+        # bottom-up 가정 (OpenGL convention). 시각 결과 이상하면 1-v 로 뒤집기.
+        v_norm = uv[:, 1]
+        v_px = np.clip(((1.0 - v_norm) * H).astype(np.int32), 0, H - 1)
+        cols = img[v_px, u_px].astype(np.float64) / 255.0
+        if cols.shape[1] >= 3:
+            return cols[:, :3]
+        return None
+
+    @staticmethod
+    def _iscan_to_pcd_B(scan, T_CB_master: np.ndarray, voxel_mm: float,
+                        max_frames: int = 50):
+        """단일 IScan 의 frame vertices+colors 를 B 프레임 Open3D PointCloud 로
+        변환 (voxel downsample). T_CB_master = 첫 pass C→B (translation m).
+
+        IScan vertices 는 mm, scan-world W (≈ C_first). C→B 후 base frame.
+        반환: o3d.geometry.PointCloud (translation mm 단위) 또는 None.
+        """
+        try:
+            import open3d as o3d
+        except Exception:
+            return None
+        n = scan.frame_count()
+        if n == 0:
+            return None
+        # subsample frames for speed
+        if n > max_frames:
+            step = max(1, n // max_frames)
+            idxs = list(range(0, n, step))[:max_frames]
+        else:
+            idxs = list(range(n))
+        R_CB = np.asarray(T_CB_master[:3, :3], float)
+        t_CB_mm = np.asarray(T_CB_master[:3, 3], float) * 1000.0
+        all_v, all_c = [], []
+        for i in idxs:
+            frame = scan.get_frame(i)
+            v = frame.vertices()
+            if v is None or v.shape[0] == 0:
+                continue
+            T_f = scan.get_frame_transformation(i)
+            v_W = v @ np.asarray(T_f[:3, :3], float).T + np.asarray(T_f[:3, 3], float)
+            v_B = v_W @ R_CB.T + t_CB_mm
+            all_v.append(v_B)
+            c = ArtecMultiPassScanSession._frame_vertex_colors(frame)
+            if c is not None and c.shape[0] == v.shape[0]:
+                all_c.append(c)
+            else:
+                all_c.append(np.full((v.shape[0], 3), 0.5))   # gray fallback
+        if not all_v:
+            return None
+        V = np.vstack(all_v)
+        C = np.vstack(all_c)
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(V)
+        pcd.colors = o3d.utility.Vector3dVector(np.clip(C, 0.0, 1.0))
+        if voxel_mm > 0:
+            pcd = pcd.voxel_down_sample(voxel_mm)
+        return pcd
+
+    @staticmethod
+    def _master_to_pcd_B(master_model, T_CB_master: np.ndarray,
+                         voxel_mm: float, max_frames_per_scan: int = 30):
+        """master IModel 의 모든 IScan 을 B 프레임 colored PCD 로 합치기."""
+        try:
+            import open3d as o3d
+        except Exception:
+            return None
+        merged = o3d.geometry.PointCloud()
+        for s in range(master_model.scan_count()):
+            scan = master_model.get_scan(s)
+            pcd = ArtecMultiPassScanSession._iscan_to_pcd_B(
+                scan, T_CB_master, voxel_mm, max_frames=max_frames_per_scan)
+            if pcd is not None:
+                merged += pcd
+        if len(merged.points) == 0:
+            return None
+        if voxel_mm > 0:
+            merged = merged.voxel_down_sample(voxel_mm)
+        return merged
+
+    @staticmethod
+    def hint_icp_refine_static(
+        sub_model, T_pre_init: np.ndarray, master_model,
+        T_BC: np.ndarray, T_CB: np.ndarray,
+        voxel_mm: float = 4.0, max_iter: int = 60,
+        color_weight: float = 0.5, corr_dist_mm: float = 30.0,
+    ) -> tuple:
+        """centroid-pivot T_pre 를 init 으로 colored ICP → 측정된 T_pre.
+
+        scan-world frame 에서 T_pre 가 동작 (IScan frame_transformations
+        앞에 좌측 곱). 그러나 ICP 는 B 프레임 PCD 로 돌리는 게 자연 →
+        결과를 W frame T_pre 로 역변환: T_pre_W = T_CB · T_pre_B · T_BC.
+        translation 단위 — IScan frame_transformations 는 mm, T_BC/T_CB 는 m.
+
+        Static method 라 후처리 단계(scripts/artec/merge_compare.py)에서도
+        session instance 없이 호출 가능.
+
+        Returns (T_pre_refined, fitness, rmse_mm). 실패 시 (init, 0.0, inf).
+        """
+        try:
+            import open3d as o3d
+        except Exception as e:
+            print(f"  [icp_refine] open3d 없음 ({e}) — init 그대로")
+            return T_pre_init, 0.0, float("inf")
+        T_CB = np.asarray(T_CB, float)
+        T_BC = np.asarray(T_BC, float)
+        master_pcd = ArtecMultiPassScanSession._master_to_pcd_B(
+            master_model, T_CB, voxel_mm)
+        if master_pcd is None or len(master_pcd.points) < 100:
+            print(f"  [icp_refine] master PCD 부족 — init 그대로")
+            return T_pre_init, 0.0, float("inf")
+        new_pcd = ArtecMultiPassScanSession._master_to_pcd_B(
+            sub_model, T_CB, voxel_mm)
+        if new_pcd is None or len(new_pcd.points) < 100:
+            print(f"  [icp_refine] new IScan PCD 부족 — init 그대로")
+            return T_pre_init, 0.0, float("inf")
+
+        # init: T_pre_init (W frame, mm) → B frame, m → mm
+        T_pre_init_m = T_pre_init.copy()
+        T_pre_init_m[:3, 3] = T_pre_init[:3, 3] / 1000.0
+        init_B_m = T_BC @ T_pre_init_m @ T_CB
+        init_B_mm = init_B_m.copy()
+        init_B_mm[:3, 3] = init_B_m[:3, 3] * 1000.0
+
+        radius_normal_mm = voxel_mm * 2.5
+        master_pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                radius=radius_normal_mm, max_nn=30))
+        new_pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                radius=radius_normal_mm, max_nn=30))
+        try:
+            criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
+                max_iteration=int(max_iter),
+                relative_fitness=1e-6, relative_rmse=1e-6)
+            result = o3d.pipelines.registration.registration_colored_icp(
+                source=new_pcd, target=master_pcd,
+                max_correspondence_distance=float(corr_dist_mm),
+                init=init_B_mm,
+                estimation_method=
+                o3d.pipelines.registration.TransformationEstimationForColoredICP(
+                    lambda_geometric=1.0 - float(color_weight)),
+                criteria=criteria,
             )
         except Exception as e:
-            print(f"  ⚠ master_points_in_base_frame 예외: {e} — selector skip")
-            master_pts_B = np.zeros((0, 3), dtype=np.float64)
+            print(f"  [icp_refine] colored ICP 예외 ({e}) — geom-only 재시도")
+            try:
+                result = o3d.pipelines.registration.registration_icp(
+                    source=new_pcd, target=master_pcd,
+                    max_correspondence_distance=float(corr_dist_mm),
+                    init=init_B_mm,
+                    estimation_method=
+                    o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                    criteria=criteria,
+                )
+            except Exception as e2:
+                print(f"  [icp_refine] geom ICP 도 실패 ({e2}) — init 그대로")
+                return T_pre_init, 0.0, float("inf")
 
-        if master_pts_B.shape[0] == 0:
-            print(f"  ⚠ master 비어있음 — 같은 자리에서 turntable safe-back 만으로 재시도")
-            return True, None
+        T_measured_B_mm = np.asarray(result.transformation, float).copy()
+        fitness = float(result.fitness)
+        rmse_mm = float(result.inlier_rmse)
+        if fitness <= 0.0 or not np.all(np.isfinite(T_measured_B_mm)):
+            print(f"  [icp_refine] fitness=0 — init 그대로")
+            return T_pre_init, fitness, rmse_mm
 
-        # 현재 camera pose
-        try:
-            T_EB_now = self.robot.get_ee_pose_mat()
-            T_BE_now = np.linalg.inv(T_EB_now)
-            T_BC_now = self._T_EC @ T_BE_now
-            T_CB_now = np.linalg.inv(T_BC_now)
-        except Exception as e:
-            print(f"  ✘ 현재 robot pose 읽기 실패: {e} — selector skip")
-            return True, None
+        # B → W: T_pre_W = T_CB · T_pre_B · T_BC
+        T_measured_B_m = T_measured_B_mm.copy()
+        T_measured_B_m[:3, 3] = T_measured_B_mm[:3, 3] / 1000.0
+        T_pre_refined_m = T_CB @ T_measured_B_m @ T_BC
+        T_pre_refined = T_pre_refined_m.copy()
+        T_pre_refined[:3, 3] = T_pre_refined_m[:3, 3] * 1000.0
 
-        decision = sel.select(T_CB_now, master_pts_B)
-        if decision is None:
-            print(f"  ⚠ selector '{sel.name}' 후보 없음 — 같은 자리 재시도")
-            return True, None
-        print(f"  selector       : {sel.name}")
-        print(f"  decision       : {decision.debug_info}")
-        print(f"  score          : {decision.score:.0f}")
+        di = T_pre_init[:3, 3]
+        dm = T_pre_refined[:3, 3]
+        delta = np.linalg.norm(dm - di)
+        print(f"  [icp_refine] fitness={fitness:.3f}  rmse={rmse_mm:.1f}mm  "
+              f"Δtrans={delta:.1f}mm  "
+              f"init=({di[0]:+.1f},{di[1]:+.1f},{di[2]:+.1f}) "
+              f"→ refined=({dm[0]:+.1f},{dm[1]:+.1f},{dm[2]:+.1f})")
+        return T_pre_refined, fitness, rmse_mm
 
-        # 현재 pose 와 거의 같으면 robot 이동 skip
-        delta_t_m = float(np.linalg.norm(
-            decision.T_CB_target[:3, 3] - T_CB_now[:3, 3],
-        ))
-        if delta_t_m < 0.002:        # 2mm 미만 = no-op
-            print(f"  → decision == 현재 pose (Δ={delta_t_m*1000:.1f}mm) "
-                  f"— robot 미이동")
-            return True, None
-
-        # ── 4. xArm 이동 ───────────────────────────────────────────────
-        # T_CB_target (C → B) → T_EB_target = T_CB_target @ T_EC.
-        # pose_mat_to_6d 는 translation m, euler rad → xArm 은 mm + rad.
-        try:
-            T_EB_target = decision.T_CB_target @ self._T_EC
-            pose6d = pose_mat_to_6d(T_EB_target)
-            x_mm = float(pose6d[0] * 1000.0)
-            y_mm = float(pose6d[1] * 1000.0)
-            z_mm = float(pose6d[2] * 1000.0)
-            roll, pitch, yaw = (
-                float(pose6d[3]), float(pose6d[4]), float(pose6d[5]),
-            )
-            print(f"  → robot move   : x={x_mm:.1f}  y={y_mm:.1f}  z={z_mm:.1f}mm  "
-                  f"rpy=({np.degrees(roll):.1f}, {np.degrees(pitch):.1f}, "
-                  f"{np.degrees(yaw):.1f})°")
-            self.robot.enable_motion()
-            code = self.robot.arm.set_position(
-                x=x_mm, y=y_mm, z=z_mm,
-                roll=roll, pitch=pitch, yaw=yaw,
-                is_radian=True,
-                speed=float(s.recovery_robot_speed_deg_s),
-                wait=True,
-            )
-            if code != 0:
-                print(f"  ✘ robot.set_position 실패 (code={code}) — robot 미이동")
-                return True, None
-        except Exception as e:
-            print(f"  ✘ robot 이동 예외: {e}")
-            return False, None
-
-        # ── 5. 이동 후 T_BC 재캡처 ─────────────────────────────────────
-        try:
-            T_EB_after = self.robot.get_ee_pose_mat()
-            T_BE_after = np.linalg.inv(T_EB_after)
-            T_BC_recovery = self._T_EC @ T_BE_after
-            t_after_m = T_BC_recovery[:3, 3]
-            print(f"  T_BC re-captured: trans = ({t_after_m[0]*1000:+.1f}, "
-                  f"{t_after_m[1]*1000:+.1f}, {t_after_m[2]*1000:+.1f}) mm")
-            return True, T_BC_recovery
-        except Exception as e:
-            print(f"  ⚠ post-move T_BC 캡처 실패: {e} — hint override 없이 진행")
-            return True, None
+    def _hint_icp_refine(self, sub_model, T_pre_init: np.ndarray,
+                         master_model) -> tuple:
+        """Instance wrapper — settings + self._T_BC/self._T_CB 를 static 함수에 위임."""
+        s = self.s
+        if self._T_BC is None or self._T_CB is None:
+            print(f"  [icp_refine] T_BC/T_CB 미설정 — init 그대로")
+            return T_pre_init, 0.0, float("inf")
+        return ArtecMultiPassScanSession.hint_icp_refine_static(
+            sub_model, T_pre_init, master_model,
+            T_BC=self._T_BC, T_CB=self._T_CB,
+            voxel_mm=s.icp_voxel_mm, max_iter=s.icp_max_iter,
+            color_weight=s.icp_color_weight,
+            corr_dist_mm=s.icp_corr_dist_mm,
+        )
 
     # ── 내부 ───────────────────────────────────────────────────────────
 

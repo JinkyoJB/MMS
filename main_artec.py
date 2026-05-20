@@ -16,10 +16,6 @@ from mms_artec.nbv.artec_multipass_scan_session import (
     ArtecMultiPassScanSessionSettings,
     make_axis_physical_rotations,
 )
-from mms_artec.nbv.recovery_pose_selector import (
-    LocalJitterSelector,
-    CentroidVectorSelector,
-)
 from utils.robot.xarm_interface import XArmInterface
 from utils.turntable import Turntable
 
@@ -91,27 +87,11 @@ POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
 #     (c) 다음 streaming pass 진행 (pose_idx 유지)
 #   같은 pose 안에서 연속 3회까지 시도, 초과 시 user prompt 로 fallback.
 #
-# RECOVERY_STRATEGY:
-#   "local_jitter"     — Method A: 현재 pose 주변 ±3cm/±8° N candidate raycast,
-#                        master overlap 최대 후보 선택 (exploitation)
-#   "centroid_vector"  — Method B: master centroid 의 반대편 stand-off 250mm
-#                        에서 centroid 향함 (exploration)
-#   None               — 자동 recovery 비활성 (user prompt 만)
-RECOVERY_STRATEGY: str | None = "local_jitter"
-
-if RECOVERY_STRATEGY == "local_jitter":
-    RECOVERY_SELECTOR = LocalJitterSelector(
-        n_candidates=9,       # 9 random + 1 current = 10 후보
-        trans_mm=30.0,
-        rot_deg=8.0,
-        include_current=True,
-        seed=None,            # None → 매 호출마다 새 분포
-    )
-elif RECOVERY_STRATEGY == "centroid_vector":
-    RECOVERY_SELECTOR = CentroidVectorSelector(stand_off_mm=250.0)
-else:
-    RECOVERY_SELECTOR = None
-
+# 2026-05-20 rule 변경: scan 첫 시작은 robot=home 그대로 (사전 probe/
+# elevation 없음). tracking lost 발생 시 _attempt_recovery 가 turntable
+# safe-back + (fresh probe + 축소 elevation search) 로 새 robot 자세를
+# 결정해 재시도. RECOVERY_STRATEGY 토글과 selector 클래스는 폐기됨.
+# 상세: docs/artec_scanning_pipeline.md §6.
 MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
     streaming_settings=STREAM_SETTINGS,
     pose_physical_rotations=POSE_ROTATIONS,
@@ -119,28 +99,23 @@ MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
     prompt_before_first_pass=True,
     prompt_between_passes=True,
     prompt_on_tracking_lost=True,
-    # auto-recovery
-    recovery_selector=RECOVERY_SELECTOR,
+    # auto-recovery (selector 폐기, prescan 통합)
+    auto_recovery_enabled=True,
     max_recovery_retries=3,
     safe_back_margin_deg=10.0,
     recovery_robot_speed_deg_s=10.0,
     recovery_turntable_vel_rad_s=float(np.radians(30.0)),
+    # Recovery 시 elevation 후보 (시간 단축, fine skip). 기본값 사용 시 생략 가능.
+    recovery_elevation_offsets_deg=[-5.0, 0.0, 5.0],
+    recovery_elevation_fine_search_enabled=False,
     # 스캔 도중 누적 컬러 포인트클라우드 실시간 표시 (Phase1 + Phase2 모든
     # pass). 노이즈/정합 멈춤을 눈으로 인지하기 위함. 창을 닫아도 스캔은
     # 계속됨. open3d 없으면 자동 skip.
     enable_live_viewer=True,
-    # 회전 전 1회 PREVIEW 로 물체 크기/위치 추정 → 스캐너를 최적 작업거리·
-    # 조준으로 이동 (docs/artec_scanning_pipeline.md §3.0). 실패 시 home 유지.
-    adaptive_phase1_positioning=True,
-    # True: 거리뿐 아니라 물체중심 둘레 zx평면 호 고도각을 적응형
-    #       coarse→fine 으로 preview·스코어해 최적 1개 선택 (look_at 재조준
-    #       — home preview 경험적 캘리브 광축, mis-aim 회피). 비퇴행 =
-    #       home_dist baseline. 범위·오프셋·fine step 은 MULTIPASS_SETTINGS
-    #       의 elevation_* 에서 튜닝. False: 기존 거리-only 적응.
-    phase1_elevation_search=True,
     # [디버그] 회전차분 probe 결과 색상 PLY 를 output/iso_debug/ 에 덤프
-    # (static=회·moving=파·object=초). CloudCompare 로 물체 분리/회전축
-    # 검증. 진단 끝나면 False 로. scan/성능 무영향.
+    # (static=회·moving=파·object=초). recovery 시 candidate 마다 통과(녹)/
+    # turntable floor(빨강)/profile 밖(회) 색칠 PLY 도 같이. CloudCompare 로
+    # 물체 분리/자세 후보 검증. 진단 끝나면 False 로. scan/성능 무영향.
     probe_debug_dump=True,
 )
 

@@ -41,6 +41,25 @@ SNAP_PATH = str(_OUT / "_live_latest.npy")
 FLAG_PATH = str(_OUT / "_live_latest.flag")
 STOP_PATH = str(_OUT / "_live_latest.stop")
 
+# Pass 별 색조 (annotation 만 — 정합 시각 검증용). multiplicative tint:
+# 원본 텍스처를 유지하면서 어느 IScan 출신인지 구분. Pass 0 = 원본.
+# [[feedback_live_viewer_must_mirror_scan]] — annotation 은 데이터 fakery 아님.
+_PASS_TINT = np.array([
+    [1.00, 1.00, 1.00],  # Pass 0: 원본
+    [1.00, 0.55, 0.80],  # Pass 1: 핑크
+    [0.55, 1.00, 0.80],  # Pass 2: 청록
+    [1.00, 0.90, 0.45],  # Pass 3: 황금
+    [0.65, 0.80, 1.00],  # Pass 4: 푸른
+    [0.80, 1.00, 0.55],  # Pass 5: 라임
+], dtype=np.float32)
+
+
+def _tint_for(pass_idx: int) -> np.ndarray:
+    """Pass index → tint factor (cycling palette)."""
+    if pass_idx < 0:
+        return _PASS_TINT[0]
+    return _PASS_TINT[pass_idx % len(_PASS_TINT)]
+
 
 class LiveScanViewer:
     """
@@ -77,6 +96,7 @@ class LiveScanViewer:
         self._last_tick = 0.0
         self._dirty = False
         self._pass_label = ""
+        self._pass_index = -1            # new_pass() 호출 시 0 부터 시작
         self._frames_ingested = 0
         self._bbox_str = ""
         self._reject = ""
@@ -104,9 +124,12 @@ class LiveScanViewer:
     def new_pass(self, label: str = "") -> None:
         if self._dead:
             return
+        self._pass_index += 1
         self._pass_label = label
+        tint = _tint_for(self._pass_index)
         if label:
-            print(f"  [live] ── {label} ──")
+            print(f"  [live] ── {label} ── tint=({tint[0]:.2f},"
+                  f"{tint[1]:.2f},{tint[2]:.2f})")
 
     # ── 프레임 ingest ──────────────────────────────────────────────────
 
@@ -129,6 +152,8 @@ class LiveScanViewer:
             x_w_mm = v_mm @ T[:3, :3].T + T[:3, 3]
             x_W = (x_w_mm / 1000.0).astype(np.float32)     # m, scan-world
             col = self._sample_colors(frame_mesh, v_mm.shape[0])
+            # Pass annotation tint — 어느 IScan 출신인지 시각 구분.
+            col = col * _tint_for(self._pass_index)
             xq, cq = self._voxel_chunk(x_W, col.astype(np.float32))
             if xq.shape[0] == 0:
                 if not self._reject:
@@ -165,6 +190,62 @@ class LiveScanViewer:
         keys = np.floor(pts / self.voxel_m).astype(np.int64)
         _, idx = np.unique(keys, axis=0, return_index=True)
         return pts[idx], cols[idx]
+
+    # ── master_model 동기화 (pass cleanup 직후) ────────────────────────
+
+    def rebuild_from_model(self, master_model) -> None:
+        """
+        Buffer 전체 비우고 master_model 의 모든 IScan/frame 으로 재구성.
+
+        Pass 끝나고 SerialReg + OutlierRemoval 돌린 뒤 호출 — 그 결과가
+        master_model 에 반영돼 있으니 viewer 가 그걸 그대로 비춰야
+        viewer = scan 일관성 유지 ([[feedback_live_viewer_must_mirror_scan]]).
+
+        Pass tint 는 master_model 안의 IScan 인덱스 = 가시 pass 순서로 적용.
+        """
+        if self._dead or master_model is None:
+            return
+        try:
+            n_scans = master_model.scan_count()
+            new_pts: list = []
+            new_cols: list = []
+            n_total = 0
+            for s_i in range(n_scans):
+                scan = master_model.get_scan(s_i)
+                n_frames = scan.frame_count()
+                tint = _tint_for(s_i)
+                for f_i in range(n_frames):
+                    try:
+                        frame = scan.get_frame(int(f_i))
+                        v_mm = frame.vertices()
+                        if v_mm is None or v_mm.shape[0] == 0:
+                            continue
+                        v_mm = v_mm.astype(np.float64)
+                        T = scan.get_frame_transformation(int(f_i))
+                        x_w_mm = v_mm @ T[:3, :3].T + T[:3, 3]
+                        x_W = (x_w_mm / 1000.0).astype(np.float32)
+                        col = self._sample_colors(frame, v_mm.shape[0]) * tint
+                        xq, cq = self._voxel_chunk(
+                            x_W, col.astype(np.float32))
+                        if xq.shape[0] > 0:
+                            new_pts.append(xq)
+                            new_cols.append(cq)
+                            n_total += xq.shape[0]
+                    except Exception:
+                        continue
+            self._pts = new_pts
+            self._cols = new_cols
+            self._n_buffered = n_total
+            self._frames_ingested = sum(
+                master_model.get_scan(i).frame_count()
+                for i in range(n_scans)
+            )
+            self._dirty = True
+            print(f"  [live] rebuild_from_model: {n_scans} scan(s), "
+                  f"{n_total} pts (post-cleanup)")
+        except Exception as e:
+            print(f"  [live] ⚠ rebuild_from_model 실패 "
+                  f"({type(e).__name__}: {e})")
 
     # ── snapshot write (Open3D 없음) ───────────────────────────────────
 
