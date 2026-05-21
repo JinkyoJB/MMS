@@ -1718,10 +1718,12 @@ class ArtecMultiPassScanSession:
             print(f"  [icp_refine] new IScan PCD 부족 — init 그대로")
             return T_pre_init, 0.0, float("inf")
 
-        # init: T_pre_init (W frame, mm) → B frame, m → mm
+        # init: T_pre_init (W frame, mm) → B frame, m → mm.
+        # W ≈ C. T_pre_W transforms W coords.
+        # y_B = T_CB·y_W = T_CB·T_pre_W·T_BC·x_B → T_pre_B = T_CB·T_pre_W·T_BC.
         T_pre_init_m = T_pre_init.copy()
         T_pre_init_m[:3, 3] = T_pre_init[:3, 3] / 1000.0
-        init_B_m = T_BC @ T_pre_init_m @ T_CB
+        init_B_m = T_CB @ T_pre_init_m @ T_BC
         init_B_mm = init_B_m.copy()
         init_B_mm[:3, 3] = init_B_m[:3, 3] * 1000.0
 
@@ -1767,10 +1769,10 @@ class ArtecMultiPassScanSession:
             print(f"  [icp_refine] fitness=0 — init 그대로")
             return T_pre_init, fitness, rmse_mm
 
-        # B → W: T_pre_W = T_CB · T_pre_B · T_BC
+        # B → W: T_pre_W = T_BC · T_pre_B · T_CB (init 식의 역)
         T_measured_B_m = T_measured_B_mm.copy()
         T_measured_B_m[:3, 3] = T_measured_B_mm[:3, 3] / 1000.0
-        T_pre_refined_m = T_CB @ T_measured_B_m @ T_BC
+        T_pre_refined_m = T_BC @ T_measured_B_m @ T_CB
         T_pre_refined = T_pre_refined_m.copy()
         T_pre_refined[:3, 3] = T_pre_refined_m[:3, 3] * 1000.0
 

@@ -295,13 +295,17 @@ def _run_variant(name: str, source_model, recorded_hints: list,
 
 
 def _run_variants(model, recorded_hints, T_BC, T_CB,
-                  out_dir: Path, ts: str) -> dict:
-    """4 variant 후처리 루프 — 같은 raw model 위에 매 variant 전 복원."""
+                  out_dir: Path, ts: str,
+                  variants: list | None = None) -> dict:
+    """variant 후처리 루프 — 같은 raw model 위에 매 variant 전 복원.
+    variants=None 이면 전체 VARIANTS. 리스트 (subset of VARIANTS) 면 그것만."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    selected = variants if variants is not None else VARIANTS
     backup = _backup_frame_transformations(model)
     total_frames = sum(len(v) for v in backup.values())
     print(f"[merge_compare] raw frame_transformations 백업 — "
           f"{total_frames} frames across {len(backup)} scans")
+    print(f"[merge_compare] 실행 variants: {[v[0] for v in selected]}")
 
     icp_kwargs = dict(
         voxel_mm=MULTIPASS_SETTINGS.icp_voxel_mm,
@@ -313,7 +317,7 @@ def _run_variants(model, recorded_hints, T_BC, T_CB,
         print(f"[merge_compare] ⚠ T_BC/T_CB 없음 — hintIcpRefine 결과 부정확")
 
     obj_paths = {}
-    for name, hint_mode, gr_type in VARIANTS:
+    for name, hint_mode, gr_type in selected:
         _restore_frame_transformations(model, backup)
         try:
             obj_paths[name] = _run_variant(
@@ -326,20 +330,22 @@ def _run_variants(model, recorded_hints, T_BC, T_CB,
             obj_paths[name] = None
 
     print("\n══════════════════════ 요약 ══════════════════════")
-    for name, _, _ in VARIANTS:
+    for name, _, _ in selected:
         p = obj_paths.get(name)
         if p and Path(p).exists():
             sz_kb = Path(p).stat().st_size / 1024
             print(f"  {name:<15} → {p}  ({sz_kb:.0f} KB)")
         else:
             print(f"  {name:<15} → (실패)")
-    print(f"\n  비교: CloudCompare/MeshLab 으로 네 OBJ 동시 로드")
-    print(f"        또는 Artec Studio 에서 sproj 열기")
+    if len(selected) > 1:
+        print(f"\n  비교: CloudCompare/MeshLab 으로 OBJ 동시 로드")
+        print(f"        또는 Artec Studio 에서 sproj 열기")
     return obj_paths
 
 
 def main_scan(save_raw_dir: Path | None, do_variants: bool,
-              out_dir: Path, ts: str) -> None:
+              out_dir: Path, ts: str,
+              variants: list | None = None) -> None:
     """scan + (옵션) raw 저장 + (옵션) variants 후처리."""
     robot = XArmInterface(ROBOT_IP)
     turntable = connect_turntable()
@@ -394,7 +400,7 @@ def main_scan(save_raw_dir: Path | None, do_variants: bool,
             if do_variants:
                 _run_variants(
                     scan_result.model, scan_result.recorded_hints,
-                    T_BC, T_CB, out_dir, ts,
+                    T_BC, T_CB, out_dir, ts, variants=variants,
                 )
     finally:
         try:
@@ -416,7 +422,8 @@ def main_scan(save_raw_dir: Path | None, do_variants: bool,
             pass
 
 
-def main_load(load_dir: Path, out_dir: Path, ts: str) -> None:
+def main_load(load_dir: Path, out_dir: Path, ts: str,
+              variants: list | None = None) -> None:
     """저장된 raw scan 로드 → variants 후처리만. 하드웨어 불필요."""
     print(f"\n[merge_compare] === load + variants (no scan) ===")
     print(f"  load dir   : {load_dir}")
@@ -424,7 +431,8 @@ def main_load(load_dir: Path, out_dir: Path, ts: str) -> None:
     if model.scan_count() == 0:
         print("[merge_compare] ✘ 로드된 master 비어있음 — abort")
         return
-    _run_variants(model, recorded_hints, T_BC, T_CB, out_dir, ts)
+    _run_variants(model, recorded_hints, T_BC, T_CB, out_dir, ts,
+                  variants=variants)
 
 
 def parse_args():
@@ -438,29 +446,56 @@ def parse_args():
                    help="scan + raw 저장만 (variants 스킵).")
     p.add_argument("--no-save", action="store_true",
                    help="scan 모드일 때 raw 자동 저장 끔. (기본은 자동 저장)")
+    p.add_argument("--variants", type=str, default=None, metavar="LIST",
+                   help="실행할 variant 콤마 구분. 예: "
+                        "'hintIcpRefine' 또는 'noHint,hintIcpRefine'. "
+                        "생략 시 전체 ("
+                        + ",".join(v[0] for v in VARIANTS) + ").")
     return p.parse_args()
+
+
+def _filter_variants(spec: str | None) -> list | None:
+    """--variants 인자 문자열을 VARIANTS subset 으로. None 이면 전체."""
+    if not spec:
+        return None
+    requested = [s.strip() for s in spec.split(",") if s.strip()]
+    known = {v[0]: v for v in VARIANTS}
+    unknown = [r for r in requested if r not in known]
+    if unknown:
+        valid = ", ".join(known.keys())
+        raise SystemExit(
+            f"[merge_compare] 알 수 없는 variant: {unknown}\n"
+            f"  사용 가능: {valid}")
+    selected = [known[r] for r in requested]
+    return selected
 
 
 def main() -> None:
     args = parse_args()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = PROJECT_ROOT / "output" / "merge_compare"
+    variants = _filter_variants(args.variants)
 
     if args.load is not None:
-        # --load 모드: 하드웨어 없이 후처리만
-        main_load(args.load.resolve(), out_dir, ts)
+        # --load 모드: 하드웨어 없이 후처리만.
+        # main_artec import 가 cwd 를 utils/turntable 로 바꾸므로 relative
+        # path 는 PROJECT_ROOT 기준 resolve (예: "output/scan_raw/<TS>" OK).
+        load_path = args.load
+        if not load_path.is_absolute():
+            load_path = PROJECT_ROOT / load_path
+        main_load(load_path.resolve(), out_dir, ts, variants=variants)
         return
 
     # scan 모드
     if args.save_only:
         save_dir = PROJECT_ROOT / "output" / "scan_raw" / ts
         main_scan(save_raw_dir=save_dir, do_variants=False,
-                  out_dir=out_dir, ts=ts)
+                  out_dir=out_dir, ts=ts, variants=variants)
     else:
         save_dir = (None if args.no_save
                     else PROJECT_ROOT / "output" / "scan_raw" / ts)
         main_scan(save_raw_dir=save_dir, do_variants=True,
-                  out_dir=out_dir, ts=ts)
+                  out_dir=out_dir, ts=ts, variants=variants)
 
 
 if __name__ == "__main__":
