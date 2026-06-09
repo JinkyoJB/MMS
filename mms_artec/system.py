@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
@@ -23,7 +23,14 @@ from utils.transforms import (
 from utils.control.hardware_layer import execute_camera_target
 from utils.control.theta_planner import plan_min_motion_theta, DEFAULT_JOINT_WEIGHTS
 
-from mms_artec.sensor.artec_client import ArtecClient, ArtecConfig
+# 백엔드(real/isaac) robot/turntable/sensor 팩토리. 하드웨어/시뮬 의존 모듈은
+# 이 안에서 lazy import → Linux(Isaac)/Windows(real) 양쪽에서 system.py import 가능.
+from mms_artec.backends import build_hardware, build_sensor
+
+# ArtecConfig 는 경량 모듈(바인딩 비의존). 런타임에는 cfg.artec 로 주입되므로
+# 타입 힌트로만 필요 (from __future__ import annotations → 문자열 평가).
+if TYPE_CHECKING:
+    from mms_artec.sensor.artec_config import ArtecConfig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -48,11 +55,27 @@ class ArtecMMSConfig:
     object_frame_yaml : str, optional
         T_O_F0 yaml. None 이면 identity (O ≡ F at θ=0).
     """
-    artec: ArtecConfig
+    artec: "ArtecConfig"
     sensor_frames_yaml: Optional[str] = None
     T_EC_key: Optional[str] = None
     turntable_frame_yaml: Optional[str] = None
     object_frame_yaml: Optional[str] = None
+
+    # ── 백엔드 선택 ──────────────────────────────────────────────────────
+    # "real"  → 실물 xArm + Ezi-SERVO 턴테이블 + Artec 스캐너 (Windows)
+    # "isaac" → Isaac Sim 시뮬레이션 (robot/turntable/scanner 전부)
+    backend: str = "real"
+
+    # real 전용 — 하드웨어 주소
+    robot_ip: str = "192.168.1.210"
+    turntable_ip: str = "192.168.0.10"
+    turntable_bd_id: int = 0
+
+    # isaac 전용 — 시뮬 옵션
+    isaac_usd_path: Optional[str] = None        # None → 백엔드 기본 USD
+    isaac_headless: bool = False
+    isaac_robot_collisions: bool = False        # 로봇 링크 물리충돌 on/off
+                                                # (키네마틱 로봇 — 닿는 자세선 jitter 주의)
 
     def __post_init__(self):
         if self.sensor_frames_yaml is not None:
@@ -92,7 +115,8 @@ class ArtecMMS:
 
     def __init__(self, cfg: ArtecMMSConfig) -> None:
         self.cfg = cfg
-        self.sensor: ArtecClient = ArtecClient(cfg.artec)
+        # 백엔드에 맞는 sensor (real=ArtecClient, isaac=IsaacArtecScanner)
+        self.sensor = build_sensor(cfg)
 
         # T_EC: E → C
         if cfg.sensor_frames_yaml is not None:
@@ -116,6 +140,149 @@ class ArtecMMS:
             self._T_OF: np.ndarray = load_transform(cfg.object_frame_yaml, "T_O_F0")
         else:
             self._T_OF = np.eye(4, dtype=float)
+
+    # ── hardware factory ───────────────────────────────────────────────
+
+    def create_hardware(self):
+        """
+        cfg.backend 에 맞는 (robot, turntable) 생성.
+
+        real  → XArmInterface + 연결된 Turntable
+        isaac → IsaacXArm + IsaacTurntable (공유 IsaacWorld)
+
+        main_artec.py 가 직접 하드웨어를 생성하던 것을 대체한다.
+        """
+        return build_hardware(self.cfg)
+
+    # ── turntable 축 calibration (T_B_F0) — sim/real 공통 ───────────────
+
+    def calibrate_turntable_axis(
+        self, robot, turntable, *, sphere_radius, sphere_z_bands,
+        thetas_deg=None, turntable_vel_rad_s=np.pi / 6.0,
+        z_band=0.02, z_floor=None, return_clouds=False,
+    ) -> dict:
+        """
+        구 fixture 기반 턴테이블 회전축(=T_B_F0 축) calibration. **base 프레임** 축 반환.
+
+        sim/real 동일 경로:
+          θ 마다 → turntable 회전 → sensor.capture_points_base(robot, T_EC) [base 프레임]
+                 → z밴드로 구 분리 → known-R 구중심 피팅 → 축 추정.
+        ★ Artec first-frame 추적(SLAM) 미사용 — 카메라 위치는 EE FK + T_EC 로만.
+
+        선행조건: fixture(구)가 턴테이블에 부착돼 있고, 로봇이 fixture 를 보는 자세.
+
+        Parameters
+        ----------
+        sphere_radius : 구 반경 (m)
+        sphere_z_bands : 구들의 대략적 base-프레임 z 높이 리스트 (세그먼트용)
+        thetas_deg : 캡처 각도들 (기본 0..330 step 30)
+        z_band : z밴드 반폭 (m)
+        z_floor : 이 z 아래 점 제거 (디스크/바닥). 기본 min(z_bands)-0.05
+
+        Returns
+        -------
+        {"axis_point","axis_dir","n_obs","tracks"}  — axis_point/dir 은 base 프레임
+        """
+        from utils.calibration.turntable_axis import fit_sphere_center, estimate_axis
+        if self._T_EC is None:
+            raise RuntimeError("T_EC 미설정 — sensor_frames_yaml/T_EC_key 필요.")
+        if thetas_deg is None:
+            thetas_deg = list(range(0, 360, 30))
+        if z_floor is None:
+            z_floor = min(sphere_z_bands) - 0.05
+
+        tracks = [[] for _ in sphere_z_bands]
+        clouds = []                           # (deg, sphere_i, band_points) — return_clouds 시
+        for deg in thetas_deg:
+            turntable.move_abs(float(np.radians(deg)), float(turntable_vel_rad_s))
+            turntable.wait_motion_done()
+            pts = self.sensor.capture_points_base(robot, self._T_EC)
+            if len(pts) == 0:
+                continue
+            up = pts[pts[:, 2] > z_floor]
+            for i, zt in enumerate(sphere_z_bands):
+                band = up[np.abs(up[:, 2] - zt) < z_band]
+                if len(band) > 30:
+                    tracks[i].append(fit_sphere_center(band, sphere_radius))
+                    if return_clouds:
+                        clouds.append((int(deg), i, band))
+
+        axis_point, axis_dir = estimate_axis(tracks)
+        out = {"axis_point": axis_point, "axis_dir": axis_dir,
+               "n_obs": [len(t) for t in tracks], "tracks": tracks}
+        if return_clouds:
+            out["clouds"] = clouds
+        return out
+
+    def disc_surface_frame(self, disc_points_base, axis_point, axis_dir):
+        """
+        disc 표면 점군(base 프레임) + 3구 회전축 → 완전한 턴테이블 프레임 T_B_F0.
+
+        3구 방법은 회전축(방향+XY)만 준다(궤적 높이=구 높이≠표면). 충돌 회피와
+        대상물 기준 높이를 위해 disc **표면**이 필요하다. disc 점군에 평면을 피팅해
+          - 표면 높이: 회전축이 평면과 만나는 점 = F0 원점(표면 위 중심)
+          - 법선 교차검증: 평면 법선 vs 구-축 방향 (어긋나면 disc 점군/축 의심)
+        축 방향은 구 피팅이 더 강건하므로 **Z축은 axis_dir**, 원점만 표면으로 내린다.
+
+        Parameters
+        ----------
+        disc_points_base : (N,3) disc 표면 점들 (로봇 base 프레임, m). 구/기둥 점은
+                           미리 크롭(z<구높이)해서 표면만 줄 것.
+        axis_point, axis_dir : calibrate_turntable_axis 결과(base 프레임).
+
+        Returns
+        -------
+        {"T_B_F0", "surface_point", "plane_normal", "plane_rms",
+         "normal_axis_angle_deg", "surface_height"}  — 모두 base 프레임.
+        """
+        from utils.calibration.turntable_frame import fit_plane, build_T_B_F0
+        P = np.asarray(disc_points_base, float)
+        plane_pt, plane_n, rms = fit_plane(P)
+        d = np.asarray(axis_dir, float); d = d / (np.linalg.norm(d) + 1e-12)
+        ap = np.asarray(axis_point, float)
+        # 축 법선 교차검증(부호 무시)
+        ang = float(np.degrees(np.arccos(np.clip(abs(d @ plane_n), -1.0, 1.0))))
+        # 회전축 라인이 평면과 만나는 점 = 표면 위 중심(원점)
+        denom = float(d @ plane_n)
+        if abs(denom) < 1e-6:
+            surface_pt = ap.copy()                    # 축이 평면과 평행(이상) — fallback
+        else:
+            t = float((plane_pt - ap) @ plane_n) / denom
+            surface_pt = ap + t * d
+        T_B_F0 = build_T_B_F0(surface_pt, d)           # Z=강건한 구-축, 원점=표면
+        return {"T_B_F0": T_B_F0, "surface_point": surface_pt,
+                "plane_normal": plane_n, "plane_rms": float(rms),
+                "normal_axis_angle_deg": ang, "surface_height": float(surface_pt[2])}
+
+    # ── 자세별 충돌 쿼리 (real/sim 공용) ────────────────────────────────
+    def turntable_collision_world(self, surface_point, axis_dir, disc_radius,
+                                  body_height=0.20, object_radius=0.0,
+                                  object_height=0.0, margin=0.0):
+        """
+        calibration(표면+축, base 프레임)으로 충돌 월드 생성(turntable[+object] 캡슐).
+        utils.collision.CollisionWorld.from_turntable 래퍼 — robot 백엔드 무관.
+        """
+        from utils.collision import CollisionWorld
+        return CollisionWorld.from_turntable(
+            surface_point, axis_dir, disc_radius, body_height=body_height,
+            object_radius=object_radius, object_height=object_height, margin=margin)
+
+    def check_pose_collision(self, robot, world, q=None,
+                             ignore=("link1", "link2"), margin=0.0):
+        """
+        현재(또는 q) 자세의 충돌 검사 → CollisionResult. real/sim 공통.
+
+        q 미지정: 현재 자세 — robot.collision_capsules()(sim:USD 실제포즈 / real:FK).
+        q 지정  : 가상 자세 — 해석 FK 캡슐(capsules_from_joints)로 이동 없이 사전검사.
+                  해석 FK 가 USD 와 ~3mm 정합하므로 real/sim 동일하게 동작.
+        """
+        if q is not None:
+            # 가상 자세(pre-move): 해석 FK 캡슐(USD 정합 ~3mm). 이동 불필요, real/sim 동일.
+            from utils.collision import capsules_from_joints
+            caps = capsules_from_joints(np.asarray(q, float), T_EC=self._T_EC)
+        else:
+            caps = robot.collision_capsules()           # 현재 자세(sim:USD / real:FK)
+        return world.check(caps, margin=margin, ignore=ignore)
 
     # ── lifecycle ──────────────────────────────────────────────────────
 
@@ -257,7 +424,16 @@ class ArtecMMS:
 
         # ── 0. Scanning ─────────────────────────────────────────────────
         ctx = None
-        if s.use_streaming_scan:
+        if self.cfg.backend == "isaac":
+            # Isaac 백엔드: Artec SLAM(IScanningProcedure) 대신 sim 스캔 경로.
+            # 턴테이블 ground-truth θ + 카메라 포즈로 포인트클라우드를 객체 프레임에
+            # 직접 누적한다. (Phase B: mms_artec/backends/isaac/isaac_scan_session.py)
+            from mms_artec.backends.isaac.isaac_scan_session import IsaacScanSession
+            session = IsaacScanSession(self, robot, turntable, s)
+            sim_result = session.run()
+            model = sim_result.model
+            print(f"\n[artec_process] (sim) Scan — {sim_result.n_frames} frames")
+        elif s.use_streaming_scan:
             if s.use_multipass_scan:
                 # Multi-pass: Phase 1 재진행 (tracking lost recovery) + Phase 2
                 # (flip 후 바닥면 스캔). 모든 IScan 이 master IModel 에 누적되고
@@ -325,37 +501,37 @@ class ArtecMMS:
                 p.parent.mkdir(parents=True, exist_ok=True)
                 mid = str(p.with_stem(p.stem + f"_{tag}"))
                 _P(mid).unlink(missing_ok=True)
-                ArtecClient.save_project(current_model, mid)
+                self.sensor.save_project(current_model, mid)
                 print(f"   mid-save → {mid}")
             except Exception as _e:
                 print(f"   mid-save 실패 (무시): {_e}")
 
         # 1-2. Reg
         if s.do_serial_registration:
-            model = _safe("SerialRegistration", ArtecClient.serial_registration, model)
+            model = _safe("SerialRegistration", self.sensor.serial_registration, model)
         if s.do_global_registration:
-            model = _safe("GlobalRegistration", ArtecClient.global_registration, model)
+            model = _safe("GlobalRegistration", self.sensor.global_registration, model)
         _save_mid("post_reg", model)
 
         # 3. Cleaning (Fusion 전)
         if s.do_outliers_removal:
-            model = _safe("OutliersRemoval", ArtecClient.outliers_removal, model)
+            model = _safe("OutliersRemoval", self.sensor.outliers_removal, model)
         if s.do_small_objects_filter:
-            model = _safe("SmallObjectsFilter", ArtecClient.small_objects_filter, model)
+            model = _safe("SmallObjectsFilter", self.sensor.small_objects_filter, model)
         _save_mid("pre_fusion", model)
 
         # 4. Fusion
         fusion = (s.fusion or "none").lower()
         if fusion == "poisson":
-            model = _safe("PoissonFusion", ArtecClient.poisson_fusion, model)
+            model = _safe("PoissonFusion", self.sensor.poisson_fusion, model)
         elif fusion == "fast":
-            model = _safe("FastFusion", ArtecClient.fast_fusion, model)
+            model = _safe("FastFusion", self.sensor.fast_fusion, model)
 
         # 5-6. Simplify + Texturize
         if s.do_simplify:
-            model = _safe("MeshSimplify", ArtecClient.mesh_simplify, model)
+            model = _safe("MeshSimplify", self.sensor.mesh_simplify, model)
         if s.do_texturize:
-            model = _safe("Texturize", ArtecClient.texturize, model)
+            model = _safe("Texturize", self.sensor.texturize, model)
 
         # Export
         if s.export_obj_path:
@@ -371,7 +547,7 @@ class ArtecMMS:
             _P(s.export_sproj_path).parent.mkdir(parents=True, exist_ok=True)
             _P(s.export_sproj_path).unlink(missing_ok=True)
             try:
-                ArtecClient.save_project(model, s.export_sproj_path)
+                self.sensor.save_project(model, s.export_sproj_path)
                 print(f"[artec_process] saved sproj → {s.export_sproj_path}")
             except RuntimeError as e:
                 print(f"[artec_process] sproj 저장 실패: {e}")

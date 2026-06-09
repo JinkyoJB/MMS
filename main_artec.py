@@ -1,4 +1,8 @@
-import msvcrt
+try:
+    import msvcrt                       # Windows 전용 (실물 환경)
+except ImportError:
+    msvcrt = None                       # Linux/Isaac — 키 입력 폴링 비활성
+import os
 import traceback
 from datetime import datetime
 
@@ -9,15 +13,41 @@ from utils import PROJECT_ROOT
 # 모든 output 파일에 같은 타임스탬프(_YYYYMMDD_HHMMSS) 붙여 run 별 구분.
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 from mms_artec.system import ArtecMMS, ArtecMMSConfig, ArtecProcessSettings
-from mms_artec.sensor.artec_client import ArtecConfig
-from mms_artec.nbv.artec_scan_session import ArtecScanSessionSettings
-from mms_artec.nbv.artec_streaming_scan_session import ArtecStreamingScanSessionSettings
-from mms_artec.nbv.artec_multipass_scan_session import (
-    ArtecMultiPassScanSessionSettings,
-    make_axis_physical_rotations,
-)
-from utils.robot.xarm_interface import XArmInterface
-from utils.turntable import Turntable
+from mms_artec.sensor.artec_config import ArtecConfig   # 바인딩 비의존(경량)
+
+# ── 백엔드 선택 ───────────────────────────────────────────────────────
+#   "real"  → 실물 xArm + 턴테이블 + Artec 스캐너 (Windows)
+#   "isaac" → Isaac Sim 시뮬레이션 (옆에 실물 없이 개발)
+BACKEND = "isaac"
+# isaac GUI 표시 여부. 환경변수 MMS_ISAAC_HEADLESS=1 로 헤드리스 강제(서버/CI).
+ISAAC_HEADLESS = os.environ.get("MMS_ISAAC_HEADLESS", "0") == "1"
+
+# ── 턴테이블 축 calibration ───────────────────────────────────────────
+# True 면 스캔 전에 구 fixture 로 T_B_F0(턴테이블 축)를 재calibration.
+# 하드웨어팀이 턴테이블/로봇을 옮겼을 때 사용. (env MMS_RUN_CALIB=1 로도 켜짐)
+RUN_CALIBRATION = os.environ.get("MMS_RUN_CALIB", "0") == "1"
+CALIB_SPHERE_RADIUS = 0.012                 # 구 반경 (m)
+# isaac: 디스크중심 XY 오프셋 + world z (가상 fixture 자동 설치)
+CALIB_SPHERE_OFFSETS = [(0.040, 0.000, 0.78),
+                        (-0.020, 0.035, 0.84),
+                        (0.000, -0.045, 0.90)]
+# real: 물리 fixture 의 base-프레임 구 z 높이(설계/실측값). None 이면 real calibration skip.
+CALIB_SPHERE_Z_BANDS = None
+
+# 스캔 settings 클래스들은 Artec 바인딩/open3d 에 의존 → real 환경에서만 import 가능.
+# isaac(Phase A) 에선 없어도 모션/제어 개발이 가능하도록 try/except 로 보호.
+try:
+    from mms_artec.nbv.artec_scan_session import ArtecScanSessionSettings
+    from mms_artec.nbv.artec_streaming_scan_session import ArtecStreamingScanSessionSettings
+    from mms_artec.nbv.artec_multipass_scan_session import (
+        ArtecMultiPassScanSessionSettings,
+        make_axis_physical_rotations,
+    )
+    _SCAN_SETTINGS_AVAILABLE = True
+except Exception as _e:               # noqa: BLE001
+    print(f"[main] ⓘ scan settings import 불가 ({type(_e).__name__}) — "
+          f"스캐너 파이프라인 비활성 (Phase A 모션/제어만).")
+    _SCAN_SETTINGS_AVAILABLE = False
 
 # ── 하드웨어 ──────────────────────────────────────────────────────────
 ROBOT_IP        = "192.168.1.210"
@@ -38,136 +68,83 @@ CFG = ArtecMMSConfig(
     turntable_frame_yaml=str(PROJECT_ROOT / "config/calibration/turntable_frame.yaml"),
     sensor_frames_yaml=str(PROJECT_ROOT / "config/sensor_frames.yaml"),
     T_EC_key="T_EC_artec",                  # 2026-04-29 hand-eye 결과
+    # ── 백엔드 ──────────────────────────────────────────────────────────
+    backend=BACKEND,
+    robot_ip=ROBOT_IP,
+    turntable_ip=TURNTABLE_IP,
+    turntable_bd_id=TURNTABLE_BD_ID,
+    isaac_headless=ISAAC_HEADLESS,
 )
 
-# ── Streaming Phase 1 (Artec IScanningProcedure 기반, 연속 회전) ──────
-STREAM_SETTINGS = ArtecStreamingScanSessionSettings(
-    rotation_duration_s=30.0,         # 30초에 한 바퀴
-    rotation_overshoot_deg=5.0,
-    target_fps=None,                  # None = scanner.max_fps()
-    capture_texture=True,
-    ignore_registration_errors=True,
-    preview_settle_s=1.5,
-    post_record_settle_s=0.5,
-    reset_to_zero_first=True,
-    # 시계열 로그 — t, theta, scanning_flag, ... → CSV
-    timeline_csv_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}_timeline.csv"),
-)
-
-# ── (Legacy) Discrete Phase 1 — reference 만, use_streaming_scan=False 일 때 사용 ──
-SCAN_SETTINGS = ArtecScanSessionSettings(
-    phase1_enabled=True,
-    phase1_theta_step_deg=15.0,
-    phase1_dwell_s=0.40,
-    phase1_show_progress=True,
-    phase1_wait_window_close=True,
-    phase2_enabled=False,
-    phase2_K_max=0,
-    confirm_each_move=False,
-    robot_speed_deg_s=ROBOT_SPEED_DEG_S,
-    turntable_vel_rad_s=TURNTABLE_VEL_RAD_S,
-)
-
-# ── Multi-pass: Phase 1 + Phase 2 통합 (3-pose default) ────────────────
-#   docs/7_artec_phase.md 의 Phase 1 (5면) + Phase 2 (바닥면 + 정합) 을
-#   한 multi-pass 흐름에서 처리.
-#
-#   Pose 0 (Phase 1):  객체 canonical (face1 = top, 5면 캡처)
-#   Pose 1 (Phase 2a): Y축 +90° 회전 — face5 가 face1 자리로 (overlap 옆면)
-#   Pose 2 (Phase 2b): Y축 +180° 회전 — face6 (바닥) 가 위로
-#
-#   정합: docs/8_artec_phase2_pose_disambiguation.md §5.3 의 centroid-pivot
-#   pre-rotation hint 적용. hints_applied=True 이면 post-merge GlobalReg 자동 skip.
-POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
-
-# ── Tracking-lost auto-recovery ────────────────────────────────────────
-#   tracking lost 발생 시 자동으로:
-#     (a) last-good θ + 10° 만큼 turntable 역회전
-#     (b) selector 가 새 카메라 pose 결정 → robot 이동
-#     (c) 다음 streaming pass 진행 (pose_idx 유지)
-#   같은 pose 안에서 연속 3회까지 시도, 초과 시 user prompt 로 fallback.
-#
-# 2026-05-20 rule 변경: scan 첫 시작은 robot=home 그대로 (사전 probe/
-# elevation 없음). tracking lost 발생 시 _attempt_recovery 가 turntable
-# safe-back + (fresh probe + 축소 elevation search) 로 새 robot 자세를
-# 결정해 재시도. RECOVERY_STRATEGY 토글과 selector 클래스는 폐기됨.
-# 상세: docs/artec_scanning_pipeline.md §6.
-MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
-    streaming_settings=STREAM_SETTINGS,
-    pose_physical_rotations=POSE_ROTATIONS,
-    max_passes=8,                       # 3 pose + 재시도 여유
-    prompt_before_first_pass=True,
-    prompt_between_passes=True,
-    prompt_on_tracking_lost=True,
-    # auto-recovery (selector 폐기, prescan 통합)
-    auto_recovery_enabled=True,
-    max_recovery_retries=3,
-    safe_back_margin_deg=10.0,
-    recovery_robot_speed_deg_s=10.0,
-    recovery_turntable_vel_rad_s=float(np.radians(30.0)),
-    # Recovery 시 elevation 후보 (시간 단축, fine skip). 기본값 사용 시 생략 가능.
-    recovery_elevation_offsets_deg=[-5.0, 0.0, 5.0],
-    recovery_elevation_fine_search_enabled=False,
-    # 스캔 도중 누적 컬러 포인트클라우드 실시간 표시 (Phase1 + Phase2 모든
-    # pass). 노이즈/정합 멈춤을 눈으로 인지하기 위함. 창을 닫아도 스캔은
-    # 계속됨. open3d 없으면 자동 skip.
-    enable_live_viewer=True,
-    # [디버그] 회전차분 probe 결과 색상 PLY 를 output/iso_debug/ 에 덤프
-    # (static=회·moving=파·object=초). recovery 시 candidate 마다 통과(녹)/
-    # turntable floor(빨강)/profile 밖(회) 색칠 PLY 도 같이. CloudCompare 로
-    # 물체 분리/자세 후보 검증. 진단 끝나면 False 로. scan/성능 무영향.
-    probe_debug_dump=True,
-)
-
-# ── ArtecProcess pipeline (Studio §4 의 1, 3-6 단계) ──────────────────
-#   1.  Scanning            — Phase 1 만 (위 SCAN_SETTINGS)
-#   2.  Cleaning            — skip (Outliers Removal 이 대체)
-#   3.  Alignment           — SerialRegistration  (frame-to-frame 정렬 정밀화)
-#   4.  Registration        — GlobalRegistration  (scan 1개라 사실상 no-op)
-#   5.  Fusion              — PoissonFusion       (watertight mesh)
-#   6.  Postprocessing      — Outliers + SmallObjects + (Simplify off) + Texturize
-# ★ Dev mode 토글 — True 면 OutliersRemoval / Simplify 자동 skip (5분+ → 1분 이하).
-#   Production export 시 False 로.
 DEV_MODE = True
 
-PROCESS_SETTINGS = ArtecProcessSettings(
-    dev_mode=DEV_MODE,
-    use_streaming_scan=True,                # ★ IScanningProcedure (연속 회전)
-    scan_settings=SCAN_SETTINGS,
-    streaming_scan_settings=STREAM_SETTINGS,
-    multipass_settings=MULTIPASS_SETTINGS,
-    do_serial_registration=False,           # streaming 이 SDK 안에서 이미 reg 함
-    do_global_registration=True,
-    fusion="poisson",
-    do_outliers_removal=True,               # dev_mode=True 면 자동 False
-    do_small_objects_filter=True,
-    do_simplify=False,
-    do_texturize=True,
-    export_obj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.obj"),
-    export_sproj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.sproj"),
-)
+# 스캔 settings 는 Artec 바인딩/open3d 가 있을 때만 구성한다 (real 환경).
+# isaac(Phase A) 에선 None — 모션/제어 개발만, 스캐너는 Phase B.
+PROCESS_SETTINGS = None
+if _SCAN_SETTINGS_AVAILABLE:
+    # ── Streaming Phase 1 (Artec IScanningProcedure 기반, 연속 회전) ──────
+    STREAM_SETTINGS = ArtecStreamingScanSessionSettings(
+        rotation_duration_s=30.0,         # 30초에 한 바퀴
+        rotation_overshoot_deg=5.0,
+        target_fps=None,                  # None = scanner.max_fps()
+        capture_texture=True,
+        ignore_registration_errors=True,
+        preview_settle_s=1.5,
+        post_record_settle_s=0.5,
+        reset_to_zero_first=True,
+        timeline_csv_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}_timeline.csv"),
+    )
 
+    # ── (Legacy) Discrete Phase 1 ────────────────────────────────────────
+    SCAN_SETTINGS = ArtecScanSessionSettings(
+        phase1_enabled=True,
+        phase1_theta_step_deg=15.0,
+        phase1_dwell_s=0.40,
+        phase1_show_progress=True,
+        phase1_wait_window_close=True,
+        phase2_enabled=False,
+        phase2_K_max=0,
+        confirm_each_move=False,
+        robot_speed_deg_s=ROBOT_SPEED_DEG_S,
+        turntable_vel_rad_s=TURNTABLE_VEL_RAD_S,
+    )
 
-def _flush_stdin() -> None:
-    """캡처 대기 중 눌린 잔류 Enter 를 stdin 버퍼에서 제거."""
-    while msvcrt.kbhit():
-        msvcrt.getch()
+    # ── Multi-pass: Phase 1 + Phase 2 통합 (3-pose default) ───────────────
+    POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
+    MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
+        streaming_settings=STREAM_SETTINGS,
+        pose_physical_rotations=POSE_ROTATIONS,
+        max_passes=8,
+        prompt_before_first_pass=True,
+        prompt_between_passes=True,
+        prompt_on_tracking_lost=True,
+        auto_recovery_enabled=True,
+        max_recovery_retries=3,
+        safe_back_margin_deg=10.0,
+        recovery_robot_speed_deg_s=10.0,
+        recovery_turntable_vel_rad_s=float(np.radians(30.0)),
+        recovery_elevation_offsets_deg=[-5.0, 0.0, 5.0],
+        recovery_elevation_fine_search_enabled=False,
+        enable_live_viewer=True,
+        probe_debug_dump=True,
+    )
 
-
-def connect_turntable() -> Turntable:
-    """턴테이블 연결 + 서보 ON. 이전 run 잔여 회전 있으면 즉시 정지."""
-    tt = Turntable(bd_id=TURNTABLE_BD_ID, ip=TURNTABLE_IP, pulses_per_rev=50000)
-    tt.connect(comm_type=1)   # 1=UDP (TCP 는 sustained polling 에서 socket sucked)
-    tt.check_drive_info()
-    tt.check_drive_err()
-    # 이전 run 이 비정상 종료해서 모터가 계속 돌고 있을 수 있음 — 즉시 정지
-    try:
-        tt.stop()
-    except Exception:
-        pass
-    tt.set_servo_on(True)
-    tt.set_acceleration(np.radians(180), np.radians(180))
-    return tt
+    PROCESS_SETTINGS = ArtecProcessSettings(
+        dev_mode=DEV_MODE,
+        use_streaming_scan=True,
+        scan_settings=SCAN_SETTINGS,
+        streaming_scan_settings=STREAM_SETTINGS,
+        multipass_settings=MULTIPASS_SETTINGS,
+        do_serial_registration=False,
+        do_global_registration=True,
+        fusion="poisson",
+        do_outliers_removal=True,
+        do_small_objects_filter=True,
+        do_simplify=False,
+        do_texturize=True,
+        export_obj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.obj"),
+        export_sproj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.sproj"),
+    )
 
 
 def _show_textured_obj(obj_path: str, title: str) -> bool:
@@ -300,14 +277,73 @@ def _show_composite_mesh(result, mms, title: str = "Artec Phase 1",
     vis.destroy_window()
 
 
-def main() -> None:
-    robot = XArmInterface(ROBOT_IP)
-    turntable = connect_turntable()
+def run_turntable_calibration(mms, robot, turntable):
+    """
+    구 fixture 로 턴테이블 축(T_B_F0) 재calibration. sim/real 공통 진입점
+    (mms.calibrate_turntable_axis). 카메라 점군 → base(T_EC·FK) → 축 피팅이며
+    Artec first-frame 추적(SLAM)은 쓰지 않는다.
+    """
+    print(f"\n[main] === 턴테이블 축 calibration (backend={CFG.backend}) ===")
+    if CFG.backend == "isaac":
+        # sim: 가상 구 fixture 설치 + 부착 + 조준 (빈 턴테이블)
+        from mms_artec.backends.isaac.calib_fixture import prepare_sim_fixture
+        from utils.calibration.turntable_axis import axis_error
+        from pxr import UsdGeom
+        W = mms.sensor._world
+        UsdGeom.Imageable(
+            W.stage.GetPrimAtPath("/World/ScanTarget/Solid_Marble")).MakeInvisible()
+        fx = prepare_sim_fixture(W, turntable, CALIB_SPHERE_OFFSETS, CALIB_SPHERE_RADIUS)
+        print(f"  스캐너 조준 off-axis {fx['off_axis_deg']:.2f}°")
+        res = mms.calibrate_turntable_axis(
+            robot, turntable, sphere_radius=CALIB_SPHERE_RADIUS,
+            sphere_z_bands=fx["z_bands_base"])
+        de, pe = axis_error(res["axis_point"], res["axis_dir"],
+                            fx["gt_point_base"], fx["gt_dir_base"])
+        print(f"  [sim] GT 대비 방향오차 {de:.3f}°, 위치오차 {pe*1000:.2f}mm")
+    else:
+        # real: 물리 fixture 가 부착돼 있고 로봇이 fixture 를 보는 자세라고 가정
+        if CALIB_SPHERE_Z_BANDS is None:
+            print("  [real] CALIB_SPHERE_Z_BANDS(fixture 설계 z) 미설정 — calibration skip")
+            return None
+        res = mms.calibrate_turntable_axis(
+            robot, turntable, sphere_radius=CALIB_SPHERE_RADIUS,
+            sphere_z_bands=CALIB_SPHERE_Z_BANDS)
+    ap, ad = res["axis_point"], res["axis_dir"]
+    print(f"  ✔ T_B_F0 축(base): point={np.round(ap, 4).tolist()}  "
+          f"dir={np.round(ad, 4).tolist()}  관측수={res['n_obs']}")
+    return res
 
+
+def main() -> None:
+    confirm_home = (CFG.backend == "real")    # sim 에선 프롬프트 없이 진행
+
+    robot = turntable = None
     try:
         with ArtecMMS(CFG) as mms:
+            # robot/turntable 은 backend 에 맞춰 팩토리로 생성
+            robot, turntable = mms.create_hardware()
+
+            print(f"\n[main] === Artec MMS (backend={CFG.backend}) ===")
             # Artec scan-start = home (J7 = -45°)
-            robot.go_home(sensor="artec", speed=10, confirm=True)
+            # robot.go_home(sensor="artec", speed=10, confirm=confirm_home)
+
+            # 턴테이블 축 calibration (옵션) — 스캔 전에 T_B_F0 재설정
+            if RUN_CALIBRATION:
+                run_turntable_calibration(mms, robot, turntable)
+
+            if PROCESS_SETTINGS is None:
+                # Phase A (isaac, 스캐너 미가용): 모션/제어 데모만.
+                print("\n[main] 스캐너 파이프라인 비활성 (Phase A). "
+                      "모션/제어 sim 데모를 실행합니다.")
+                print(f"  현재 TCP(mm,rad) = {np.round(robot.get_pose(), 2).tolist()}")
+                print("  턴테이블 한 바퀴 회전 데모 (+360°)...")
+                turntable.move_abs(np.radians(360.0), TURNTABLE_VEL_RAD_S)
+                print(f"  턴테이블 θ = {np.degrees(turntable.getActualPos()):.1f}°")
+                # sim 을 잠시 더 돌려 시각 확인
+                if hasattr(mms.sensor, "_world"):
+                    mms.sensor._world.step(120)
+                print("[main] Phase A 데모 완료.")
+                return
 
             print("\n[main] === Artec Phase 1 (Phase 2 OFF) ===")
             print(f"  T_EC: {CFG.T_EC_key}")
@@ -338,6 +374,8 @@ def main() -> None:
     finally:
         # ── 턴테이블 안전 정지 (CRITICAL) ─────────────────────────────
         # disconnect 만 하면 모터는 계속 돌아감. 반드시 stop → servo OFF → disconnect.
+        if turntable is None:
+            return
         try:
             turntable.stop()
             print("[main] turntable.stop() OK")
@@ -362,6 +400,13 @@ def main() -> None:
             robot.disconnect()
         except Exception:
             pass
+        # isaac 백엔드: SimulationApp 명시적 종료 (atexit crash 방지)
+        if CFG.backend == "isaac":
+            try:
+                from mms_artec.backends import shutdown_isaac_world
+                shutdown_isaac_world()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

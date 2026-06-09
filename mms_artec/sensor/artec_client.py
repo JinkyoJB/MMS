@@ -33,24 +33,9 @@ from mms_artec.sensor import artec_project
 # Config
 # ------------------------------------------------------------------
 
-@dataclass
-class ArtecConfig:
-    """
-    Artec 3D 스캐너 클라이언트 설정.
-
-    serial_number : str | None
-        스캐너 시리얼 번호. None → 인덱스 0 스캐너.
-    capture_texture : bool
-        True → RGB 텍스처 포함 재구성. False → 지오메트리만 (빠름).
-    fps : float | None
-        스캐너 FPS. None → 기본값 유지.
-    target_interval_s : float
-        capture() 호출당 최소 대기 시간(초). 0.0 이면 대기 없음.
-    """
-    serial_number: Optional[str] = None
-    capture_texture: bool = True
-    fps: Optional[float] = None
-    target_interval_s: float = 0.0
+# ArtecConfig 는 바인딩 비의존 경량 모듈로 분리됨 (real/isaac 양쪽에서 import).
+# 하위호환: 기존처럼 `from mms_artec.sensor.artec_client import ArtecConfig` 동작.
+from mms_artec.sensor.artec_config import ArtecConfig  # noqa: E402,F401
 
 
 # ------------------------------------------------------------------
@@ -202,6 +187,32 @@ class ArtecClient:
         """
         self._require_init()
         return artec_base.capture_to_model(self, capture_texture=capture_texture)
+
+    def capture_points_base(self, robot, T_EC, **_) -> np.ndarray:
+        """
+        1회 단일프레임 캡처 → 점군을 **로봇 base 프레임**(m)으로 반환.
+
+        IsaacArtecScanner.capture_points_base 와 동일 인터페이스 (sim/real 통일).
+
+          1. capture()      → 센서 프레임 단일프레임 점군 (mm, SLAM/추적 미사용)
+          2. p_base = T_CB @ p_sensor,  T_CB = compute_T_CB(robot FK, T_EC)
+
+        ★ Artec 의 first-frame 추적 transform 은 쓰지 않는다. 카메라 위치는 로봇
+          (EE FK + 손-눈 T_EC)이 알려준다.
+
+        Parameters
+        ----------
+        robot : XArmInterface 호환 (get_ee_pose_mat → T_EB, 병진 m)
+        T_EC  : (4,4) 손-눈 (E→C)
+        """
+        from utils.transforms import compute_T_CB
+        res = self.capture()
+        if res is None or res.points is None or len(res.points) == 0:
+            return np.zeros((0, 3))
+        pts = np.asarray(res.points, dtype=float) / 1000.0      # mm → m, 센서 프레임
+        T_CB = compute_T_CB(robot.get_ee_pose_mat(), np.asarray(T_EC, dtype=float))
+        ph = np.concatenate([pts, np.ones((len(pts), 1))], axis=1)
+        return (ph @ T_CB.T)[:, :3]
 
     # ==============================================================
     # Scanning session

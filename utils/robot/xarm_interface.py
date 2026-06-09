@@ -259,6 +259,23 @@ class XArmInterface:
         """로봇 연결 해제."""
         self.arm.disconnect()
 
+    # ── 충돌 캡슐 (base 프레임) ──────────────────────────────────────────────
+    def collision_capsules(self, q=None, link_radii=None, T_EC=None):
+        """
+        충돌 캡슐 [(name, Capsule), …] (로봇 base 프레임).
+
+        실물 경로 — **공칭 xArm7 해석 FK**(utils.robot.xarm7_kinematics)로 링크 원점을
+        구해 캡슐화한다(실물은 공칭 DH 와 일치 가정). q 미지정 시 현재 관절각.
+        가상 자세 사전질의(pre-move)에 q 를 직접 주면 된다.
+
+        sim 과 동일 인터페이스(IsaacXArm.collision_capsules) — CollisionWorld.check 공용.
+        """
+        from utils.collision import capsules_from_joints, DEFAULT_LINK_RADII
+        if q is None:
+            q = self.get_joint_angles(is_radian=True)
+        radii = DEFAULT_LINK_RADII if link_radii is None else link_radii
+        return capsules_from_joints(q, link_radii=radii, T_EC=T_EC)
+
 
 if __name__ == "__main__":
     robot = XArmInterface("192.168.1.210")

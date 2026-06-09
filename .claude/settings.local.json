@@ -109,7 +109,31 @@
       "Bash(conda env *)",
       "PowerShell(conda activate *)",
       "PowerShell($env:PYTHONIOENCODING='utf-8'; & C:\\\\Users\\\\user\\\\miniconda3\\\\envs\\\\mms-env\\\\python.exe -X utf8 -c \"import main_artec; import numpy as np; import mms_artec.nbv.recovery_pose_selector as r; T=r.look_at_axes\\(np.array\\([0.3,0,0.3]\\), np.zeros\\(3\\), np.array\\([0,0,1.0]\\), np.array\\([0,-1.0,0]\\)\\); assert T.shape==\\(4,4\\); import inspect; print\\('look_at_axes_translation', np.round\\(T[:3,3],3\\).tolist\\(\\)\\); print\\('calib_sig', str\\(inspect.signature\\(r.calibrate_camera_axes_from_preview\\)\\)\\); from mms_artec.nbv.artec_multipass_scan_session import ArtecMultiPassScanSessionSettings as S; s=S\\(\\); print\\('phase1_elevation_search', s.phase1_elevation_search\\); print\\('offsets', s.elevation_search_offsets_deg\\); print\\('band', s.elevation_optimal_band_mm\\); print\\('IMPORT_CHAIN_OK'\\)\")",
-      "Bash(PYTHONIOENCODING=utf-8 python *)"
+      "Bash(PYTHONIOENCODING=utf-8 python *)",
+      "Bash(cd /home/keti/.claude/projects/-home-keti-workspace-MMS-MMS/memory/)",
+      "Bash(cat MEMORY.md)",
+      "Bash(ls)",
+      "Bash(find / -path '*/standalone_examples/play/MMS/MMS_ext.py')",
+      "Bash(find / -path '*standalone_examples/play/MMS*' -name '*.py')",
+      "Bash(timeout 180 /home/keti/isaacsim/python.sh /tmp/dump_stage.py)",
+      "Bash(PYTHONPATH=/home/keti/isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311 timeout 180 /home/keti/isaacsim/python.sh /tmp/dump_stage.py)",
+      "Bash(timeout 4 ping -c 2 -W 2 192.168.1.210)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(PYTHONPATH=/home/keti/workspace/MMS/xArm-Python-SDK timeout 30 /home/keti/isaacsim/python.sh -c \"from xarm.wrapper import XArmAPI; print\\('xarm import OK \\(연결은 별개\\)'\\)\")",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(gh repo *)",
+      "Bash(gh api *)",
+      "Bash(gh auth *)",
+      "Bash(curl -s --max-time 20 'https://api.github.com/orgs/xArm-Developer/repos?per_page=100')",
+      "Bash(PYTHONPATH=/home/keti/workspace/MMS/MMS timeout 40 /home/keti/isaacsim/python.sh -c \"from utils.robot import xarm7_kinematics as kin; import numpy as np; q,ok=kin.ik\\(np.array\\([300,0,400,3.14,0,0]\\),seed=np.zeros\\(7\\)\\); print\\('kin.ik ok=',ok,'q\\(deg\\)=',np.round\\(np.degrees\\(q\\),1\\)\\)\")",
+      "Read(//home/keti/**)",
+      "Bash(timeout 30 /home/keti/isaacsim/python.sh -c \"import yaml; print\\('yaml OK', yaml.__version__\\)\")",
+      "Bash(sed -i 's|m=ilu.module_from_spec\\(s\\); s.loader.exec_module\\(m\\); return m|import sys as _s; m=ilu.module_from_spec\\(s\\); _s.modules[name]=m; s.loader.exec_module\\(m\\); return m|' /tmp/test_calib_wiring.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_calib_wiring.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_he2.py)",
+      "Bash(timeout 40 /home/keti/isaacsim/python.sh -c ' *)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_geo.py)"
     ]
   }
 }
