@@ -1,10 +1,13 @@
-# Hand-Eye Calibration — 로직 흐름 & 코드 지도
+# Calibration — Hand-Eye(`T_EC`) & Turntable(`T_B_F0`)
 
-> 카메라(Artec Spider)가 로봇 손목(EE)에 **어떻게 붙어있는지**(= `T_EC`)를 구하는 과정.
-> 이 문서는 *무엇을·왜·어떻게* 와 *어느 함수가 무슨 일을 하는지* 를 한 번에 본다.
-> 상위 맥락은 `docs/main_flow.md` §1. 턴테이블 축 캘리브(별개)는 main_flow §1.1.
+> MMS 의 두 가지 캘리브를 한 문서에. *무엇을·왜·어떻게* + *어느 함수가 무슨 일을 하는지*.
+> 상위 맥락은 `docs/main_flow.md` §1.
+> - **Part 1 — Hand-Eye `T_EC`**: 카메라가 로봇 손목(EE)에 어떻게 붙어있나.
+> - **Part 2 — Turntable `T_B_F0`**: 턴테이블이 로봇 base 기준 어디서·어느 축으로 도나.
 
 ---
+
+# 〔Part 1〕 Hand-Eye — `T_EC`
 
 ## 1. 무엇을 구하나 — `T_EC`
 
@@ -192,3 +195,100 @@ python scripts/artec/hand_eye_calib.py      # 자세 순회 → T_EC → hand_ey
 ```
 
 > 실물 결과(2026-04-29): PARK, **t_err 3.55mm / r_err 1.30°** (main_flow §1.0).
+
+---
+---
+
+# 〔Part 2〕 Turntable — `T_B_F0`
+
+> 로봇 base 기준 **턴테이블 회전축·표면**(= `T_B_F0`)을 구한다. 방법은 **rim 점 피팅** 하나로 통일
+> (구 어레이 방법은 실물 fixture 비용이 커서 채택 안 함 — rim 으로 대체 가능).
+
+## 9. 무엇을 구하나 — `T_B_F0`
+
+| 프레임 | 의미 |
+|---|---|
+| **B** | 로봇 base (월드) |
+| **F** | 턴테이블 프레임 (원점=회전축이 disc **표면**과 만나는 점, z=회전축, θ=0 기준) |
+
+구하려는 값: **`T_B_F0`** = "턴테이블이 base 기준 어디서·어느 축으로 도나". 한 번 구하면 하드웨어
+이동 전까지 상수 → `config/calibration/turntable_frame.yaml` 저장.
+
+> ★ 규약: `T_B_F0` 는 **B→F** (`x_F = T_B_F0·x_B`). F 의 z = 회전축(위쪽), 원점 = 표면 위 축점.
+
+왜 필요 — Phase 2 hint·NBV·recovery·충돌회피가 전부 "턴테이블이 base 기준 어디서 도나"에 의존.
+하드웨어팀이 옮기면 무효화 → **버튼 하나로 다시 잡는** 루틴.
+
+## 10. 핵심 원리 — "회전하면 원을 그린다"
+
+> 회전판에 고정된 점은 회전축 둘레로 **원**을 그린다 → 원 법선 = 축방향, 중심 = 축 위 한 점.
+
+disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 3D 로 모아 원을 피팅하면 축이 나온다.
+
+> ★ **축 ≠ 표면**: rim/궤적 높이 ≠ disc 표면 높이일 수 있음. 충돌회피·대상물 높이를 위해 disc
+> **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(§12).
+
+## 11. Rim 방법 — 흐름 + 함수
+
+```
+로봇이 disc rim 을 보는 자세 → 1회 캡처 (organized 포인트클라우드 + T_CB)
+        │  ※ 카메라 위치는 로봇이 알려줌: 점 → 센서C → T_CB(=T_EC·FK) → base. Artec SLAM 미사용.
+        ▼
+   rim 위 점 취득
+        │   real: 사용자가 rim 위 3+점 **클릭** (RimPicker)
+        │   sim : 알려진 disc 기하로 rim 점 **자동 추출**(방위 binning 최외곽)
+        ▼
+   pts_B (rim, base) → fit_circle_3d → (center, normal, radius, residual)
+        ▼
+   (+ disc 표면 평면, §12) → build_T_B_F0(center, normal) → T_B_F0
+```
+
+- UI/수학: `utils/calibration/`
+  - `rim_picker.py` — `RimPicker(intensity, organized_pts, T_CB)` + `run_picker` (OpenCV 클릭:
+    LClick=추가/RClick=취소/Enter=피팅), `show_3d_result` (Open3D). pixel→base 3D 내장.
+  - `turntable_frame.py::fit_circle_3d(pts)` → `(center, normal, radius, residual)` (평면 SVD + 2D 대수 원피팅).
+- ⚠ Spider 좁은 FOV 탓에 rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 취득
+  (3점이면 가능하나 호가 짧으면 조건수↓).
+
+## 12. 표면 평면 → `T_B_F0` 빌드
+
+축(방향+XY)만으론 부족 → disc **표면**으로 원점 높이 확정:
+- `turntable_frame.py`
+  - `fit_plane(pts)` → 표면 평면(점·법선, SVD).
+  - `build_T_B_F0(center_B, nz_B)` → F 프레임(원점=center, z=nz, x=base x 투영, y=z×x) → **B→F**.
+  - `save_turntable_frame_yaml(...)` → translation(m) + quat 저장.
+- (선택) `mms_artec/system.py::ArtecMMS.disc_surface_frame(disc_points_base, axis_point, axis_dir)` —
+  표면 평면 ∩ 축선 = F0 원점, z축은 축방향, 평면법선은 교차검증. (구 어레이 경로용이었으나
+  rim center/normal 을 바로 `build_T_B_F0` 에 넣어도 됨 — rim 은 표면 근처라 단순.)
+
+## 13. 코드 지도 (턴테이블)
+
+```
+utils/calibration/turntable_frame.py     (numpy; 저장 시 scipy/yaml) ★ 공유 코어
+    fit_circle_3d(pts) → (center, normal, radius, residual)
+    fit_plane(pts)     → (point, normal, residual)
+    build_T_B_F0(center_B, nz_B) → T_B_F0 (B→F)
+    save_turntable_frame_yaml(...)
+utils/calibration/rim_picker.py          (cv2) — rim 클릭 UI (RimPicker/run_picker/show_3d_result)
+
+실물 진입:
+  scripts/artec/turntable_frame_init.py  # Artec rim 클릭 (ARTEC_TO_OPENCV z-flip + T_CB)
+  scripts/phoxi/turntable_frame_init.py  # PhoXi rim 클릭 (T_CB = T_EB·T_CE)
+
+sim 검증:
+  standalone_examples/play/MMS/MMS_ext_calibration2.py   # 턴테이블 rim 자동추출 → fit → GT 비교
+```
+
+## 14. 규약·함정 + 실행
+
+- **base 프레임 + SLAM 미사용** — `capture_points_base`(센서→T_EC·FK→base). hand-eye 와 동일 철학(§6).
+- **단위** — 코어 수학은 **m** 권장. organized_pts 는 **mm**(rim_picker 가 /1000). 저장은 m.
+- **`T_B_F0` = B→F** (`x_F = T_B_F0·x_B`).
+- ⚠ **코드 중복(정리 필요)** — `scripts/artec/turntable_frame_init.py` 가 공유 코어 대신 자체
+  `fit_circle_3d`/`_RimPicker` 를 들고 있음(PhoXi 는 공유 코어 사용). Artec 도 공유 코어로 통일 권장.
+- ⚠ **turntable_frame.yaml stale 의심** — 2026-04-23(Artec pivot 이전). 정밀도 의심 시 재캘리브 1순위.
+
+**sim:** `standalone_examples/play/MMS/MMS_ext_calibration2.py` (Isaac 확장/Script Editor).
+**real:** `python scripts/artec/turntable_frame_init.py` → rim 클릭 → `config/calibration/turntable_frame.yaml`.
+
+> 상태: rim 방법 ✅ (Isaac+PhoXi 검증 0.015°/0.7mm). 구 어레이 방법은 폐기(rim 으로 대체).

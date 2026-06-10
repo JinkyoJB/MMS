@@ -133,7 +133,8 @@
       "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_calib_wiring.py)",
       "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_he2.py)",
       "Bash(timeout 40 /home/keti/isaacsim/python.sh -c ' *)",
-      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_geo.py)"
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_geo.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_tt.py2)"
     ]
   }
 }

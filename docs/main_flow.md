@@ -120,47 +120,29 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 ### 1.1 턴테이블 축 T_B_F0 — 설치 보정
 
 하드웨어팀이 턴테이블/로봇을 옮기면 T_B_F0(로봇 base 기준 턴테이블 축·평면)가 무효화됨.
-**버튼 하나로 다시 잡는** 루틴. 두 가지 방법, **공용 코어**:
+**버튼 하나로 다시 잡는** 루틴. **방법은 rim 점 피팅 하나로 통일**.
 
 원리: *회전판에 고정된 점은 원을 그린다 → 원의 법선=축방향, 중심=축 위 점.*
 
 | 방법 | 설명 | 상태 |
 |---|---|---|
-| **1.1 3구 자동** | 반경 아는 구 3개를 턴테이블에 부착 → θ 회전하며 스캔 → known-R 구중심 피팅 → 축. **+ disc 표면 평면 스캔**(표면높이=F0 원점, 법선 교차검증) | ✅ |
-| **1.2 rim 3점 클릭** | 디스크 rim 을 스캐너로 보고, OpenCV로 사용자가 점 클릭 → 3D 원 피팅 → 축·평면 | ✅ PhoXi+Isaac (검증 0.015°/0.7mm) |
+| **rim 점 피팅** | disc rim 을 스캐너로 보고 rim 위 점 취득(real=클릭 / sim=자동추출) → 3D 원 피팅 → 축·평면 | ✅ PhoXi+Isaac (검증 0.015°/0.7mm) |
+| ~~3구 자동~~ | ~~반경 아는 구 어레이 회전~~ | ❌ **폐기** (실물 fixture 비용 큼, rim 으로 대체) |
 
 ### 핵심 통찰
 - **카메라 위치는 로봇이 알려준다**: 점군을 `센서 → T_EC(손-눈)·FK → 로봇 base` 로 변환.
   **Artec first-frame 추적(SLAM)은 calibration에 쓰지 않는다** (임의기준·드리프트). →
   `sensor.capture_points_base(robot, T_EC)`.
-- **known-R 구피팅이 결정적**: 앞면(cap)만 봐도 반경 고정 시 중심 유일 (자유R 76° → known-R 0.14°).
-- **축 ≠ 표면**: 3구는 회전축(방향+XY)만 준다(궤적높이=구높이). 충돌회피 + 대상물 기준
-  높이를 위해 disc **표면**을 따로 잡아야 한다 → 축 XY 안 뒤 disc 조준·평면 피팅
-  (`system.disc_surface_frame`). 표면점=F0 원점, 평면법선은 구-축과 교차검증(≈0°).
-  rim 곡면은 크롭(R<반경)해서 평평한 윗면만 피팅.
+- **축 ≠ 표면**: rim 원은 축(방향+XY)을 준다. 충돌회피 + 대상물 기준 높이를 위해 disc
+  **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(`system.disc_surface_frame`,
+  또는 rim center/normal 을 바로 `build_T_B_F0`). 표면점=F0 원점, 평면법선 교차검증.
 
 ### 파일
-- `utils/calibration/turntable_frame.py` — `fit_circle_3d`, `build_T_B_F0`, `save_turntable_frame_yaml` (수학, 센서무관)
-- `utils/calibration/turntable_axis.py` — 3구 자동(`fit_sphere_center`, `estimate_axis`, `axis_error`)
+- `utils/calibration/turntable_frame.py` — `fit_circle_3d`, `fit_plane`, `build_T_B_F0`, `save_turntable_frame_yaml` (수학, 센서무관) ★ 공유 코어
 - `utils/calibration/rim_picker.py` — OpenCV 클릭 UI + Open3D 뷰 (센서무관)
-- `mms_artec/system.py::ArtecMMS.calibrate_turntable_axis(...)` — **sim/real 공통 진입점** (base 프레임 축 반환)
-- `scripts/sim/calib_3sphere_sim.py` — 3구 sim 검증 하니스 (GT 비교, 축 시각화, perturb 강인성, 로그→`scripts/sim/log/`)
-- `scripts/sim/calib_rim_sim.py` — rim 캡처(Isaac) + 자동검증(클릭 합성). ★ Isaac python 은
-  GUI 없음 → 수동 클릭은 `scripts/sim/rim_click_offline.py`(일반 python, cv2/matplotlib)로 분리
-- `mms_artec/backends/isaac/calib_fixture.py` — sim 가상 구 fixture 셋업(rider 부착 + 스캐너 조준)
-- `mms_artec/backends/isaac/isaac_scanner.py::capture_organized` — rim-클릭용 조직화 캡처
-  (intensity + organized_pts[base mm] + T_CB) — Isaac 카메라 어댑터
-- `scripts/phoxi/turntable_frame_init.py` — PhoXi rim-클릭 (위 코어 재사용)
-
-### sim 검증 결과
-3구 자동, 헤드리스: **축 방향오차 0.03°, 위치오차 0.6mm** (base 프레임). disc 표면 평면:
-**법선 vs 구-축 0.03°, 평면 RMS 0mm**(평평), 표면높이로 F0 원점 확정. ScanTarget(스테이션
-통째)을 ±0.04m 랜덤 perturb 해도 동일 정밀도 유지(강인). 산출물: `recognized_spheres.ply`,
-`center_tracks_topview.png`(궤적+GT/EST축 일치), `cam_rgb_aim.png`, `result.json`(축+표면) 등.
-
-핵심 교훈(sim fixture): 구 prim 은 부모 xform 오프셋이 없는 `/World` 아래 생성해야
-의도한 world 좌표에 놓인다. 또 구 z 폭은 스캐너 작동거리 창(0.2~0.3m) 안에 들어오게
-압축(centroid 기준 ±0.04m)해야 회전 내내 캡처된다.
+- `scripts/artec/turntable_frame_init.py` / `scripts/phoxi/turntable_frame_init.py` — 실물 rim 클릭 진입점
+- `standalone_examples/play/MMS/MMS_ext_calibration2.py` — sim 검증(rim 자동추출 → fit → GT 비교)
+- ~~`turntable_axis.py`, `calib_3sphere_sim.py`, `calib_fixture.py`~~ — 3구 폐기로 미사용(잔존)
 
 ### 남은 일
 - ✅ Isaac rim-클릭 어댑터 완료(`capture_organized`). real Artec 는 동일 계약(intensity,
@@ -168,8 +150,9 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 - ⚠ Spider 의 좁은 FOV(작동거리 0.2~0.3m) 탓에 디스크 rim 전체가 한 화면에 안 들어올 수
   있음 → 보이는 호(arc)에서 점 클릭(원피팅은 3점이면 가능하나 호가 짧으면 조건수↓).
 - 🔬 hand-eye 검증 스크립트(`artec_hand_eye_validate.py`) — 별도 N_test 자세서 point-consistency 측정(미작성).
+- ⚠ `scripts/artec/turntable_frame_init.py` 가 공유 코어 대신 자체 `fit_circle_3d`/`_RimPicker` 중복 — 통일 권장.
 
----
+> 상세: **`docs/1_calibration.md`** (Part 1 hand-eye + Part 2 turntable).
 
 ## 2. 5면 스캐닝 — Phase 1 streaming SLAM + view planning  ✅🔬
 
@@ -556,7 +539,7 @@ utils/
   robot/{xarm_interface,xarm7_kinematics}.py    turntable/turntable_interface.py    transforms.py
 mms_phoxi/nbv/{scan_session,tsdf_volume,pcd_accumulate_volume}.py   ★ NBV/병합 참조 구현
 main_artec.py                    진입점 (BACKEND, RUN_CALIBRATION 토글)
-scripts/sim/calib_3sphere_sim.py    3구 sim calibration 검증(축 시각화·perturb)
+standalone_examples/play/MMS/MMS_ext_calibration{,2}.py   hand-eye / 턴테이블 rim sim 검증
 ```
 
 ## 좌표 / 단위 규약
@@ -612,7 +595,7 @@ scripts/sim/calib_3sphere_sim.py    3구 sim calibration 검증(축 시각화·p
 | 단계 | 상태 | 비고 |
 |---|---|---|
 | 0. sim/real 백엔드 | ✅ | robot/turntable/scanner 전환, Phase A(모션) 검증 |
-| 1. auto-calibration | ✅ | hand-eye(ChArUco+solvePnP, 3.55mm) + 3구 자동(0.03°/0.6mm) + rim 3점클릭(Isaac, 0.015°/0.7mm) |
+| 1. auto-calibration | ✅ | hand-eye(ChArUco+solvePnP, 3.55mm) + 턴테이블 rim(Isaac, 0.015°/0.7mm; 3구는 폐기) |
 | 2. 5면 Phase1 streaming | ✅🔬 | streaming SLAM + elevation view-score 구현, sim view-planning 검증 남음 |
 | 3. 아랫면(flip 병합) | ♻️🔬 | multipass 설계 존재, 병합 검증 필요 |
 | 4. 2+3 병합(T_pre hint) | ♻️🔬 | centroid-pivot hint + ICP/GlobalReg/누적 부품 존재 |
