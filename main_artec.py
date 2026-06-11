@@ -18,7 +18,7 @@ from mms_artec.sensor.artec_config import ArtecConfig   # 바인딩 비의존(�
 # ── 백엔드 선택 ───────────────────────────────────────────────────────
 #   "real"  → 실물 xArm + 턴테이블 + Artec 스캐너 (Windows)
 #   "isaac" → Isaac Sim 시뮬레이션 (옆에 실물 없이 개발)
-BACKEND = "isaac"
+BACKEND = "real"
 # isaac GUI 표시 여부. 환경변수 MMS_ISAAC_HEADLESS=1 로 헤드리스 강제(서버/CI).
 ISAAC_HEADLESS = os.environ.get("MMS_ISAAC_HEADLESS", "0") == "1"
 
