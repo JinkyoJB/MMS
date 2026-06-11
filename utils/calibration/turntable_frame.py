@@ -37,8 +37,9 @@ def fit_circle_3d(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float, float
         raise ValueError(f"최소 3점 필요 (현재 {len(pts)}점)")
 
     # 1. SVD 평면 피팅 → 법선
+    # full_matrices=False: U 가 (N,3) — 기본 (N,N) 은 대량점에서 메모리 폭발(fit_plane 와 동일)
     centroid = pts.mean(axis=0)
-    _, _, Vt = np.linalg.svd(pts - centroid)
+    _, _, Vt = np.linalg.svd(pts - centroid, full_matrices=False)
     normal = Vt[-1]
 
     # 2. 평면 내 정규직교 기저

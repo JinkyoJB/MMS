@@ -103,15 +103,15 @@ class XArmInterface:
         Returns
         -------
         np.ndarray, shape (6,)  [x(mm), y(mm), z(mm), roll(rad), pitch(rad), yaw(rad)]
+
+        ※ **자체 해석 FK**(xarm7_kinematics) 사용 — 컨트롤러/하드웨어 무관·오프라인 안정.
+          SDK FK(get_forward_kinematics) 미사용.
         """
-        code, pose = self.arm.get_forward_kinematics(
-            angles=joints.tolist(),
-            input_is_radian=input_is_radian,
-            return_is_radian=True,
-        )
-        if code != 0:
-            raise RuntimeError(f"FK failed (code={code})")
-        return np.array(pose[:6])
+        from utils.robot import xarm7_kinematics as _kin
+        q = np.asarray(joints, dtype=float)[:7]
+        if not input_is_radian:
+            q = np.radians(q)
+        return _kin.fk_pose6d(q)
 
     def ik(
         self,
@@ -133,18 +133,20 @@ class XArmInterface:
         Returns
         -------
         np.ndarray, shape (7,)  [rad]
+
+        ※ **자체 해석 IK**(xarm7_kinematics, 수치 DLS) 사용 — 컨트롤러/하드웨어 무관·안정.
+          SDK IK(get_inverse_kinematics, 컨트롤러 통신 → 연결 필요·불안정) 미사용.
         """
+        from utils.robot import xarm7_kinematics as _kin
         if seed_joints is None:
             seed_joints = self.get_joint_angles(is_radian=True)
-
-        code, joints = self.arm.get_inverse_kinematics(
-            pose=pose.tolist(),
-            input_is_radian=input_is_radian,
-            return_is_radian=True,
-        )
-        if code != 0:
-            raise RuntimeError(f"IK failed (code={code})")
-        return np.array(joints[:7])
+        p = np.asarray(pose, dtype=float)[:6].copy()
+        if not input_is_radian:
+            p[3:] = np.radians(p[3:])
+        q, ok = _kin.ik(p, seed=np.asarray(seed_joints, dtype=float))
+        if not ok:
+            raise RuntimeError("IK failed (analytic 수렴 실패 — 목표 미도달 가능)")
+        return q
 
     # ------------------------------------------------------------------
     # Motion
@@ -190,20 +192,18 @@ class XArmInterface:
 
         print(f"목표 TCP:  x={target_pose[0]:.1f}  y={target_pose[1]:.1f}  z={target_pose[2]:.1f} mm")
 
-        code, ik_joints_deg = self.arm.get_inverse_kinematics(
-            pose=target_pose.tolist(),
-            input_is_radian=True,
-            return_is_radian=False,
-        )
-        if code != 0:
-            print(f"IK 실패 (code={code}) — 도달 불가능한 위치")
+        try:
+            ik_joints_rad = self.ik(target_pose, input_is_radian=True)   # 자체 해석 IK
+        except RuntimeError:
+            print("IK 실패 (analytic) — 도달 불가능한 위치")
             return False
 
         if confirm:
             input("\nEnter 누르면 이동...")
 
         self.enable_motion()
-        self.arm.set_servo_angle(angle=ik_joints_deg, speed=speed, wait=True)
+        self.arm.set_servo_angle(angle=ik_joints_rad.tolist(), speed=speed,
+                                 is_radian=True, wait=True)
 
         pose_after = self.get_pose(is_radian=True)
         print(

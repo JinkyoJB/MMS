@@ -134,7 +134,23 @@
       "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_he2.py)",
       "Bash(timeout 40 /home/keti/isaacsim/python.sh -c ' *)",
       "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_geo.py)",
-      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_tt.py2)"
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_tt.py2)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_multiview.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_views.py)",
+      "Bash(timeout 90 /home/keti/isaacsim/python.sh /tmp/test_fix.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_p1.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_p1b.py)",
+      "Bash(grep -n \"구현:.*artec_streaming\\\\|artec_streaming_scan_session.py\\\\`$\\\\|sim에서 ground-truth\" docs/main_flow.md)",
+      "Bash(timeout 40 /home/keti/isaacsim/python.sh /tmp/t.py)",
+      "Bash([ -f \"$LOG\" ])",
+      "Bash(sed -i 's#captures_phase1_recovery\"#captures_phase1_recovery2\"#; s#\"mms_recov_step\"#\"mms_recov2_step\"#' MMS_ext_phase1_recovery2.py)",
+      "Bash(sed -i 's#captures_phase1_recovery\"#captures_phase1_recovery1\"#; s#\"mms_recov_step\"#\"mms_recov1_step\"#' MMS_ext_phase1_recovery1.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_col.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_self.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_dep.py)",
+      "Bash(timeout 60 /home/keti/isaacsim/python.sh /tmp/test_lib.py)",
+      "Bash(sed -i 's/ROBOT_IP, USE_XARM_SDK = \"192.168.1.210\", True/ROBOT_IP, USE_XARM_SDK = \"192.168.1.210\", False  # 자체 해석 IK 사용\\(SDK IK 미사용\\)/' MMS_ext_phase1_recovery1.py MMS_ext_phase1_recovery2.py MMS_ext_calibration2.py MMS_ext_phase1.py)",
+      "Bash(sed -i 's/^USE_XARM_SDK  = True .*/USE_XARM_SDK  = False               # 자체 해석 IK 사용\\(SDK IK 미사용\\)/' MMS_ext_calibration.py)"
     ]
   }
 }

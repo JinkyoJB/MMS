@@ -113,6 +113,16 @@ class CollisionWorld:
         self.halfspaces.append((name, np.asarray(point, float), n))
         return self
 
+    def add_box(self, name, lo, hi, margin=0.0):
+        """AABB [lo,hi] → 캡슐(가장 긴 축 선분 + 단면 대각 반경) 장애물. 프레임/테이블 구조물용.
+        (box 를 캡슐로 보수적 근사 — 단면 대각 반경이라 박스를 완전히 포함.)"""
+        lo = np.asarray(lo, float); hi = np.asarray(hi, float)
+        ext = hi - lo
+        ax = int(np.argmax(ext)); c = (lo + hi) / 2.0
+        p0 = c.copy(); p1 = c.copy(); p0[ax] = lo[ax]; p1[ax] = hi[ax]
+        others = [e for k, e in enumerate(ext) if k != ax]
+        return self.add_capsule(name, p0, p1, 0.5 * float(np.hypot(*others)) + margin)
+
     # ── calibration 결과로 턴테이블 월드 구성 ────────────────────────────────
     @classmethod
     def from_turntable(cls, surface_point, axis_dir, disc_radius,
@@ -164,3 +174,63 @@ class CollisionWorld:
                     contacts.append((rname, hname, float(margin - clear)))
         return CollisionResult(collide=len(contacts) > 0,
                                min_clearance=float(min_clear), contacts=contacts)
+
+
+# ── self-collision + 자세별 충돌 + collision-aware IK (real/sim 공용) ──────────
+def self_collision(capsules: List[Tuple[str, Capsule]], scale: float = 0.7,
+                   gap: int = 3, exclude_last: bool = True, margin: float = 0.0):
+    """
+    로봇 캡슐들 사이 self-collision. 접힌 팔의 오탐 방지를 위해:
+      - scale<1 : 캡슐 반경 축소(캡슐은 링크 두께를 과대근사)
+      - gap>=3  : 3칸 이상 떨어진 링크쌍만(인접/근접은 항상 가까움)
+      - exclude_last : 스캐너(마지막 캡슐) 제외(스캔 자세에서 팔과 자연히 가까움)
+    Returns: [(name_i, name_j, 침투 m), …] (비면 충돌 없음). (검증: artec/phoxi home 깨끗)
+    """
+    caps = list(capsules)
+    n = len(caps) - (1 if exclude_last else 0)
+    hits = []
+    for i in range(n):
+        ni, ci = caps[i]
+        for j in range(i + gap, n):
+            nj, cj = caps[j]
+            d = seg_seg_distance(ci.p0, ci.p1, cj.p0, cj.p1)
+            thr = (ci.r + cj.r) * scale + margin
+            if d < thr:
+                hits.append((ni, nj, float(thr - d)))
+    return hits
+
+
+def pose_collision(world: CollisionWorld, q, T_EC=None, link_radii=DEFAULT_LINK_RADII,
+                   margin: float = 0.0, self_scale: float = 0.7, ignore=()
+                   ) -> Tuple[bool, str]:
+    """
+    관절각 q → **공칭 해석 FK 캡슐**(capsules_from_joints, base m) → 월드 + self 충돌 검사.
+    real(실물)·sim(가상) **pre-move 공용**. (실물은 SDK IK 로 q 구한 뒤 이 함수로 검사.)
+
+    Returns (collide, reason).  reason = "rlink↔obstacle" 또는 "self:li↔lj".
+    """
+    caps = capsules_from_joints(q, link_radii, T_EC)
+    res = world.check(caps, margin=margin, ignore=ignore)
+    if res.collide:
+        c = res.contacts[0]
+        return True, f"{c[0]}↔{c[1]}"
+    if self_scale > 0:
+        hits = self_collision(caps, scale=self_scale, margin=margin)
+        if hits:
+            return True, f"self:{hits[0][0]}↔{hits[0][1]}"
+    return False, ""
+
+
+def collision_free_ik(ik_fn, world: CollisionWorld, pose6d, T_EC=None,
+                      margin: float = 0.0, self_scale: float = 0.7, **kw):
+    """
+    pose6d → ik_fn(pose6d)=q(또는 None) → 충돌검사 → 충돌-free q 또는 None.
+
+    ik_fn : pose6d → q|None  (real=xArm SDK IK 래핑, sim=해석 IK). robot 백엔드 무관.
+    real/sim 동일 호출로 **충돌하지 않는 자세만** 반환한다.
+    """
+    q = ik_fn(pose6d)
+    if q is None:
+        return None
+    col, _ = pose_collision(world, q, T_EC=T_EC, margin=margin, self_scale=self_scale, **kw)
+    return None if col else q

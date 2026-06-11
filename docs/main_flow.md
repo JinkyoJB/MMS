@@ -105,11 +105,12 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
   > ⚠ **카메라 프레임 규약 함정**: USD/Isaac 카메라는 광축 **-Z·+Y up**, OpenCV(solvePnP)는
   > **+Z·+Y down**. 둘은 `R_FLIP=diag(1,-1,-1)` 차이. solvePnP 로 푼 T_E_C 는 OpenCV 프레임
   > 이므로 USD GT 와 비교 시 `T_E_C_usd = T_E_C_ocv @ FLIP` 보정 필수(빼먹으면 정상인데도 큰 오차로 보임).
-  > ★ **IK 는 pluggable (sim/real 괴리 최소화)**: 실물 xArm IK 는 **컨트롤러 통신**(SDK
-  > `get_inverse_kinematics`→`arm_cmd.get_ik`, `@xarm_is_connected`)이라 오프라인 불가 —
-  > UFACTORY 가 컨트롤러 IK 의 오프라인 재현본을 제공 안 함(ros MoveIt 은 범용 솔버라 zero-gap 아님).
-  > → **로봇 연결되면 xArm SDK IK(zero-gap), 아니면 `utils/robot/xarm7_kinematics.py`(공칭 DH, USD 정합) fallback.**
-  > 로봇 켜지면 두 IK 를 N 포즈 비교해 일치하면 offline 신뢰. PhysX 자코비안 크롤은 폐기(또아리 발생) →
+  > ★ **IK = 자체 해석 운동학** (`utils/robot/xarm7_kinematics.py`, 수치 DLS, 공칭 DH·USD 정합).
+  > 결정(2026-06): **xArm SDK IK 미사용**. SDK IK(`get_inverse_kinematics`→`arm_cmd.get_ik`,
+  > `@xarm_is_connected`)는 **컨트롤러 통신이라 하드웨어 연결 필요 → 불안정**. real·sim 모두
+  > 오프라인·안정한 해석 IK 를 쓴다(real: `XArmInterface.ik/fk` 도 해석, 모션 명령만 SDK
+  > `set_servo_angle`). `RobotIK(use_sdk=False)` 기본. SDK IK 는 zero-gap 검증용 opt-in.
+  > PhysX 자코비안 크롤은 폐기(또아리 발생) →
   > **artec home(`IsaacXArm.HOME_JOINTS_DEG["artec"]`, 충돌무) seed + 관절공간 구동**.
 
 > ⚠ Artec hand-eye(2026-04-29)는 양호하나 **turntable_frame.yaml(2026-04-23)은 Artec
@@ -164,7 +165,7 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 - real: Artec SLAM이 실시간 스캔 누적/추적 → 그 위에 view planning만 얹음.
 - sim: ground-truth 누적으로 같은 view-planning 로직 개발·검증.
 
-### Phase 1 — Streaming SLAM 메커니즘 (구현됨)
+### Phase 1 — Streaming SLAM 메커니즘
 
 연속 회전 턴테이블 위에서 Spider 가 `IScanningProcedure` streaming SLAM 으로 한 바퀴 돌며
 frame-by-frame 정합. 한 번의 360° 회전으로 **5면**(윗면+옆면4) 관찰; 바닥면은 디스크에 닿아
@@ -223,9 +224,13 @@ axis로 회전 보정해 가상 θ N개 합산 / candidate마다 짧게 회전�
 - `utils/nbv/manual_picker.py::compute_camera_pose_from_normal` — 표면 법선→카메라 포즈
 - `utils/control/theta_planner.py` — θ 최적화 (최소 모션)
 - `IsaacWorld.look_at_camera(target, cam_pos)` — 스캐너 조준 프리미티브 (sim)
-- `utils/collision` + `ArtecMMS.{turntable_collision_world,check_pose_collision}` — 자세별
-  충돌 쿼리(real/sim 공용). 캡슐 근사, calibration 축·표면(base)으로 월드 구성 → view
-  planning 후보 자세를 실행 전 거른다. (sim 캡슐=USD 실제 링크포즈, real=공칭 해석 FK)
+- `utils/collision/robot_collision.py` — 자세별 충돌 쿼리(real/sim 공용, base 프레임, 캡슐 근사).
+  - `capsules_from_joints(q, T_EC)` 로봇 캡슐(해석 FK, **pre-move**), `CollisionWorld`
+    (`from_turntable`/`add_box`(프레임·테이블)/`add_halfspace`/`check`), `self_collision`,
+    `pose_collision(world, q, T_EC)` → (충돌, 사유), `collision_free_ik(ik_fn, world, pose6d, T_EC)`.
+  - 월드 = calibration(턴테이블 축·표면) + 셀 측정치(프레임/테이블 box). IK 후보를 **실행 전** 거른다.
+  - real: 해석 IK(`XArmInterface.ik`)로 q 구한 뒤 `pose_collision` 검사. sim: 동일 모듈 dep-주입 공유.
+  - ★ **자세(타깃) 필터**이지 swept-path planning 은 아님(full 충돌-free 궤적은 별도).
 - `mms_phoxi/nbv/scan_session.py` — frontier→cost→plan→ICP→integrate 루프 (PhoXi 완성형, 패턴 참조)
 
 ### 남은 일
@@ -234,7 +239,9 @@ axis로 회전 보정해 가상 θ N개 합산 / candidate마다 짧게 회전�
 
 > 구현: `mms_artec/nbv/artec_multipass_scan_session.py` (`_elevation_search`,
 > `_phase1_view_score`, `_in_object_profile`, `_build_rz_profile`),
-> `mms_artec/nbv/artec_streaming_scan_session.py`
+> `mms_artec/nbv/artec_streaming_scan_session.py`. sim 검증: `MMS_ext_phase1.py`(GT 누적).
+>
+> 상세: **`docs/2_phase1.md`** (streaming SLAM 로직 흐름 + 4 watchdog + GT 누적 sim).
 
 ---
 

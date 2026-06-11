@@ -77,7 +77,7 @@
 |---|---|---|
 | 보드 정의 | 물리 사양(5×3, 20/15mm, DICT_4X4_50) | `CharucoBoardSpec` — `mms_artec/utils/calibration/artec_charuco_detector.py` |
 | ① 자세 생성 | 보드 위 반구 자세 N개 → EE pose | `generate_hemisphere_poses` — `mms_artec/utils/calibration/handeye_geometry.py` |
-| ① 자세 이동(IK) | pose6d → 관절각 (SDK or 해석) | `RobotIK.ik` — `utils/robot/ik_provider.py` |
+| ① 자세 이동(IK) | pose6d → 관절각 (**자체 해석**, SDK 미사용) | `RobotIK.ik` — `utils/robot/ik_provider.py` |
 | ② 캡처 | 이미지 획득 | (sim) Isaac `camera.get_rgba` / (real) Artec |
 | ③ 검출+solvePnP | 이미지 → `T_MC`(보드→카메라, mm) | `ArtecCharucoDetector.detect` — `artec_charuco_detector.py` |
 | ④ FK | 손목 pose `T_BE` (m) | (sim) `rigid_ee` / (real) `XArmInterface.get_ee_pose_mat` |
@@ -112,8 +112,8 @@ mms_artec/utils/calibration/handeye_geometry.py   (numpy 전용, 자기완결)
 
 utils/robot/ik_provider.py            (자기완결, kin 주입)
     reachable(ip)                      # 컨트롤러 소켓 도달성
-    RobotIK(kin, robot_ip, use_sdk).ik(pose6d, seed) → (q, ok)
-      # 로봇 연결 시 xArm SDK IK(zero-gap), 아니면 해석 kin fallback
+    RobotIK(kin, robot_ip, use_sdk=False).ik(pose6d, seed) → (q, ok)
+      # 기본 = 자체 해석 kin IK (SDK IK 미사용 — 컨트롤러 통신이라 불안정)
 
 utils/robot/xarm7_kinematics.py        (해석 운동학, numpy 전용)
     fk_T / fk_pose6d / ik(pose6d, seed) / R_to_euler_xyz ...
@@ -158,8 +158,8 @@ standalone_examples/play/MMS/MMS_ext_calibration.py
    tvec 도 mm). `add_sample` 이 내부에서 `T_MC` 를 mm→m 변환. 섞으면 병진 오차 폭발.
 4. **자세 다양성** — 병진 정확도는 자세 간 **회전 다양성**에 좌우. 거의 수직으로만 내려다보면
    회전축이 비슷해 병진이 부정확. polar/roll 범위를 넓혀야 함.
-5. **IK 는 pluggable** — sim 도 가능하면 실물 xArm SDK IK 를 써 괴리 0. 로봇 꺼져있으면 해석
-   kinematics fallback. (`utils/robot/ik_provider.py`)
+5. **IK = 자체 해석 운동학** — real·sim 모두 `xarm7_kinematics`(수치 DLS). xArm SDK IK 는
+   컨트롤러 통신이라 하드웨어 연결 필요·불안정 → **미사용**(`use_sdk=False` 기본). 모션 명령만 SDK.
 6. **(sim) `utils` 패키지명 충돌** — Isaac 런타임에 동명 `utils` 가 있어 `from utils...` 가 깨짐.
    → MMS 모듈을 **파일경로 로드**(`sys.modules` 등록 필수, `@dataclass` 때문). 옮길 모듈은
    레포 내부 import 없는 **자기완결**이어야 함(`handeye_geometry`/`ik_provider`/`xarm7_kinematics`).

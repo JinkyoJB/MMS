@@ -1,11 +1,10 @@
 """
-Pluggable IK provider — 연결되면 xArm SDK IK(zero-gap), 아니면 해석 운동학 fallback.
+Pluggable IK provider — **기본 = 자체 해석 운동학**(`xarm7_kinematics`).
 
-sim/real 괴리 최소화용. 실물 xArm IK 는 컨트롤러 통신이라 오프라인 불가
-(SDK `get_inverse_kinematics` → `arm_cmd.get_ik`, `@xarm_is_connected`). UFACTORY 가
-컨트롤러 IK 의 오프라인 재현본을 제공하지 않으므로:
-  - 로봇/시뮬레이터 연결 → xArm SDK IK 사용 (실물과 동일 = zero-gap)
-  - 미연결 → 주입된 해석 운동학 모듈(`xarm7_kinematics`) 사용 (공칭 DH, USD 정합)
+★ 결정(2026-06): xArm SDK IK 미사용. SDK IK(`get_inverse_kinematics` → `arm_cmd.get_ik`,
+  `@xarm_is_connected`)는 컨트롤러 통신이라 **하드웨어 연결 필요 → 불안정**. 그래서
+  real·sim 모두 오프라인·안정한 자체 해석 IK(수치 DLS, 공칭 DH·USD 정합)를 쓴다.
+  SDK IK 는 `use_sdk=True` 로 명시할 때만(특수 zero-gap 검증용) 동작하는 opt-in.
 
 numpy/socket/표준 라이브러리만 의존(해석 운동학은 **주입**) → 어떤 환경에서도 안전.
 좌표 규약: pose6d = [x,y,z mm, roll,pitch,yaw rad] (B 기준 플랜지).
@@ -40,14 +39,14 @@ class RobotIK:
     robot_ip : str
         xArm 컨트롤러 IP.
     use_sdk : bool
-        True 면 연결 가능 시 SDK IK 우선.
+        기본 False(자체 해석 IK). True 면 연결 가능 시 SDK IK 우선(opt-in, 비권장).
     xarm_sdk_path : str | None
         xArm-Python-SDK 경로(없으면 이미 import 가능 가정).
     logger : callable
         상태 메시지 출력 (기본 print).
     """
 
-    def __init__(self, kin=None, robot_ip: str = "192.168.1.210", use_sdk: bool = True,
+    def __init__(self, kin=None, robot_ip: str = "192.168.1.210", use_sdk: bool = False,
                  xarm_sdk_path: str | None = None, logger=print):
         self.kin = kin
         self.robot_ip = robot_ip
