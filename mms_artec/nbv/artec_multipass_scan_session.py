@@ -1,14 +1,19 @@
 # mms_artec/nbv/artec_multipass_scan_session.py
 #
-# Phase 1 + Phase 2 통합 오케스트레이터.
+# Phase 1 + (Phase 2 NBV / Phase 3 flip) 통합 오케스트레이터.
 # ArtecStreamingScanSession 한 번 = 한 IScan = 한 회전.
 # 이 클래스는 그것을 N 번 반복하며 모든 IScan 을 master IModel 에 누적한다.
 #
-# Phase 정의 (docs/7_artec_phase.md):
+# Phase 정의 (★ 재정의: docs/3_phase2.md §8. 이전 docs/7 의 "Phase 2(flip 바닥면)" 는
+#               본 설계에서 **Phase 3** 로 분리되고, Phase 2 는 NBV 보강으로 재정의됨):
 #  - Phase 1: 객체 canonical 자세에서 turntable 360° → 윗면 + 옆면 4 (= 5면) 캡처.
-#  - Phase 2: 객체 자세를 바꿔 (예: Ry+90°, Ry+180°) 바닥면 + overlap 옆면 캡처
-#             후 Phase 1 데이터와 정합. centroid-pivot pre-rotation hint 사용
-#             (docs/8_artec_phase2_pose_disambiguation.md §5.3).
+#  - Phase 2: 5면 중 부족 영역을 **로봇이 NBV 로 보강**(_phase2_nbv_loop,
+#             공용 utils/nbv/phase2_nbv + robot_collision). 로봇이 움직인다.
+#  - Phase 3: 객체 자세를 바꿔(Ry+90/180°) **바닥면** + overlap 옆면 캡처 후
+#             centroid-pivot pre-rotation hint 로 병합
+#             (docs/8_artec_phase2_pose_disambiguation.md §5.3). = 이전의 "Phase 2(flip)".
+#  ★ phase_mode=N 으로 **순차 누적** 실행: 1=Phase1, 2=Phase1→2, 3=Phase1→2→3.
+#    (Phase 2→3 전환 시 NBV 로 움직인 robot 을 go_home 으로 복귀시킨 뒤 flip.)
 #
 # 동기:
 #  - SDK 의 ScanningState_ContinueRecord 는 미지원이라 한 IScan 안에서 pause/resume 불가.
@@ -17,7 +22,7 @@
 #
 # 두 가지 흐름이 같은 메커니즘으로 처리됨:
 #  - Tracking lost recovery: 같은 pose 로 retry, hint 동일.
-#  - Phase 2 의 자세 변경: 다음 pose advance, 새 hint.
+#  - Phase 3(flip) 의 자세 변경: 다음 pose advance, 새 hint.
 #
 # Notation: T_AB : A → B  (CLAUDE.md 준수).
 
@@ -204,7 +209,7 @@ class ArtecMultiPassScanSessionSettings:
     # cylinder envelope 만으로는 z_bot≈z_table 부근 디스크 표면이 "물체점"
     # 으로 새어 잘못된 best 가 뽑히는 회귀가 있어 두 가지를 추가:
     #  (i) table_clear_mm: z ≤ z_table + table_clear_mm 점은 무조건 제외.
-    #      평평한 물체 바닥 일부 잘림은 Phase 2 가 별도 캡처해 보완.
+    #      평평한 물체 바닥 일부 잘림은 Phase 3(바닥면 flip)가 별도 캡처해 보완.
     #  (ii) (r,z) 축대칭 profile: moving voxel 의 (반경,높이) 2D 점유 맵을
     #      만들어 cylinder lookup 대신 실제 단면을 본다. 축대칭화 되어 있어
     #      probe 150° 만 돌아도 모든 θ candidate 에 멤버십 성립.
@@ -237,6 +242,47 @@ class ArtecMultiPassScanSessionSettings:
     icp_max_iter: int = 60
     icp_color_weight: float = 0.5       # colored ICP 의 색상 가중 (Open3D 0.6)
     icp_corr_dist_mm: float = 30.0      # 대응 거리 한계 (init 이 좋으면 작게)
+
+    # ── Phase 2 — 부족면 NBV 보강 (docs/3_phase2.md) ────────────────────
+    # phase_mode: Phase 1 부터 **순차 누적**으로 어디까지 실행할지 (docs/3_phase2.md §8).
+    # phase_mode=N → Phase 1..N 을 순서대로:
+    #   1 = Phase 1 (5면 streaming)
+    #   2 = Phase 1 → **Phase 2** (부족면 NBV 보강, 로봇 이동, _phase2_nbv_loop)
+    #   3 = Phase 1 → Phase 2 → **Phase 3** (바닥면 180° flip, 사용자 손회전 + centroid hint)
+    # 기본 3 = 전 파이프라인. ★ 첫 real 테스트는 1 부터 단계적으로 올릴 것(2·3 미검증).
+    phase_mode: int = 3
+    nbv_distance_mm: float = 225.0          # NBV 카메라-표면 거리 (Artec 최적대역)
+    nbv_min_seg_vertices: int = 8           # frontier 세그먼트 최소 정점
+    nbv_min_seg_length_mm: float = 6.0      # frontier 최소 길이
+    nbv_max_seg_length_mm: float = 60.0     # frontier 재분할 한계
+    nbv_poisson_depth: int = 8              # master pcd→mesh Poisson depth
+    nbv_density_quantile: float = 0.04      # 저밀도 vertex trim 분위수
+    nbv_master_voxel_mm: float = 2.0        # master→pcd voxel
+    nbv_K_max: int = 12                     # NBV 최대 반복
+    nbv_boundary_stop_mm: float = 12.0      # 수렴: 경계 총길이 < 이 값
+    nbv_coverage_tau: float = 0.92          # 수렴: 각도 커버리지 ≥ τ
+    nbv_coverage_dirs: int = 64
+    nbv_coverage_parallel_deg: float = 40.0
+    nbv_robot_speed_deg_s: float = 12.0     # NBV 로봇 이동 속도 (보수적)
+    nbv_sweep_deg: float = 15.0             # 캡처 시 턴테이블 ±스윕 (overlap)
+    nbv_theta_assist: bool = False          # True=턴테이블 회전 보조(θ planner). 기본 robot-only.
+    nbv_theta_n_samples: int = 72           # θ assist 그리드
+    nbv_cost_delta: float = 0.3             # 큰 구멍 우선 가중
+    nbv_swept_steps: int = 12               # 궤적(q_cur→q_des) 충돌검사 보간 스텝 수
+    nbv_el_floor_deg: float = 30.0          # NBV 관측 elevation 하한(=Phase1 측면각). 그 이상에서 보강
+    # ── 충돌 world (turntable calib 기반, robot_collision) ──────────────
+    nbv_collision_enabled: bool = True      # False=충돌검사 skip(자세만 IK)
+    nbv_turntable_radius_mm: float = 150.0  # disc(+프레임) 반경
+    nbv_turntable_body_height_mm: float = 200.0  # 표면 아래 몸체 높이
+    nbv_collision_margin_mm: float = 10.0   # 보수적 여유
+    # 충돌 금지 원기둥 (turntable 위 금지구역; robot_collision.add_cylinder, real/sim 공용).
+    nbv_keepout_enable: bool = False        # True 면 아래 원기둥을 충돌 world 에 추가
+    nbv_keepout_radius_mm: Optional[float] = None  # None = 턴테이블 disc 반경과 동일
+    nbv_keepout_height_mm: float = 120.0    # disc 표면 위 높이
+    nbv_keepout_center_xy: Optional[tuple] = None  # None = 턴테이블 축 중심
+    # relocalization: True 면 캡처가 기존 master 에 재고정 시도(§3.4.1). 미구현 경로는
+    # camera-motion T_pre fallback(R3)로 자동 대체. 실기 검증 후 R1/R2 배선(§6.5).
+    nbv_use_relocalization: bool = True
 
     def __post_init__(self):
         if self.streaming_settings is None:
@@ -421,7 +467,7 @@ class ArtecMultiPassScanSession:
           (i) cylinder pre-clip — 빠르고 보수적.
           (ii) `z > z_table + table_clear_mm` hard floor — 디스크 표면
                (z_bot≈z_table) 이 cylinder 안에서 "물체점"으로 새던 회귀를
-               차단. 평평한 물체 바닥 일부는 비용으로 수용 (Phase 2 가 따로).
+               차단. 평평한 물체 바닥 일부는 비용으로 수용 (Phase 3 바닥면 flip 이 따로).
           (iii) probe (r,z) 점유 맵 lookup (`env['rz_occ']`) — moving voxel
                의 실제 축대칭 단면. cylinder bounding 보다 정확
                (overhang/패임 그대로). 맵 없으면 cylinder + floor 만.
@@ -1148,6 +1194,7 @@ class ArtecMultiPassScanSession:
         recovery_retry_count = 0          # 같은 pose 안에서 누적 (성공 시 0)
         n_recovery_attempts = 0           # 총 시도 (전체 run)
         n_recovery_succeeded = 0          # 총 성공
+        phase2_done = False               # Phase 2(NBV) 1회 실행 플래그 (순차 누적)
         next_T_BC_pending: Optional[np.ndarray] = None
         recorded_hints: List[tuple] = []  # (master scan_index, T_pre)
                                           # apply_hints=False 일 때만 채워짐
@@ -1425,6 +1472,23 @@ class ArtecMultiPassScanSession:
                     print(f"\n  ✓ recovery 후 정상 완료 — retry 카운터 reset "
                           f"(누적 성공: {n_recovery_succeeded})")
                     recovery_retry_count = 0
+                # ── Phase 1 이후: **순차 누적** (phase_mode=N → Phase 1..N) ──
+                # phase_mode≥2: 첫 5면 후 Phase 2(NBV) 1회. phase_mode≥3: 이어서 Phase 3(flip).
+                # (docs/3_phase2.md §8)
+                if s.phase_mode >= 2 and not phase2_done:
+                    self._phase2_nbv_loop(master_model)        # Phase 2: 부족면 NBV
+                    phase2_done = True
+                    if s.phase_mode >= 3:
+                        # Phase 3(바닥면 flip)는 robot 고정 가정 → NBV 로 움직인 robot 을 home 복귀.
+                        try:
+                            self.robot.go_home(sensor="artec", confirm=False)
+                            print("  [phase2→3] robot home 복귀 (Phase 3 진입)")
+                        except Exception as e:
+                            print(f"  [phase2→3] ⚠ go_home 실패({e}) — Phase 3 자세 확인 필요")
+                if s.phase_mode < 3:             # 1·2 → 여기서 종료 (Phase 3 안 함)
+                    aborted_reason = aborted_reason or f"phase_mode={s.phase_mode} 완료 (Phase 1..{s.phase_mode})"
+                    break
+                # phase_mode >= 3: Phase 3(바닥면 flip) — 아래 사용자-회전(pose advance) 흐름
                 if not s.prompt_between_passes:
                     aborted_reason = "single-pass mode (no inter-pass prompt)"
                     break
@@ -1680,6 +1744,226 @@ class ArtecMultiPassScanSession:
         if voxel_mm > 0:
             merged = merged.voxel_down_sample(voxel_mm)
         return merged
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Phase 2 — 부족면 NBV 보강 루프 (docs/3_phase2.md §3). phase_mode=2.
+    # 하드웨어 무관 코어는 utils/nbv/phase2_nbv.py + theta_planner(해석 IK).
+    # ⚠ 캡처는 v1 에서 기존 streaming(풀 회전) + camera-motion T_pre(R3) 병합.
+    #   relocalization R1/R2(§3.4.1)·짧은 스윕은 실기 검증 후 배선(§6.5).
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _build_collision_world(self):
+        """turntable calibration(T_BF0) → CollisionWorld (disc+몸체). 없으면 None.
+        대상물 자체는 장애물로 넣지 않음(225mm standoff 로 접근 대상). 충돌검사 전제."""
+        if not self.s.nbv_collision_enabled:
+            return None
+        tt = getattr(self.mms, "turntable_transform", None)
+        T_BF0 = getattr(tt, "T_BF0", None) if tt is not None else None
+        if T_BF0 is None:
+            print("  [nbv] ⚠ turntable_transform/T_BF0 없음 — 충돌 world 미구성(검사 skip)")
+            return None
+        from utils.collision.robot_collision import CollisionWorld
+        T_BF0 = np.asarray(T_BF0, float)
+        world = CollisionWorld.from_turntable(
+            surface_point=T_BF0[:3, 3], axis_dir=T_BF0[:3, 2],
+            disc_radius=self.s.nbv_turntable_radius_mm / 1000.0,
+            body_height=self.s.nbv_turntable_body_height_mm / 1000.0,
+            margin=self.s.nbv_collision_margin_mm / 1000.0)
+        print(f"  [nbv] 충돌 world 구성 (disc r={self.s.nbv_turntable_radius_mm:.0f}mm, "
+              f"margin={self.s.nbv_collision_margin_mm:.0f}mm)")
+        # ── 충돌 금지 원기둥 (turntable 위 금지구역) ──
+        if self.s.nbv_keepout_enable:
+            cxy = (self.s.nbv_keepout_center_xy
+                   if self.s.nbv_keepout_center_xy is not None else T_BF0[:2, 3])
+            R = (self.s.nbv_keepout_radius_mm / 1000.0
+                 if self.s.nbv_keepout_radius_mm is not None
+                 else self.s.nbv_turntable_radius_mm / 1000.0)  # 기본=턴테이블 지름
+            z0 = float(T_BF0[2, 3])                             # disc 표면
+            world.add_cylinder("keepout", cxy, z0, z0 + self.s.nbv_keepout_height_mm / 1000.0,
+                               R, margin=self.s.nbv_collision_margin_mm / 1000.0)
+            print(f"  [nbv] keep-out 원기둥 추가 (r={R*1000:.0f}mm, "
+                  f"h={self.s.nbv_keepout_height_mm:.0f}mm)")
+        return world
+
+    def _build_master_mesh_B(self, master_model):
+        """master IModel → B 프레임 pcd → Poisson mesh (frontier 입력)."""
+        from utils.nbv import phase2_nbv as _p2
+        pcd = self._master_to_pcd_B(
+            master_model, self._T_CB, voxel_mm=self.s.nbv_master_voxel_mm)
+        if pcd is None or len(pcd.points) < 200:
+            return None
+        return _p2.pcd_to_mesh_poisson(
+            pcd, depth=self.s.nbv_poisson_depth,
+            density_quantile=self.s.nbv_density_quantile)
+
+    def _nbv_feasible_q(self, T_CB_des, q_seed):
+        """T_CB_des → T_EB → 해석 IK q. 충돌 world 있으면 **궤적 전체(swept-path)**
+        충돌검사(q_seed→q 관절보간). 실패=None.
+        IK 결정 2026-06: SDK get_inverse_kinematics 미사용 — 해석 IK(kin).
+        q_seed = 현재 관절각(모션 시작점) — IK seed 겸 swept 시작."""
+        from utils.robot import xarm7_kinematics as _kin
+        T_EB = T_CB_des @ self._T_EC                      # E→B (m)
+        pose6d = np.concatenate([T_EB[:3, 3] * 1000.0,    # mm
+                                 _kin.R_to_euler_xyz(T_EB[:3, :3])])
+        q, ok = _kin.ik(pose6d, seed=q_seed)
+        if not ok:
+            return None
+        world = getattr(self, "_collision_world", None)
+        if world is not None:
+            from utils.collision.robot_collision import swept_pose_collision
+            col, _why, _s = swept_pose_collision(
+                world, q_seed, q, T_EC=self._T_EC, n_steps=self.s.nbv_swept_steps)
+            if col:
+                return None
+        return q
+
+    def _axis_view_q(self, look_target, el_deg, az_deg, standoff, q_seed):
+        """턴테이블축(look_target)을 (el,az,standoff)에서 보는 카메라 → T_EB → 해석 IK q.
+        OpenCV 규약(`compute_camera_pose_from_normal`, real Artec hand-eye 와 일관). 충돌검사 X
+        (공용 plan_nbv_elevation_pose 의 swept_free_fn 가 담당). 반환 q 또는 None."""
+        from utils.robot import xarm7_kinematics as _kin
+        from utils.nbv.manual_picker import compute_camera_pose_from_normal
+        el, az = math.radians(el_deg), math.radians(az_deg)
+        eye = np.asarray(look_target, float) + standoff * np.array(
+            [math.cos(el)*math.cos(az), math.cos(el)*math.sin(az), math.sin(el)])
+        T_CB = compute_camera_pose_from_normal(            # 카메라→B (OpenCV, base)
+            surface_point=np.asarray(look_target, float),
+            normal=eye - np.asarray(look_target, float), distance_m=standoff)
+        T_EB = T_CB @ self._T_EC
+        pose6d = np.concatenate([T_EB[:3, 3]*1000.0, _kin.R_to_euler_xyz(T_EB[:3, :3])])
+        q, ok = _kin.ik(pose6d, seed=q_seed)
+        return q if ok else None
+
+    def _plan_nbv_pose(self, q_cur, gaps, mesh):
+        """★ 공용 `phase2_nbv.plan_nbv_elevation_pose` 호출(sim 과 동일 알고리즘).
+        real 은 OpenCV look-at·base 프레임만 주입. 반환 q(그 자세에서 streaming 전회전) or None."""
+        from utils.nbv import phase2_nbv as _p2
+        from utils.control.theta_planner import DEFAULT_JOINT_WEIGHTS
+        from utils.collision.robot_collision import swept_pose_collision
+        tt = getattr(self.mms, "turntable_transform", None)
+        T_BF0 = getattr(tt, "T_BF0", None) if tt is not None else None
+        if T_BF0 is None:
+            return None
+        T_BF0 = np.asarray(T_BF0, float)
+        verts = np.asarray(mesh.vertices)                  # 메쉬(B) mid z = 객체 중간높이
+        look_target = np.array([T_BF0[0, 3], T_BF0[1, 3], float(verts[:, 2].mean())])
+        standoff = self.s.nbv_distance_mm / 1000.0
+
+        def pose_q(el, az):
+            return self._axis_view_q(look_target, el, az, standoff, q_cur)
+
+        def swept(q0, q1):
+            world = getattr(self, "_collision_world", None)
+            if world is None:
+                return True
+            col, _why, _s = swept_pose_collision(
+                world, q0, q1, T_EC=self._T_EC, n_steps=self.s.nbv_swept_steps)
+            return not col
+
+        res = _p2.plan_nbv_elevation_pose(
+            gaps, q_cur, pose_q, swept, joint_weights=DEFAULT_JOINT_WEIGHTS,
+            el_floor_deg=self.s.nbv_el_floor_deg)
+        if res is None:
+            return None
+        q, el, az = res
+        print(f"  [nbv] 관측자세 el={el:.0f}° az={az:.0f}° — streaming 전회전")
+        return q
+
+    def _rank_nbv_candidates(self, cands, q_cur):
+        """frontier 후보 → (cand, T_CB_des, q, cost) feasible만, cost 오름차순.
+        cost = **관절이동 최소**(Σ w_i·Δq_i²) − δ·L̂ (docs §3.3). q 는 IK 결과 재사용."""
+        from utils.nbv import phase2_nbv as _p2
+        from utils.control.theta_planner import DEFAULT_JOINT_WEIGHTS
+        if not cands:
+            return []
+        L_max = max(c.L for c in cands)
+        out = []
+        for c in cands:
+            T_CB = _p2.nbv_pose_from_candidate(
+                c, distance_m=self.s.nbv_distance_mm / 1000.0)
+            q = self._nbv_feasible_q(T_CB, q_cur)        # 충돌-free 해석 IK
+            if q is None:
+                continue
+            cost = _p2.joint_motion_cost(
+                q, q_cur, DEFAULT_JOINT_WEIGHTS, c.L, L_max,
+                delta=self.s.nbv_cost_delta)
+            out.append((c, T_CB, q, cost))
+        out.sort(key=lambda x: x[3])
+        return out
+
+    def _move_robot_to_q(self, q, speed_deg_s: float) -> int:
+        """해석 IK q 로 관절구동 (IK 결정: set_position 대신 set_servo_angle)."""
+        self.robot.enable_motion()
+        code = self.robot.arm.set_servo_angle(
+            angle=np.asarray(q, float).tolist(),
+            speed=float(speed_deg_s), is_radian=True, wait=True)
+        return int(code) if code is not None else 0
+
+    def _capture_nbv_pose(self, T_CB_des, q):
+        """로봇을 NBV pose 로 관절구동 후 streaming 캡처 → (sub_result, T_pre).
+
+        v1: 기존 streaming(풀 회전) 후 camera-motion T_pre(case ③, R3)로 병합.
+        master 의 self._T_BC 는 보존(덮어쓰지 않음)."""
+        code = self._move_robot_to_q(q, self.s.nbv_robot_speed_deg_s)
+        if code != 0:
+            print(f"  [nbv] ⚠ 관절구동 실패 code={code}")
+            return None, None
+        T_EB_after = self.robot.get_ee_pose_mat()
+        T_BC_nbv = self._T_EC @ np.linalg.inv(T_EB_after)
+        T_pre = self._T_BC @ np.linalg.inv(T_BC_nbv)       # camera-motion (case ③)
+
+        st = self.s.streaming_settings
+        orig_reset = st.reset_to_zero_first
+        st.reset_to_zero_first = False                     # 현재 위치 유지
+        try:
+            sub = ArtecStreamingScanSession(
+                self.mms, self.robot, self.turntable, st).run()
+        finally:
+            st.reset_to_zero_first = orig_reset
+        return sub, T_pre
+
+    def _phase2_nbv_loop(self, master_model) -> int:
+        """부족면 NBV 보강 루프 (docs/3_phase2.md §3). 반환 = 추가 캡처 수."""
+        from utils.nbv import phase2_nbv as _p2
+        s = self.s
+        gap_kw = dict(
+            min_seg_vertices=s.nbv_min_seg_vertices,
+            min_seg_length=s.nbv_min_seg_length_mm / 1000.0,
+            max_seg_length=s.nbv_max_seg_length_mm / 1000.0)
+
+        print("\n═══════════════ Phase 2 — 부족면 NBV 보강 ═══════════════")
+        self._collision_world = self._build_collision_world()   # swept-path 검사용
+        n_captures = 0
+        for k in range(s.nbv_K_max):
+            mesh = self._build_master_mesh_B(master_model)
+            if mesh is None or len(mesh.triangles) == 0:
+                print("  [nbv] master mesh 비어있음 — 종료.")
+                break
+            cov = _p2.coverage_state(
+                mesh, n_dirs=s.nbv_coverage_dirs,
+                parallel_thresh_deg=s.nbv_coverage_parallel_deg, **gap_kw)
+            print(f"  [nbv {k+1}/{s.nbv_K_max}] boundary={cov.boundary_len_m*1000:.1f}mm "
+                  f"cov={cov.angular_cov:.3f} gaps={cov.n_gaps}")
+            if _p2.is_converged(cov, s.nbv_boundary_stop_mm / 1000.0, s.nbv_coverage_tau):
+                print("  [nbv] 커버리지 수렴 — 완료.")
+                break
+            cands = _p2.detect_gaps(mesh, **gap_kw)
+            q_cur = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+            # ★ 공용 자세선택(sim 과 동일): 부족면 덮을 관측 elevation 자세 → streaming 전회전.
+            #   (이전 _rank_nbv_candidates per-gap 정면 캡처 → 캡처통일로 대체, 2026-06-30.)
+            q = self._plan_nbv_pose(q_cur, cands, mesh)
+            if q is None:
+                print("  [nbv] feasible 관측자세 없음 — 종료(윗면 도달한계 등).")
+                break
+            sub, T_pre = self._capture_nbv_pose(None, q)
+            if sub is None or sub.model.scan_count() == 0:
+                print("  [nbv] 캡처 실패 — 종료.")
+                break
+            n = self._merge_into_master(sub.model, master_model, T_pre)
+            n_captures += 1
+            print(f"  [nbv] {n} scan 병합 (master scans={master_model.scan_count()})")
+        print(f"  [nbv] Phase 2 종료 — 추가 캡처 {n_captures}.")
+        return n_captures
 
     @staticmethod
     def hint_icp_refine_static(

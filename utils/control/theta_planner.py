@@ -189,3 +189,147 @@ def plan_min_motion_theta(
         "all_costs": costs,
         "all_feasible": feasible,
     }
+
+
+def plan_min_motion_theta_analytic(
+    T_CO_des: np.ndarray,
+    T_OF: np.ndarray,
+    T_EC: np.ndarray,
+    tt: TurntableTransformConfig,
+    ik_fn,
+    theta_current: float,
+    q_current: np.ndarray,
+    collision_fn=None,
+    theta_samples: Optional[Sequence[float]] = None,
+    theta_range: tuple = (-np.pi, np.pi),
+    n_samples: int = 72,
+    joint_weights: np.ndarray = DEFAULT_JOINT_WEIGHTS,
+    w_tt: float = 0.0,
+    seed_from_current: bool = True,
+    pose_from_T=None,
+    verbose: bool = True,
+) -> dict:
+    """
+    `plan_min_motion_theta` 의 **해석 IK + 충돌검사** 변형 (결정 2026-06: SDK IK 미사용).
+
+    xArm SDK 핸들(`robot.arm.get_inverse_kinematics`) 대신 주입된 `ik_fn` 으로 풀고,
+    `collision_fn` 으로 충돌 자세를 거른다. real·sim 동일 호출 (backend-agnostic).
+    반환 dict 스키마는 `plan_min_motion_theta` 와 동일 (drop-in).
+
+    Parameters
+    ----------
+    ik_fn : callable  pose6d([x,y,z mm, rpy rad]) → (q(7,), ok: bool)
+        예: `utils.robot.xarm7_kinematics.ik` (seed kwarg 지원 시 warm-start 사용).
+    q_current : (7,)  현재 관절각 (rad) — cost 기준 + IK seed.
+    collision_fn : callable|None  q(7,) → bool (True=충돌). None 이면 충돌검사 skip.
+        예: `lambda q: pose_collision(world, q, T_EC)[0]`.
+    seed_from_current : bool  True 면 각 θ 의 IK 를 q_current 로 warm-start
+        (가장 가까운 해 branch → min-motion + 수치 IK 수렴 가속).
+    pose_from_T : callable|None  T_EB(4x4, m) → pose6d([x,y,z mm, rpy rad]).
+        None 이면 **kin 규약**(`xarm7_kinematics.R_to_euler_xyz`) 으로 변환. ⚠ kin 의 euler
+        규약은 scipy `as_euler('xyz')`(=`pose_mat_to_xarm6d`)와 **불일치**하므로, ik_fn 이
+        해석 IK(kin) 일 때 scipy 변환을 쓰면 엉뚱한 해로 수렴한다. 기본 kin 변환을 쓸 것.
+    """
+    if pose_from_T is None:
+        from utils.robot import xarm7_kinematics as _kin
+
+        def pose_from_T(T_EB):                       # noqa: E306 (지역 기본)
+            return np.concatenate([T_EB[:3, 3] * 1000.0,
+                                   _kin.R_to_euler_xyz(T_EB[:3, :3])])
+
+    q_current = np.asarray(q_current, dtype=float)
+    if q_current.shape != (7,):
+        raise ValueError(f"q_current must be (7,), got {q_current.shape}")
+    w = np.asarray(joint_weights, dtype=float)
+    if w.shape != (7,):
+        raise ValueError(f"joint_weights must be (7,), got {w.shape}")
+
+    if theta_samples is None:
+        thetas = np.linspace(
+            float(theta_range[0]), float(theta_range[1]),
+            int(n_samples), endpoint=False,
+        )
+    else:
+        thetas = np.asarray(theta_samples, dtype=float)
+    N = len(thetas)
+
+    costs = np.full(N, np.inf)
+    feasible = np.zeros(N, dtype=bool)
+    joints_arr = np.full((N, 7), np.nan)
+    n_collision = 0
+
+    def _solve_ik(pose6d):
+        # ik_fn 은 (q, ok) 또는 q|None 둘 다 허용.
+        if seed_from_current:
+            try:
+                out = ik_fn(pose6d, seed=q_current)
+            except TypeError:
+                out = ik_fn(pose6d)
+        else:
+            out = ik_fn(pose6d)
+        if out is None:
+            return None
+        if isinstance(out, tuple):
+            q_sol, ok = out
+            return np.asarray(q_sol, dtype=float) if ok else None
+        return np.asarray(out, dtype=float)
+
+    t0 = time.perf_counter()
+    for i, theta in enumerate(thetas):
+        T_EB = solve_T_EB(float(theta), T_CO_des, T_OF, T_EC, tt)
+        pose6d = pose_from_T(T_EB)
+        q_arr = _solve_ik(pose6d)
+        if q_arr is None:
+            continue
+        if collision_fn is not None and bool(collision_fn(q_arr)):
+            n_collision += 1
+            continue
+        dq = q_arr - q_current
+        cost_robot = float(np.sum(w * dq * dq))
+        cost_tt = float(w_tt * abs(float(theta) - float(theta_current)))
+        costs[i] = cost_robot + cost_tt
+        feasible[i] = True
+        joints_arr[i] = q_arr
+
+    n_feasible = int(feasible.sum())
+    elapsed = time.perf_counter() - t0
+
+    if verbose:
+        print("\n" + "─" * 72)
+        print("[Planner/analytic] θ 최적화 — 해석 IK + 충돌검사")
+        print(f"  그리드 {N}  feasible {n_feasible}  collision-reject {n_collision}  "
+              f"elapsed={elapsed:.2f}s")
+
+    if n_feasible == 0:
+        return {
+            "theta": None, "joints": None, "cost": float("inf"),
+            "T_EB": None, "pose6d": None,
+            "n_feasible": 0, "n_samples": N, "n_collision": n_collision,
+            "all_thetas": thetas, "all_costs": costs, "all_feasible": feasible,
+        }
+
+    i_best = int(np.argmin(costs))
+    theta_best = float(thetas[i_best])
+    q_best = joints_arr[i_best].copy()
+    T_EB_best = solve_T_EB(theta_best, T_CO_des, T_OF, T_EC, tt)
+    pose6d_best = pose_from_T(T_EB_best)
+
+    if verbose:
+        print(f"  ✓ θ* = {np.degrees(theta_best):+.2f}°  "
+              f"Δθ = {np.degrees(theta_best - theta_current):+.2f}°  "
+              f"cost = {costs[i_best]:.4f}")
+        print("─" * 72)
+
+    return {
+        "theta": theta_best,
+        "joints": q_best,
+        "cost": float(costs[i_best]),
+        "T_EB": T_EB_best,
+        "pose6d": pose6d_best,
+        "n_feasible": n_feasible,
+        "n_samples": N,
+        "n_collision": n_collision,
+        "all_thetas": thetas,
+        "all_costs": costs,
+        "all_feasible": feasible,
+    }

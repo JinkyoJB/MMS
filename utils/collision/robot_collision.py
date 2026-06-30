@@ -30,7 +30,9 @@ from utils.collision.geometry import seg_seg_distance, seg_halfspace_min_signed
 
 # 링크/스캐너 캡슐 기본 반경(m). 이웃 링크원점 사이 캡슐 i 의 반경.
 # 순서: [link1-2, link2-3, link3-4, link4-5, link5-6, link6-7, link7-scanner]
-DEFAULT_LINK_RADII = np.array([0.060, 0.060, 0.055, 0.050, 0.050, 0.050, 0.060])
+# 마지막(스캐너)=Artec Spider 외형 반경(≈20cm bbox 의 절반). 얇은 6cm 로는 스캐너가
+# 베이스 링크에 닿는 걸 못 잡으므로 실제 외형으로 키움. (real/sim 공용 — 둘 다 이 캡슐로 검사.)
+DEFAULT_LINK_RADII = np.array([0.060, 0.060, 0.055, 0.050, 0.050, 0.050, 0.095])
 
 
 @dataclass
@@ -123,6 +125,13 @@ class CollisionWorld:
         others = [e for k, e in enumerate(ext) if k != ax]
         return self.add_capsule(name, p0, p1, 0.5 * float(np.hypot(*others)) + margin)
 
+    def add_cylinder(self, name, center_xy, z0, z1, radius, margin=0.0):
+        """수직 원기둥 keep-out (turntable 위 금지구역 등) → 축선분 캡슐.
+        center_xy: (x,y) base m, z0/z1: 원기둥 바닥/천장 z(base m), radius: 반경(m)."""
+        cx, cy = float(center_xy[0]), float(center_xy[1])
+        return self.add_capsule(name, [cx, cy, float(z0)], [cx, cy, float(z1)],
+                                float(radius) + margin)
+
     # ── calibration 결과로 턴테이블 월드 구성 ────────────────────────────────
     @classmethod
     def from_turntable(cls, surface_point, axis_dir, disc_radius,
@@ -201,11 +210,15 @@ def self_collision(capsules: List[Tuple[str, Capsule]], scale: float = 0.7,
 
 
 def pose_collision(world: CollisionWorld, q, T_EC=None, link_radii=DEFAULT_LINK_RADII,
-                   margin: float = 0.0, self_scale: float = 0.7, ignore=()
+                   margin: float = 0.0, self_scale: float = 0.7, ignore=(),
+                   scanner_self: bool = True
                    ) -> Tuple[bool, str]:
     """
     관절각 q → **공칭 해석 FK 캡슐**(capsules_from_joints, base m) → 월드 + self 충돌 검사.
     real(실물)·sim(가상) **pre-move 공용**. (실물은 SDK IK 로 q 구한 뒤 이 함수로 검사.)
+
+    scanner_self=True : **스캐너 캡슐도 베이스 링크와 자가충돌 검사**(gap=3 이 인접 forearm 은
+        스킵 → 스캐너↔link1~4 만). 벌크 스캐너가 베이스에 닿는 자세를 거른다. (off 면 기존동작.)
 
     Returns (collide, reason).  reason = "rlink↔obstacle" 또는 "self:li↔lj".
     """
@@ -215,7 +228,8 @@ def pose_collision(world: CollisionWorld, q, T_EC=None, link_radii=DEFAULT_LINK_
         c = res.contacts[0]
         return True, f"{c[0]}↔{c[1]}"
     if self_scale > 0:
-        hits = self_collision(caps, scale=self_scale, margin=margin)
+        hits = self_collision(caps, scale=self_scale, margin=margin,
+                              exclude_last=not scanner_self)
         if hits:
             return True, f"self:{hits[0][0]}↔{hits[0][1]}"
     return False, ""
@@ -234,3 +248,29 @@ def collision_free_ik(ik_fn, world: CollisionWorld, pose6d, T_EC=None,
         return None
     col, _ = pose_collision(world, q, T_EC=T_EC, margin=margin, self_scale=self_scale, **kw)
     return None if col else q
+
+
+def swept_pose_collision(world: CollisionWorld, q_start, q_goal, T_EC=None,
+                         n_steps: int = 12, link_radii=DEFAULT_LINK_RADII,
+                         margin: float = 0.0, self_scale: float = 0.7, ignore=()
+                         ) -> Tuple[bool, str, float]:
+    """
+    **궤적 전체** 충돌검사 — q_start→q_goal 을 관절공간 선형 보간(set_servo_angle =
+    MoveJ 근사)해 각 보간 자세를 `pose_collision` 으로 검사.
+
+    real·sim pre-move 공용. endpoint(s=1) 도 포함하므로 단일 `pose_collision` 을 대체.
+
+    Returns (collide, reason, s_hit).  s_hit = 처음 충돌한 보간 파라미터 [0,1]
+            (충돌 없으면 -1.0). reason = 그 자세의 `pose_collision` 사유.
+    """
+    q0 = np.asarray(q_start, dtype=float)
+    q1 = np.asarray(q_goal, dtype=float)
+    n = max(int(n_steps), 1)
+    for k in range(n + 1):
+        s = k / n
+        q = q0 + s * (q1 - q0)
+        col, why = pose_collision(world, q, T_EC=T_EC, link_radii=link_radii,
+                                  margin=margin, self_scale=self_scale, ignore=ignore)
+        if col:
+            return True, why, float(s)
+    return False, "", -1.0

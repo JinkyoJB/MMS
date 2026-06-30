@@ -18,7 +18,7 @@ from mms_artec.sensor.artec_config import ArtecConfig   # 바인딩 비의존(�
 # ── 백엔드 선택 ───────────────────────────────────────────────────────
 #   "real"  → 실물 xArm + 턴테이블 + Artec 스캐너 (Windows)
 #   "isaac" → Isaac Sim 시뮬레이션 (옆에 실물 없이 개발)
-BACKEND = "real"
+BACKEND = "isaac"
 # isaac GUI 표시 여부. 환경변수 MMS_ISAAC_HEADLESS=1 로 헤드리스 강제(서버/CI).
 ISAAC_HEADLESS = os.environ.get("MMS_ISAAC_HEADLESS", "0") == "1"
 
@@ -109,9 +109,13 @@ if _SCAN_SETTINGS_AVAILABLE:
         turntable_vel_rad_s=TURNTABLE_VEL_RAD_S,
     )
 
-    # ── Multi-pass: Phase 1 + Phase 2 통합 (3-pose default) ───────────────
+    # ── Multi-pass: phase_mode = Phase 1 부터 **순차 누적** 실행 ────────────
+    #   1 = Phase1(5면) / 2 = Phase1→2(NBV) / 3 = Phase1→2→3(바닥면 flip)
+    # ★ 첫 Spider 테스트는 phase_mode=1 로 5면 확인 후 2→3 으로 올릴 것(2·3 미검증).
+    # pose_physical_rotations = Phase 3(바닥면 flip) 손회전 설정.
     POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
     MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
+        phase_mode=3,                 # 순차 누적: 1=5면 / 2=+NBV / 3=+바닥면 flip
         streaming_settings=STREAM_SETTINGS,
         pose_physical_rotations=POSE_ROTATIONS,
         max_passes=8,
@@ -144,6 +148,17 @@ if _SCAN_SETTINGS_AVAILABLE:
         do_texturize=True,
         export_obj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.obj"),
         export_sproj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.sproj"),
+    )
+elif BACKEND == "isaac":
+    # isaac: Artec SDK scan-settings 없이 sim 스캔(IsaacScanSession) 실행.
+    # IsaacScanSession = Phase1 GT 누적 + Phase2 NBV(공용 phase2_nbv/robot_collision).
+    # 후처리(GlobalReg/Fusion/Texturize)는 sim sensor stub 가 skip → 결과=점군/mesh.
+    PROCESS_SETTINGS = ArtecProcessSettings(
+        dev_mode=DEV_MODE, use_streaming_scan=True, use_multipass_scan=True,
+        do_serial_registration=False, do_global_registration=False, fusion="none",
+        do_outliers_removal=False, do_small_objects_filter=False,
+        do_simplify=False, do_texturize=False,
+        export_obj_path=str(PROJECT_ROOT / f"output/sim_scan_{RUN_TS}.ply"),
     )
 
 

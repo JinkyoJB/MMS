@@ -435,8 +435,9 @@ class ArtecMMS:
             print(f"\n[artec_process] (sim) Scan — {sim_result.n_frames} frames")
         elif s.use_streaming_scan:
             if s.use_multipass_scan:
-                # Multi-pass: Phase 1 재진행 (tracking lost recovery) + Phase 2
-                # (flip 후 바닥면 스캔). 모든 IScan 이 master IModel 에 누적되고
+                # Multi-pass: Phase 1 재진행(tracking lost recovery) + phase_mode 분기
+                # (1=5면만 / 2=Phase 2 NBV / 3=Phase 3 flip 바닥면).
+                # 모든 IScan 이 master IModel 에 누적되고
                 # 아래 GlobalRegistration 단계에서 정합됨.
                 from mms_artec.nbv.artec_multipass_scan_session import (
                     ArtecMultiPassScanSession,
@@ -474,6 +475,19 @@ class ArtecMMS:
             ctx = session.run()
             model = ctx.model
             print(f"\n[artec_process] Discrete Scan — {ctx.n_frames} frames")
+
+        # ── isaac: Artec SDK 후처리(SerialReg/GlobalReg/Fusion/Texturize) 없음 ──
+        # IsaacScanSession 이 이미 점군/mesh 를 만들었으므로 그대로 반환(export 만).
+        if self.cfg.backend == "isaac":
+            if getattr(s, "export_obj_path", None):
+                try:
+                    from pathlib import Path as _P
+                    _P(s.export_obj_path).parent.mkdir(parents=True, exist_ok=True)
+                    model.save_obj(s.export_obj_path)
+                    print(f"[artec_process] (sim) saved → {s.export_obj_path}")
+                except Exception as e:
+                    print(f"[artec_process] (sim) save 실패: {e}")
+            return ArtecProcessResult(model=model, ctx=ctx)
 
         def _safe(name: str, fn, current_model):
             print(f"[artec_process] {name} ...")
@@ -570,7 +584,7 @@ class ArtecProcessSettings:
     dev_mode: bool = False
 
     use_streaming_scan: bool = True
-    # Multi-pass: tracking-lost 재진행 + Phase 2 (flip 후 바닥면 스캔). True 가
+    # Multi-pass: tracking-lost 재진행 + Phase 2(NBV) / Phase 3(flip 바닥면). True 가
     # 새 default — 한 번에 끝내고 싶으면 multipass_settings.prompt_*_=False 로
     # 끄거나 use_multipass_scan=False 로 단일 streaming session 사용.
     use_multipass_scan: bool = True
@@ -593,23 +607,29 @@ class ArtecProcessSettings:
     export_sproj_path: Optional[str] = None
 
     def __post_init__(self):
-        if self.scan_settings is None:
-            from mms_artec.nbv.artec_scan_session import ArtecScanSessionSettings as _S
-            self.scan_settings = _S()
-        if self.streaming_scan_settings is None:
-            from mms_artec.nbv.artec_streaming_scan_session import (
-                ArtecStreamingScanSessionSettings as _SS,
-            )
-            self.streaming_scan_settings = _SS()
-        if self.multipass_settings is None:
-            from mms_artec.nbv.artec_multipass_scan_session import (
-                ArtecMultiPassScanSessionSettings as _MPS,
-            )
-            # multipass 안의 streaming_settings 가 위 streaming_scan_settings 와
-            # 같은 인스턴스를 공유하도록 — main_artec.py 의 사용자 설정이 그대로 반영.
-            self.multipass_settings = _MPS(
-                streaming_settings=self.streaming_scan_settings,
-            )
+        # ⚠ 아래 scan-settings 클래스들은 Artec SDK(artec_base)에 의존 → isaac 에선 import 실패.
+        # isaac 스캔 경로(IsaacScanSession)는 이 세 settings 를 쓰지 않으므로, 실패 시 None 유지.
+        try:
+            if self.scan_settings is None:
+                from mms_artec.nbv.artec_scan_session import ArtecScanSessionSettings as _S
+                self.scan_settings = _S()
+            if self.streaming_scan_settings is None:
+                from mms_artec.nbv.artec_streaming_scan_session import (
+                    ArtecStreamingScanSessionSettings as _SS,
+                )
+                self.streaming_scan_settings = _SS()
+            if self.multipass_settings is None:
+                from mms_artec.nbv.artec_multipass_scan_session import (
+                    ArtecMultiPassScanSessionSettings as _MPS,
+                )
+                # multipass 안의 streaming_settings 가 위 streaming_scan_settings 와
+                # 같은 인스턴스를 공유하도록 — main_artec.py 의 사용자 설정이 그대로 반영.
+                self.multipass_settings = _MPS(
+                    streaming_settings=self.streaming_scan_settings,
+                )
+        except Exception as _e:               # isaac: Artec SDK 없음
+            print(f"[ArtecProcessSettings] ⓘ scan-settings import skip "
+                  f"({type(_e).__name__}) — isaac 스캔 경로(IsaacScanSession)에선 불필요")
 
         # Dev mode 강제 override — 무거운 단계 skip.
         if self.dev_mode:
