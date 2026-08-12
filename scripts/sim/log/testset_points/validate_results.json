@@ -1,0 +1,351 @@
+{
+ "0001_mustard": {
+  "h_mm": 188.318133354187,
+  "baseline": {
+   "minfill": 86.76000000000002,
+   "zcov": 0.6666666666666666,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 78.84000000000002,
+   "zcov": 0.9583333333333334,
+   "banded": true,
+   "n_poses": 3,
+   "overlaps": [
+    0.8706222865412446,
+    0.7514197823000474
+   ],
+   "ik_ok": 3
+  },
+  "two_shot_rho": 0.18507078507078506,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.6468612554978008,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.911235505797681,
+    "overlaps": []
+   }
+  }
+ },
+ "0002_hand_drill": {
+  "h_mm": 183.01528692245483,
+  "baseline": {
+   "minfill": 42.60000000000001,
+   "zcov": 0.5416666666666666,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 18.360000000000003,
+   "zcov": 0.8333333333333334,
+   "banded": true,
+   "n_poses": 3,
+   "overlaps": [
+    0.8309259540824084,
+    0.723404255319149
+   ],
+   "ik_ok": 3
+  },
+  "two_shot_rho": 0.7915057915057915,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.3721386527141923,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.6952256376716809,
+    "overlaps": []
+   }
+  }
+ },
+ "0086_alarm_clock": {
+  "h_mm": 169.87454891204834,
+  "baseline": {
+   "minfill": 127.28000000000003,
+   "zcov": 0.6666666666666666,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 128.76000000000002,
+   "zcov": 0.8333333333333334,
+   "banded": true,
+   "n_poses": 3,
+   "overlaps": [
+    0.9453157073651367,
+    0.8818448249267314
+   ],
+   "ik_ok": 3
+  },
+  "two_shot_rho": 0.7387387387387387,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.5396911898274296,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.7299727520435967,
+    "overlaps": []
+   }
+  }
+ },
+ "0101_spray_can": {
+  "h_mm": 203.388512134552,
+  "baseline": {
+   "minfill": 107.80000000000003,
+   "zcov": 0.5833333333333334,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 91.28000000000002,
+   "zcov": 0.9583333333333334,
+   "banded": true,
+   "n_poses": 3,
+   "overlaps": [
+    0.6260914896389939,
+    0.6404774396642182
+   ],
+   "ik_ok": 3
+  },
+  "two_shot_rho": 0.9281853281853282,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.5678975801080441,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.9348035225338562,
+    "overlaps": []
+   }
+  }
+ },
+ "0146_mug": {
+  "h_mm": 73.02910089492798,
+  "baseline": {
+   "minfill": 124.20000000000002,
+   "zcov": 0.9166666666666666,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 175.44000000000003,
+   "zcov": 0.9166666666666666,
+   "banded": false,
+   "n_poses": 1,
+   "overlaps": [],
+   "ik_ok": 1
+  },
+  "two_shot_rho": 0.6025740025740026,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.7351439790575917,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.7838350785340314,
+    "overlaps": []
+   }
+  }
+ },
+ "0154_laundry_detergent": {
+  "h_mm": 288.85310888290405,
+  "baseline": {
+   "minfill": 50.68000000000001,
+   "zcov": 0.375,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 52.32000000000001,
+   "zcov": 0.9166666666666666,
+   "banded": true,
+   "n_poses": 4,
+   "overlaps": [
+    0.5616518030244281,
+    0.5804949610919761,
+    0.7109375
+   ],
+   "ik_ok": 4
+  },
+  "two_shot_rho": 0.6764478764478764,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.2936668129296475,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.8554921749305251,
+    "overlaps": []
+   }
+  }
+ },
+ "0159_drug_bottle": {
+  "h_mm": 62.465548515319824,
+  "baseline": {
+   "minfill": 53.00000000000001,
+   "zcov": 1.0,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 52.84000000000001,
+   "zcov": 1.0,
+   "banded": false,
+   "n_poses": 1,
+   "overlaps": [],
+   "ik_ok": 1
+  },
+  "two_shot_rho": 0.6535392535392536,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.908596995845318,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.9111537232342601,
+    "overlaps": []
+   }
+  }
+ },
+ "0160_povidone_iodine": {
+  "h_mm": 86.10337972640991,
+  "baseline": {
+   "minfill": 40.64000000000001,
+   "zcov": 1.0,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 40.760000000000005,
+   "zcov": 1.0,
+   "banded": false,
+   "n_poses": 1,
+   "overlaps": [],
+   "ik_ok": 1
+  },
+  "two_shot_rho": 0.6576576576576577,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.9935752078609221,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.9943310657596371,
+    "overlaps": []
+   }
+  }
+ },
+ "0263_protein_drink": {
+  "h_mm": 52.49375104904175,
+  "baseline": {
+   "minfill": 39.36000000000001,
+   "zcov": 0.75,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 45.52000000000001,
+   "zcov": 0.8333333333333334,
+   "banded": false,
+   "n_poses": 1,
+   "overlaps": [],
+   "ik_ok": 1
+  },
+  "two_shot_rho": 0.8967824967824968,
+  "exp2": {
+   "base": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.6568521031207598,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.6871099050203527,
+    "overlaps": []
+   }
+  }
+ },
+ "solid_marble": {
+  "h_mm": 142.45092868804932,
+  "baseline": {
+   "minfill": 0.0,
+   "zcov": 0.5,
+   "ik_az": 0.0
+  },
+  "proposed": {
+   "minfill": 113.76000000000002,
+   "zcov": 0.625,
+   "banded": true,
+   "n_poses": 3,
+   "overlaps": [
+    0.7751924721984602,
+    0.9947044014237347
+   ],
+   "ik_ok": 3
+  },
+  "two_shot_rho": 0.9315315315315316,
+  "exp2": {
+   "base": {
+    "done": false,
+    "lost": 4,
+    "recov": 0,
+    "cover": 0.2709143785172036,
+    "overlaps": []
+   },
+   "prop": {
+    "done": true,
+    "lost": 0,
+    "recov": 0,
+    "cover": 0.5595422442119575,
+    "overlaps": []
+   }
+  }
+ }
+}

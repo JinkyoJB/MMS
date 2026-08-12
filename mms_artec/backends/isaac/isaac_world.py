@@ -11,6 +11,7 @@ MMS_ext.py 에서 검증된 설정(카메라 광학, 드라이브 게인, joint1
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 import numpy as np
@@ -28,7 +29,9 @@ CAMERA_PRIM      = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
 #   OBJECT_PRIM — 스캔 대상물(원판과 함께 회전).
 DISC_PRIM        = "/World/ScanTarget/turntable_demo/turntable/turntable"
 FRAME_PRIM       = "/World/ScanTarget/turntable_demo/turntable_frame/turntable_frame"
-OBJECT_PRIM      = "/World/ScanTarget/Solid_Marble"
+OBJECT_PRIM      = os.environ.get(   # 스캔 대상(rider). testset 합성 씬은
+    "MMS_SIM_OBJECT_PRIM",           # /World/ScanTarget/TestObject 로 override.
+    "/World/ScanTarget/Solid_Marble")
 
 # Artec Space Spider 광학 (MMS_ext.py 와 동일)
 SPIDER_HFOV_DEG         = 30.0

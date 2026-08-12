@@ -1,16 +1,20 @@
 # mms_artec/nbv/artec_multipass_scan_session.py
 #
-# Phase 1 + (Phase 2 NBV / Phase 3 flip) 통합 오케스트레이터.
-# ArtecStreamingScanSession 한 번 = 한 IScan = 한 회전.
-# 이 클래스는 그것을 N 번 반복하며 모든 IScan 을 master IModel 에 누적한다.
+# Artec(real) 스캔 backend — 공용 Phase 컨트롤러의 ScanBackend 프리미티브 구현.
+# ArtecStreamingScanSession 한 번 = 한 IScan = 한 회전 (= _do_one_rotation).
+# Phase 1→2→3 순서/게이팅/NBV 수렴 루프는 **공용 컨트롤러**
+# (utils/nbv/scan_phase_controller.run_scan_phases) 소유 — sim IsaacScanSession
+# 과 동일. 이 파일은 real Artec 캡처 하드웨어 프리미티브만 제공한다.
+# (2026-07-01: 단일 pass 루프 → phase 함수 분리 → 공용 컨트롤러 위임.
+#  prompt 는 confirm_start(Phase 1) / next_flip(Phase 3)에만 — Phase 1·2 무인.)
 #
 # Phase 정의 (★ 재정의: docs/3_phase2.md §8. 이전 docs/7 의 "Phase 2(flip 바닥면)" 는
 #               본 설계에서 **Phase 3** 로 분리되고, Phase 2 는 NBV 보강으로 재정의됨):
-#  - Phase 1: 객체 canonical 자세에서 turntable 360° → 윗면 + 옆면 4 (= 5면) 캡처.
-#  - Phase 2: 5면 중 부족 영역을 **로봇이 NBV 로 보강**(_phase2_nbv_loop,
-#             공용 utils/nbv/phase2_nbv + robot_collision). 로봇이 움직인다.
-#  - Phase 3: 객체 자세를 바꿔(Ry+90/180°) **바닥면** + overlap 옆면 캡처 후
-#             centroid-pivot pre-rotation hint 로 병합
+#  - Phase 1: 데이터 잘 잡히는 포즈로 로봇 고정 → turntable 360° → 윗면 + 옆면 4 (= 5면).
+#  - Phase 2: 5면 중 부족 영역을 **로봇이 최소이동 NBV 로 보강**(공용 _run_phase2_nbv +
+#             utils/nbv/phase2_nbv + robot_collision). 로봇이 움직인다.
+#  - Phase 3: 물체를 **외부에서 flip**(Ry+90/180°) → 턴테이블만 회전 → **바닥면(윗면)**
+#             + overlap 옆면 캡처 후 centroid-pivot pre-rotation hint 로 병합
 #             (docs/8_artec_phase2_pose_disambiguation.md §5.3). = 이전의 "Phase 2(flip)".
 #  ★ phase_mode=N 으로 **순차 누적** 실행: 1=Phase1, 2=Phase1→2, 3=Phase1→2→3.
 #    (Phase 2→3 전환 시 NBV 로 움직인 robot 을 go_home 으로 복귀시킨 뒤 flip.)
@@ -49,6 +53,7 @@ from mms_artec.nbv.recovery_pose_selector import (
     SPIDER_FAR_MM,
 )
 from utils.transforms import pose_mat_to_6d
+from utils.nbv.scan_phase_controller import run_scan_phases, AT_CURRENT
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -311,26 +316,62 @@ class ArtecMultiPassScanResult:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# run() 내부 상태 — 회전 루프가 이어서 나르는 loop-carried 가변 변수 묶음.
+# _do_one_rotation 이 mutate 하고, 공용 컨트롤러가 호출하는 프리미티브
+# (confirm_start / capture_rotation / next_flip / finalize) 들이 self._st 로 공유한다.
+# (회전 단위 상태를 한 곳에 모아 프리미티브 시그니처를 얇게 유지)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# _do_one_rotation 반환 코드
+_ROT_OK = "ok"          # 정상 완료 — 다음 phase / pose 로
+_ROT_RETRY = "retry"    # tracking-lost — 같은 pose 재시도 (recovery / 수동)
+_ROT_ABORT = "abort"    # 중단 (user_quit / 치명적 drive alarm)
+
+
+@dataclass
+class _RunState:
+    """run() 회전 루프의 loop-carried 상태 (2026-07-01 phase 분리 리팩터)."""
+    master_model: "artec_base.ModelHandle"
+    live_viewer: object = None
+    pass_results: List[ArtecStreamingScanResult] = field(default_factory=list)
+    n_pass: int = 0
+    pose_idx: int = 0                    # 현재 pose hint 인덱스. 정상 완료 시만 advance.
+    master_center: Optional[np.ndarray] = None   # Pass 1 후 lock
+    hints_applied: bool = False
+    last_n_frames: int = 0               # 직전 회전 프레임 수 (완료 로그용)
+    recovery_retry_count: int = 0        # 같은 pose 안에서 누적 (성공 시 0)
+    n_recovery_attempts: int = 0
+    n_recovery_succeeded: int = 0
+    next_T_BC_pending: Optional[np.ndarray] = None
+    next_skip_clearpos: bool = False
+    recorded_hints: List[tuple] = field(default_factory=list)
+    icp_refine_log: List[tuple] = field(default_factory=list)
+    user_quit: bool = False
+    aborted_reason: str = ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Session
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ArtecMultiPassScanSession:
     """
-    Run multiple Phase 1 rotations, accumulating all IScans into a master IModel.
+    Artec(real) 스캔 backend — 공용 Phase 컨트롤러의 ScanBackend 프리미티브 구현.
 
-    Each pass:
-      1. Prompt 사용자 (필요시).
-      2. ArtecStreamingScanSession.run() — 한 회전.
-      3. Sub-model 의 IScan 들을 master_model 에 추가 (SDK addRef).
-      4. Tracking lost 였으면 retry prompt, 정상이면 next-pass prompt.
+    Phase 1→2→3 순서·게이팅·NBV 수렴 루프는 공용
+    utils/nbv/scan_phase_controller.run_scan_phases 가 소유(sim IsaacScanSession
+    과 동일 컨트롤러). 이 클래스는 real Artec 캡처 하드웨어만 제공:
+      - confirm_start / pick_phase1_pose(=AT_CURRENT) : Phase 1 시작(사람 확인 후 home 고정)
+      - capture_rotation : 턴테이블 전회전 캡처. AT_CURRENT=현재포즈 streaming
+        (+cleanup/hint/master 병합/tracking-lost recovery = _do_one_rotation 재시도),
+        q 지정=NBV 자세로 구동 후 streaming(_capture_nbv_pose).
+      - build_coverage_mesh / is_converged / plan_nbv_pose : Phase 2 NBV 보강.
+      - supports_phase3=True / next_flip : Phase 3 (사람이 물체 flip → 윗면).
+      - finalize : master IModel(N IScans) → ArtecMultiPassScanResult.
 
-    종료 조건:
-      - 사용자 'q' 입력
-      - max_passes 도달
-      - prompt_* 플래그 False 인 경우 해당 분기에서 즉시 종료
-
-    Returns ArtecMultiPassScanResult — master IModel 은 N IScans 보유.
-    이후 ArtecMMS.artec_process 가 GlobalRegistration 으로 정합.
+    prompt(사람 개입)는 confirm_start(Phase 1) + next_flip(Phase 3)에만. Phase 1·2
+    회전은 무인. 반환된 master IModel 은 이후 ArtecMMS.artec_process 가
+    GlobalRegistration 으로 정합.
     """
 
     def __init__(
@@ -1174,380 +1215,436 @@ class ArtecMultiPassScanSession:
 
     # ── Entry ──────────────────────────────────────────────────────────
 
-    def run(self) -> ArtecMultiPassScanResult:
-        s = self.s
-        # 2026-05-20 rule: scan 첫 시작은 robot=home 그대로. 사전 probe/
-        # elevation 호출 없음. tracking-lost 시 _attempt_recovery 가 비로소
-        # _adaptive_prescan_position(recovery=True) 를 발동. (docs §3 / §6)
-        master_model = artec_base.create_model()
-        pass_results: List[ArtecStreamingScanResult] = []
-        user_quit = False
-        aborted_reason = ""
-        n_pass = 0
-        pose_idx = 0   # 현재 pose 의 hint 인덱스. 정상 완료 시만 advance.
-        master_center: Optional[np.ndarray] = None  # Pass 1 후 lock
-        hints_applied = False                       # 한 번이라도 적용?
-        # Recovery 상태 — auto-recovery 가 set 하면 다음 iteration 의
-        # 1) streaming session pre-scan clearpos skip
-        # 2) merge 단계 camera-motion T_pre override
-        # 에 사용. 정상 완료된 pass 후 reset.
-        recovery_retry_count = 0          # 같은 pose 안에서 누적 (성공 시 0)
-        n_recovery_attempts = 0           # 총 시도 (전체 run)
-        n_recovery_succeeded = 0          # 총 성공
-        phase2_done = False               # Phase 2(NBV) 1회 실행 플래그 (순차 누적)
-        next_T_BC_pending: Optional[np.ndarray] = None
-        recorded_hints: List[tuple] = []  # (master scan_index, T_pre)
-                                          # apply_hints=False 일 때만 채워짐
-        icp_refine_log: List[tuple] = []  # (scan_idx, T_init, T_measured,
-                                          # fitness, rmse_mm) — hint_icp_refine
-                                          # _mode=True 일 때만 채워짐
-        next_skip_clearpos = False
+    # ── ScanBackend 프리미티브 (공용 utils/nbv/scan_phase_controller) ────
+    # 순서/게이팅/NBV 수렴 루프는 공용 컨트롤러 소유. 이 클래스는 real Artec
+    # 캡처 하드웨어(streaming + relocalization + recovery + hint)만 제공.
+    @property
+    def phase_mode(self) -> int:
+        return self.s.phase_mode
 
-        # ── 라이브 뷰어 (옵션) — 모든 pass 가 한 화면에 누적 ──────────
+    @property
+    def nbv_k_max(self) -> int:
+        return self.s.nbv_K_max
+
+    def run(self) -> ArtecMultiPassScanResult:
+        # 2026-05-20 rule: scan 첫 시작은 robot=home 그대로. 사전 probe/elevation
+        # 호출 없음. tracking-lost 시 _attempt_recovery 가 비로소
+        # _adaptive_prescan_position(recovery=True) 를 발동. (docs §3 / §6)
+        #
+        # 구조 (2026-07-01): Phase 1→2→3 순서/NBV 루프는 공용
+        # utils/nbv/scan_phase_controller.run_scan_phases 가 소유. 여기 run() 은
+        # 상태(_RunState) + live viewer 만 준비하고 컨트롤러에 위임한다.
+        self._st = _RunState(master_model=artec_base.create_model())
+
+        # ── 라이브 뷰어 (옵션) — 모든 회전이 한 화면에 누적 ──────────
         # 생성/사용/종료 모두 예외 격리. 실패해도 스캔에 영향 없음.
-        live_viewer = None
-        if s.enable_live_viewer:
+        if self.s.enable_live_viewer:
             try:
                 from mms_artec.nbv.live_scan_viewer import LiveScanViewer
-                live_viewer = LiveScanViewer()
+                self._st.live_viewer = LiveScanViewer()
             except Exception as e:
                 print(f"  [live] ⚠ viewer 생성 실패 "
                       f"({type(e).__name__}: {e}) — 라이브 표시 없이 진행")
-                live_viewer = None
+                self._st.live_viewer = None
 
-        while n_pass < s.max_passes:
-            self._print_pass_banner(n_pass + 1, s.max_passes, pose_idx)
-            if live_viewer is not None:
-                try:
-                    live_viewer.new_pass(
-                        f"Pass {n_pass + 1} (pose {pose_idx})")
-                except Exception:
-                    pass
+        return run_scan_phases(self)
 
-            # 첫 pass 만 따로 prompt — Studio 시작 위치 확인 등.
-            if n_pass == 0 and s.prompt_before_first_pass:
-                self._print_pose_hint_for_user(pose_idx)
-                print("  [Enter] 회전 시작 / [q]+Enter 종료")
-                if self._wait_user_quit():
-                    user_quit = True
-                    aborted_reason = "사용자 종료 (첫 pass 전)"
-                    break
+    # ── 공통 ────────────────────────────────────────────────────────────
+    def confirm_start(self) -> bool:
+        # Phase 1 시작 전 1회 확인 — Studio 시작 위치 등. real 전용(사람 개입).
+        s = self.s
+        st = self._st
+        if s.prompt_before_first_pass:
+            self._print_pose_hint_for_user(st.pose_idx)
+            print("  [Enter] 회전 시작 / [q]+Enter 종료")
+            if self._wait_user_quit():
+                st.user_quit = True
+                st.aborted_reason = "사용자 종료 (첫 pass 전)"
+                return False
+        return True
 
-            # ── Recovery 직후면 streaming 의 pre-scan clearpos skip ──
-            # 우리가 이미 turntable 을 safe-back 으로 이동시켰음. clearpos 가
-            # 그 위치를 새 0° 로 redefine 하면 의도와 어긋남.
-            _orig_reset_to_zero = s.streaming_settings.reset_to_zero_first
-            if next_skip_clearpos:
-                s.streaming_settings.reset_to_zero_first = False
+    def pick_phase1_pose(self):
+        # real: 스캔 첫 시작은 robot=home 그대로 → 구동 없이 현재 포즈에서 캡처.
+        return AT_CURRENT
 
-            # ── 단일 회전 ─────────────────────────────────────────────
+    def go_home(self) -> None:
+        # Phase 2→3 전환 등 — NBV 로 움직인 robot 을 home 복귀 (Phase 3 는 robot 고정).
+        try:
+            self.robot.go_home(sensor="artec", confirm=False)
+            print("  [phase] robot home 복귀")
+        except Exception as e:
+            print(f"  [phase] ⚠ go_home 실패({e}) — 자세 확인 필요")
+
+    def capture_rotation(self, pose, label: str, phase: int) -> bool:
+        """real 캡처 (턴테이블 전회전). 두 경로 모두 보존:
+          - pose=AT_CURRENT (Phase 1/3): 현재 고정 포즈에서 streaming +
+            cleanup/hint/master 병합 + tracking-lost recovery (_do_one_rotation
+            재시도 루프). 반환 False=중단.
+          - pose=q (Phase 2 NBV): 로봇을 q 로 구동 후 streaming + camera-motion
+            T_pre 병합 (_capture_nbv_pose). 반환 False=캡처 실패(루프 종료).
+        """
+        st = self._st
+        if pose is AT_CURRENT:
+            while st.n_pass < self.s.max_passes:
+                status = self._do_one_rotation(st)
+                if status == _ROT_ABORT:
+                    return False
+                if status == _ROT_RETRY:
+                    continue
+                return True                     # 정상 완료
+            return False                        # max_passes 소진
+        # Phase 2 — NBV 자세로 로봇 구동 후 streaming 캡처 + 병합.
+        sub, T_pre = self._capture_nbv_pose(None, pose)
+        if sub is None or sub.model.scan_count() == 0:
+            print("  [nbv] 캡처 실패 — 종료.")
+            return False
+        n = self._merge_into_master(sub.model, st.master_model, T_pre)
+        print(f"  [nbv] {n} scan 병합 (master scans={st.master_model.scan_count()})")
+        return True
+
+    def finalize(self) -> ArtecMultiPassScanResult:
+        st = self._st
+        s = self.s
+        # phase_mode<3 → Phase 3 미실행 완료 사유. 단 phase1 이 정상 완료한 경우만
+        # (사용자 종료 / max_passes 소진 시엔 아래 max_passes 블록·기존 사유가 우선).
+        if (s.phase_mode < 3 and not st.aborted_reason
+                and not st.user_quit and st.n_pass < s.max_passes):
+            st.aborted_reason = f"phase_mode={s.phase_mode} 완료 (Phase 1..{s.phase_mode})"
+
+        if st.live_viewer is not None:
             try:
-                single = ArtecStreamingScanSession(
-                    self.mms, self.robot, self.turntable, s.streaming_settings,
-                    live_viewer=live_viewer,
-                )
-                sub_result = single.run()
-            finally:
-                # streaming_settings 는 multipass 인스턴스 외부에서 공유될 수
-                # 있으므로 반드시 원복.
-                s.streaming_settings.reset_to_zero_first = _orig_reset_to_zero
-                next_skip_clearpos = False
-            pass_results.append(sub_result)
-            n_pass += 1
-
-            # ── Pass cleanup: SerialReg + OutlierRemoval ───────────────
-            # 멀티패스 끝까지 기다리지 말고 pass 마다 즉시 정합/이상점 제거.
-            # 이유: (a) hint 계산 (centroid) 이 깨끗한 데이터로 안정,
-            #       (b) live viewer 가 정합된 IScan 을 그대로 비춰서 사용자가
-            #           pass 별 형상 / 정합 품질을 즉시 검증 가능
-            #           ([[feedback_live_viewer_must_mirror_scan]]).
-            # Outliers 는 Fusion 전에 와야 함 ([[feedback_artec_pipeline_order]]).
-            # tracking_lost 면 partial IScan 이라 SerialReg 가 깨질 수 있어 skip.
-            if (not sub_result.tracking_lost
-                    and sub_result.model.scan_count() > 0):
-                try:
-                    cleaned = artec_algorithm.Algorithms.serial_registration(
-                        sub_result.model,
-                    )
-                    cleaned = artec_algorithm.Algorithms.outliers_removal(
-                        cleaned,
-                    )
-                    sub_result.model = cleaned
-                    print(f"\n  [pass cleanup] SerialReg + OutlierRemoval 완료")
-                except Exception as e:
-                    print(f"\n  [pass cleanup] ⚠ 실패 "
-                          f"({type(e).__name__}: {e}) — raw IScan 사용")
-
-            # ── Pose hint 계산 (centroid-aware + base-frame aware) ─────
-            # 1. R_phys 는 base frame B 에서 정의 (사용자 직관)
-            # 2. T_BC 있으면 R_W = T_BC @ R_B @ T_CB 로 scan world 로 변환
-            # 3. T_pre = Translate(c_master) @ inv(R_W) @ Translate(-c_pass)
-            #    객체 centroid 를 pivot 으로 회전 → camera 원점 기준 30cm
-            #    translation 오류 제거.
-            T_pre = None
-
-            # Recovery override: 직전 iteration 에서 robot 이 움직였다면
-            # camera-motion 만 보정 (object 회전 무관, pose_idx 그대로). 다른
-            # R_phys hint 보다 우선.
-            #   x_W_master = T_BC_master @ T_CB_new @ x_W_new
-            #              = T_BC_master @ inv(T_BC_new) @ x_W_new
-            # SDK frame_transformation 은 mm 라 translation 만 m→mm scale.
-            if next_T_BC_pending is not None:
-                if self._T_BC is None:
-                    print(f"  [recovery hint] ⚠ T_BC_master 미설정 — override skip")
-                else:
-                    try:
-                        T_pre_cam = self._T_BC @ np.linalg.inv(next_T_BC_pending)
-                        T_pre = T_pre_cam.copy()
-                        T_pre[:3, 3] *= 1000.0          # m → mm (SDK 단위)
-                        print(f"\n  [recovery hint] camera-motion correction "
-                              f"applied (Δtrans = ({T_pre[0,3]:+.1f}, "
-                              f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm)")
-                    except np.linalg.LinAlgError as e:
-                        print(f"  [recovery hint] ⚠ inv 실패 ({e}) — override skip")
-                next_T_BC_pending = None
-
-            R_phys = (s.pose_physical_rotations[pose_idx]
-                      if pose_idx < len(s.pose_physical_rotations) else None)
-            if T_pre is None and R_phys is not None and not np.allclose(R_phys, np.eye(4), atol=1e-9):
-                try:
-                    R_phys_inv_B = np.linalg.inv(R_phys)[:3, :3]
-                except np.linalg.LinAlgError:
-                    print(f"  [hint] ⚠ pose_physical_rotations[{pose_idx}] inverse 실패 — skip")
-                    R_phys_inv_B = None
-                if R_phys_inv_B is not None:
-                    # B → W 변환 (T_BC 있으면)
-                    if self._T_BC is not None and self._T_CB is not None:
-                        R_phys_inv_W = (self._T_BC[:3, :3] @ R_phys_inv_B
-                                        @ self._T_CB[:3, :3])
-                        frame_tag = "base"
-                    else:
-                        R_phys_inv_W = R_phys_inv_B
-                        frame_tag = "scan_world (fallback)"
-
-                    c_pass = self._compute_model_centroid(sub_result.model)
-                    c_ref = master_center if master_center is not None else c_pass
-                    T_pre = np.eye(4)
-                    T_pre[:3, :3] = R_phys_inv_W
-                    T_pre[:3, 3] = c_ref - R_phys_inv_W @ c_pass
-                    hints_applied = True
-                    print(f"\n  [hint pose {pose_idx}] frame={frame_tag}")
-                    print(f"  [hint pose {pose_idx}] c_pass = ({c_pass[0]:+.1f}, "
-                          f"{c_pass[1]:+.1f}, {c_pass[2]:+.1f}) mm")
-                    print(f"  [hint pose {pose_idx}] c_master = ({c_ref[0]:+.1f}, "
-                          f"{c_ref[1]:+.1f}, {c_ref[2]:+.1f}) mm")
-                    print(f"  [hint pose {pose_idx}] translation = ({T_pre[0,3]:+.1f}, "
-                          f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm")
-
-            # Sub-model 의 IScan 들 → master_model.
-            # apply_hints_to_frame_transformations=False 일 때 hint 는 IScan 의
-            # frame_transformations 에 박지 않고 recorded_hints 에 기록만 (병합
-            # 비교용). 같은 raw scan 데이터로 후처리 단계에서 hint on/off 를
-            # swap 가능.
-            if T_pre is not None and not s.apply_hints_to_frame_transformations:
-                idx_before = master_model.scan_count()
-                n_added = self._merge_into_master(
-                    sub_result.model, master_model, None,  # hint 안 박음
-                )
-                for idx in range(idx_before, master_model.scan_count()):
-                    recorded_hints.append((idx, T_pre.copy()))
-                if n_added > 0:
-                    print(f"\n  [hint record] T_pre → scan_idx "
-                          f"{idx_before}..{master_model.scan_count() - 1} "
-                          f"(apply_hints=False, 후처리에서 선택 적용)")
-            else:
-                # Hint ICP refine — centroid-pivot T_pre 를 init 으로 colored
-                # ICP 돌려 측정된 T 로 교체. 사용자 손회전의 ±10° 오차 흡수.
-                # docs §4.2 face-merging 회피.
-                T_pre_to_apply = T_pre
-                if (T_pre is not None and s.hint_icp_refine_mode
-                        and master_model.scan_count() > 0):
-                    print(f"  [icp_refine] hint refine 시작 "
-                          f"(voxel={s.icp_voxel_mm}mm, "
-                          f"corr={s.icp_corr_dist_mm}mm, "
-                          f"color_w={s.icp_color_weight})")
-                    T_pre_refined, fit, rmse = self._hint_icp_refine(
-                        sub_result.model, T_pre, master_model)
-                    idx_for_log = master_model.scan_count()  # 곧 추가될 인덱스
-                    icp_refine_log.append(
-                        (idx_for_log, T_pre.copy(), T_pre_refined.copy(),
-                         fit, rmse))
-                    T_pre_to_apply = T_pre_refined
-                n_added = self._merge_into_master(
-                    sub_result.model, master_model, T_pre_to_apply,
-                )
-            print(f"\n  [pass {n_pass} / pose {pose_idx}] {n_added} scan(s) → master "
-                  f"(total scans={master_model.scan_count()})")
-
-            # Viewer 를 cleaned master_model 로 재구성 — pass 중 누적된 raw
-            # 점들 (정합 전 위치) 을 cleanup + T_pre 적용된 점들로 교체.
-            # viewer = scan 일관성 ([[feedback_live_viewer_must_mirror_scan]]).
-            if live_viewer is not None:
-                try:
-                    live_viewer.rebuild_from_model(master_model)
-                except Exception as e:
-                    print(f"  [live] ⚠ rebuild_from_model 호출 실패 "
-                          f"({type(e).__name__}: {e})")
-
-            # Pass 1 (또는 첫 성공한 IScan) 후 master_center lock
-            if master_center is None and master_model.scan_count() > 0:
-                master_center = self._compute_model_centroid(master_model)
-                print(f"  [master_center] locked at "
-                      f"({master_center[0]:+.1f}, {master_center[1]:+.1f}, "
-                      f"{master_center[2]:+.1f}) mm")
-
-            # ── 분기: tracking lost 였나 정상 완료였나 ────────────────
-            if sub_result.tracking_lost:
-                # Drive 통신 사망 / alarm trip — retry 해도 못 풀림. 즉시 종료.
-                # TurntableController 가 watchdog 으로 emergency_stop 시도하지만
-                # 그래도 안 멈출 수 있어 사용자에게 물리 전원 차단 안내.
-                lr = (sub_result.loss_reason or "").lower()
-                drive_dead = ("drive alarm" in lr
-                              or "drive 통신 사망" in lr
-                              or "alarm trip" in lr
-                              or "getactualpos" in lr)
-                if drive_dead:
-                    aborted_reason = (
-                        f"turntable drive alarm / 통신 사망 — "
-                        f"EziSERVO 전원 OFF→5s→ON 필요"
-                    )
-                    print(f"\n  ✘ {aborted_reason}")
-                    print(f"  ✘ 모터가 안 멈추면 emergency_stop 도 실패한 것 — "
-                          f"물리 전원 차단해야 함.")
-                    print(f"  ✘ 복구 후 main_artec.py 재실행.")
-                    break
-
-                # ── 자동 recovery 시도 ─────────────────────────────────
-                # auto_recovery_enabled 이고 max_recovery_retries 미만이면
-                # turntable safe-back + (probe + 축소 elevation search) 로
-                # 새 robot 자세 결정 후 자동 재시도. docs §6.
-                recovery_initiated = False
-                if (s.auto_recovery_enabled
-                        and recovery_retry_count < s.max_recovery_retries):
-                    ok, T_BC_new = self._attempt_recovery(
-                        sub_result, master_model, recovery_retry_count,
-                    )
-                    if ok:
-                        recovery_retry_count += 1
-                        n_recovery_attempts += 1
-                        # robot 이 움직였으면 다음 merge 의 T_pre override 용
-                        if T_BC_new is not None:
-                            next_T_BC_pending = T_BC_new
-                        # turntable 을 safe-back 으로 manual 이동했으므로
-                        # 다음 streaming session 은 pre-scan clearpos skip.
-                        next_skip_clearpos = True
-                        recovery_initiated = True
-                        print(f"  → recovery #{recovery_retry_count}/"
-                              f"{s.max_recovery_retries} 진입 — 자동 재시도")
-                elif (s.auto_recovery_enabled
-                        and recovery_retry_count >= s.max_recovery_retries):
-                    print(f"\n  ⓘ recovery 한계 도달 "
-                          f"({recovery_retry_count}/{s.max_recovery_retries}) "
-                          f"— user prompt 로 fallback")
-
-                if recovery_initiated:
-                    continue   # 다음 iteration 으로 (pose_idx 유지)
-
-                # ── User-prompt fallback (기존 동작) ────────────────
-                if not s.prompt_on_tracking_lost:
-                    aborted_reason = (
-                        f"tracking lost (auto, no prompt): {sub_result.loss_reason}"
-                    )
-                    print(f"  ⚠ {aborted_reason}")
-                    break
-                print(f"\n  ⚠ Pass {n_pass} tracking lost: {sub_result.loss_reason}")
-                print(f"  → 같은 pose (pose {pose_idx}) 그대로 두고 [Enter] 재시도 / [q]+Enter 종료")
-                if self._wait_user_quit():
-                    user_quit = True
-                    aborted_reason = "사용자 종료 (lost 직후)"
-                    break
-                # User 가 수동 retry 한 경우 — recovery_retry_count 는 reset
-                # (수동 개입은 새 시작으로 간주).
-                recovery_retry_count = 0
-                # 다음 iteration 으로 진행 — pose_idx 유지 (재시도)
-            else:
-                # 정상 완료 — recovery 카운터 reset.
-                if recovery_retry_count > 0:
-                    n_recovery_succeeded += 1
-                    print(f"\n  ✓ recovery 후 정상 완료 — retry 카운터 reset "
-                          f"(누적 성공: {n_recovery_succeeded})")
-                    recovery_retry_count = 0
-                # ── Phase 1 이후: **순차 누적** (phase_mode=N → Phase 1..N) ──
-                # phase_mode≥2: 첫 5면 후 Phase 2(NBV) 1회. phase_mode≥3: 이어서 Phase 3(flip).
-                # (docs/3_phase2.md §8)
-                if s.phase_mode >= 2 and not phase2_done:
-                    self._phase2_nbv_loop(master_model)        # Phase 2: 부족면 NBV
-                    phase2_done = True
-                    if s.phase_mode >= 3:
-                        # Phase 3(바닥면 flip)는 robot 고정 가정 → NBV 로 움직인 robot 을 home 복귀.
-                        try:
-                            self.robot.go_home(sensor="artec", confirm=False)
-                            print("  [phase2→3] robot home 복귀 (Phase 3 진입)")
-                        except Exception as e:
-                            print(f"  [phase2→3] ⚠ go_home 실패({e}) — Phase 3 자세 확인 필요")
-                if s.phase_mode < 3:             # 1·2 → 여기서 종료 (Phase 3 안 함)
-                    aborted_reason = aborted_reason or f"phase_mode={s.phase_mode} 완료 (Phase 1..{s.phase_mode})"
-                    break
-                # phase_mode >= 3: Phase 3(바닥면 flip) — 아래 사용자-회전(pose advance) 흐름
-                if not s.prompt_between_passes:
-                    aborted_reason = "single-pass mode (no inter-pass prompt)"
-                    break
-                print(f"\n  ✓ Pass {n_pass} (pose {pose_idx}) 완료 — frames={sub_result.n_frames}")
-                # 다음 pose 가 정의돼있으면 안내
-                next_pose = pose_idx + 1
-                if next_pose < len(s.pose_physical_rotations):
-                    print(f"  → 다음 pose ({next_pose}) 자세로 아이템 회전 후 [Enter]")
-                    self._print_pose_hint_for_user(next_pose)
-                else:
-                    print(f"  → 추가 pass 진행하려면 [Enter] (모든 정의된 pose 완료)")
-                print(f"    종료하려면 [q]+Enter")
-                if self._wait_user_quit():
-                    user_quit = True
-                    aborted_reason = "사용자 종료 (정상 완료 후)"
-                    break
-                pose_idx += 1   # 정상 완료 시만 advance
-
-        if live_viewer is not None:
-            try:
-                live_viewer.close()
+                st.live_viewer.close()
             except Exception:
                 pass
 
-        if n_pass >= s.max_passes:
-            aborted_reason = aborted_reason or f"max_passes={s.max_passes} 도달"
-            print(f"\n  ⓘ {aborted_reason}")
+        if st.n_pass >= s.max_passes:
+            st.aborted_reason = st.aborted_reason or f"max_passes={s.max_passes} 도달"
+            print(f"\n  ⓘ {st.aborted_reason}")
 
         n_total_frames = sum(
-            master_model.get_scan(i).frame_count()
-            for i in range(master_model.scan_count())
+            st.master_model.get_scan(i).frame_count()
+            for i in range(st.master_model.scan_count())
         )
 
         print(f"\n═══ Multi-pass 종료 ═══")
-        print(f"  passes              : {n_pass}")
-        print(f"  master scan_count   : {master_model.scan_count()}")
+        print(f"  passes              : {st.n_pass}")
+        print(f"  master scan_count   : {st.master_model.scan_count()}")
         print(f"  master total frames : {n_total_frames}")
-        print(f"  user_quit           : {user_quit}")
-        if aborted_reason:
-            print(f"  reason              : {aborted_reason}")
+        print(f"  user_quit           : {st.user_quit}")
+        if st.aborted_reason:
+            print(f"  reason              : {st.aborted_reason}")
 
-        if n_recovery_attempts > 0:
-            print(f"  recovery            : {n_recovery_succeeded}/"
-                  f"{n_recovery_attempts} 성공")
+        if st.n_recovery_attempts > 0:
+            print(f"  recovery            : {st.n_recovery_succeeded}/"
+                  f"{st.n_recovery_attempts} 성공")
 
         return ArtecMultiPassScanResult(
-            model=master_model,
-            n_passes=n_pass,
+            model=st.master_model,
+            n_passes=st.n_pass,
             n_total_frames=n_total_frames,
-            pass_results=pass_results,
-            user_quit=user_quit,
-            aborted_reason=aborted_reason,
-            hints_applied=hints_applied,
-            master_center_mm=master_center,
-            n_recovery_attempts=n_recovery_attempts,
-            n_recovery_succeeded=n_recovery_succeeded,
-            recorded_hints=recorded_hints,
-            icp_refine_log=icp_refine_log,
+            pass_results=st.pass_results,
+            user_quit=st.user_quit,
+            aborted_reason=st.aborted_reason,
+            hints_applied=st.hints_applied,
+            master_center_mm=st.master_center,
+            n_recovery_attempts=st.n_recovery_attempts,
+            n_recovery_succeeded=st.n_recovery_succeeded,
+            recorded_hints=st.recorded_hints,
+            icp_refine_log=st.icp_refine_log,
         )
+
+    # ── Phase 1 ─────────────────────────────────────────────────────────
+    # (Phase 1 캡처는 pick_phase1_pose=AT_CURRENT + capture_rotation 이 담당)
+
+    # ── Phase 3 (외부 flip → 윗면) ──────────────────────────────────────
+    def supports_phase3(self) -> bool:
+        return True                             # real: 사용자 손회전으로 flip 가능
+
+    def next_flip(self) -> bool:
+        """Phase 3 — 사용자에게 물체를 다음 flip pose 로 뒤집도록 안내(+pose_idx
+        advance). 정상 완료 후 호출되어 직전 pass 완료 로그도 출력. 더 진행 불가
+        (single-pass / 사용자 종료 / max_passes)면 False."""
+        st = self._st
+        s = self.s
+        if st.n_pass >= s.max_passes:
+            return False
+        # prompt_between_passes=False → Phase 3(flip)는 사람 개입 전제라 진행 불가.
+        if not s.prompt_between_passes:
+            st.aborted_reason = "single-pass mode (no inter-pass prompt)"
+            return False
+        print(f"\n  ✓ Pass {st.n_pass} (pose {st.pose_idx}) 완료 "
+              f"— frames={st.last_n_frames}")
+        next_pose = st.pose_idx + 1
+        if next_pose < len(s.pose_physical_rotations):
+            print(f"  → 다음 pose ({next_pose}) 자세로 아이템 회전 후 [Enter]")
+            self._print_pose_hint_for_user(next_pose)
+        else:
+            print(f"  → 추가 pass 진행하려면 [Enter] (모든 정의된 pose 완료)")
+        print(f"    종료하려면 [q]+Enter")
+        if self._wait_user_quit():
+            st.user_quit = True
+            st.aborted_reason = "사용자 종료 (정상 완료 후)"
+            return False
+        st.pose_idx += 1                        # 정상 완료 시만 advance
+        return True
+
+    # ── 회전 1회 (Phase 1·3 공유) ───────────────────────────────────────
+
+    def _do_one_rotation(self, st: "_RunState") -> str:
+        """회전 1회: streaming → cleanup → hint → merge → viewer → master_center,
+        그리고 tracking-lost recovery. Phase 1·3 이 공유한다.
+
+        Returns _ROT_OK(정상), _ROT_RETRY(같은 pose 재시도), _ROT_ABORT(중단).
+        """
+        s = self.s
+        self._print_pass_banner(st.n_pass + 1, s.max_passes, st.pose_idx)
+        if st.live_viewer is not None:
+            try:
+                st.live_viewer.new_pass(
+                    f"Pass {st.n_pass + 1} (pose {st.pose_idx})")
+            except Exception:
+                pass
+
+        # ── Recovery 직후면 streaming 의 pre-scan clearpos skip ──
+        # 우리가 이미 turntable 을 safe-back 으로 이동시켰음. clearpos 가
+        # 그 위치를 새 0° 로 redefine 하면 의도와 어긋남.
+        _orig_reset_to_zero = s.streaming_settings.reset_to_zero_first
+        if st.next_skip_clearpos:
+            s.streaming_settings.reset_to_zero_first = False
+
+        # ── 단일 회전 ─────────────────────────────────────────────
+        try:
+            single = ArtecStreamingScanSession(
+                self.mms, self.robot, self.turntable, s.streaming_settings,
+                live_viewer=st.live_viewer,
+            )
+            sub_result = single.run()
+        finally:
+            # streaming_settings 는 multipass 인스턴스 외부에서 공유될 수
+            # 있으므로 반드시 원복.
+            s.streaming_settings.reset_to_zero_first = _orig_reset_to_zero
+            st.next_skip_clearpos = False
+        st.pass_results.append(sub_result)
+        st.n_pass += 1
+        st.last_n_frames = sub_result.n_frames
+
+        # ── Pass cleanup: SerialReg + OutlierRemoval ───────────────
+        # 멀티패스 끝까지 기다리지 말고 회전마다 즉시 정합/이상점 제거.
+        # 이유: (a) hint 계산 (centroid) 이 깨끗한 데이터로 안정,
+        #       (b) live viewer 가 정합된 IScan 을 그대로 비춰서 사용자가
+        #           회전별 형상 / 정합 품질을 즉시 검증 가능
+        #           ([[feedback_live_viewer_must_mirror_scan]]).
+        # Outliers 는 Fusion 전에 와야 함 ([[feedback_artec_pipeline_order]]).
+        # tracking_lost 면 partial IScan 이라 SerialReg 가 깨질 수 있어 skip.
+        if (not sub_result.tracking_lost
+                and sub_result.model.scan_count() > 0):
+            try:
+                cleaned = artec_algorithm.Algorithms.serial_registration(
+                    sub_result.model,
+                )
+                cleaned = artec_algorithm.Algorithms.outliers_removal(
+                    cleaned,
+                )
+                sub_result.model = cleaned
+                print(f"\n  [pass cleanup] SerialReg + OutlierRemoval 완료")
+            except Exception as e:
+                print(f"\n  [pass cleanup] ⚠ 실패 "
+                      f"({type(e).__name__}: {e}) — raw IScan 사용")
+
+        # ── Pose hint 계산 (centroid-aware + base-frame aware) ─────
+        # 1. R_phys 는 base frame B 에서 정의 (사용자 직관)
+        # 2. T_BC 있으면 R_W = T_BC @ R_B @ T_CB 로 scan world 로 변환
+        # 3. T_pre = Translate(c_master) @ inv(R_W) @ Translate(-c_pass)
+        #    객체 centroid 를 pivot 으로 회전 → camera 원점 기준 30cm
+        #    translation 오류 제거.
+        T_pre = None
+
+        # Recovery override: 직전 회전에서 robot 이 움직였다면 camera-motion
+        # 만 보정 (object 회전 무관, pose_idx 그대로). 다른 R_phys hint 보다 우선.
+        #   x_W_master = T_BC_master @ T_CB_new @ x_W_new
+        #              = T_BC_master @ inv(T_BC_new) @ x_W_new
+        # SDK frame_transformation 은 mm 라 translation 만 m→mm scale.
+        if st.next_T_BC_pending is not None:
+            if self._T_BC is None:
+                print(f"  [recovery hint] ⚠ T_BC_master 미설정 — override skip")
+            else:
+                try:
+                    T_pre_cam = self._T_BC @ np.linalg.inv(st.next_T_BC_pending)
+                    T_pre = T_pre_cam.copy()
+                    T_pre[:3, 3] *= 1000.0          # m → mm (SDK 단위)
+                    print(f"\n  [recovery hint] camera-motion correction "
+                          f"applied (Δtrans = ({T_pre[0,3]:+.1f}, "
+                          f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm)")
+                except np.linalg.LinAlgError as e:
+                    print(f"  [recovery hint] ⚠ inv 실패 ({e}) — override skip")
+            st.next_T_BC_pending = None
+
+        R_phys = (s.pose_physical_rotations[st.pose_idx]
+                  if st.pose_idx < len(s.pose_physical_rotations) else None)
+        if T_pre is None and R_phys is not None and not np.allclose(R_phys, np.eye(4), atol=1e-9):
+            try:
+                R_phys_inv_B = np.linalg.inv(R_phys)[:3, :3]
+            except np.linalg.LinAlgError:
+                print(f"  [hint] ⚠ pose_physical_rotations[{st.pose_idx}] inverse 실패 — skip")
+                R_phys_inv_B = None
+            if R_phys_inv_B is not None:
+                # B → W 변환 (T_BC 있으면)
+                if self._T_BC is not None and self._T_CB is not None:
+                    R_phys_inv_W = (self._T_BC[:3, :3] @ R_phys_inv_B
+                                    @ self._T_CB[:3, :3])
+                    frame_tag = "base"
+                else:
+                    R_phys_inv_W = R_phys_inv_B
+                    frame_tag = "scan_world (fallback)"
+
+                c_pass = self._compute_model_centroid(sub_result.model)
+                c_ref = st.master_center if st.master_center is not None else c_pass
+                T_pre = np.eye(4)
+                T_pre[:3, :3] = R_phys_inv_W
+                T_pre[:3, 3] = c_ref - R_phys_inv_W @ c_pass
+                st.hints_applied = True
+                print(f"\n  [hint pose {st.pose_idx}] frame={frame_tag}")
+                print(f"  [hint pose {st.pose_idx}] c_pass = ({c_pass[0]:+.1f}, "
+                      f"{c_pass[1]:+.1f}, {c_pass[2]:+.1f}) mm")
+                print(f"  [hint pose {st.pose_idx}] c_master = ({c_ref[0]:+.1f}, "
+                      f"{c_ref[1]:+.1f}, {c_ref[2]:+.1f}) mm")
+                print(f"  [hint pose {st.pose_idx}] translation = ({T_pre[0,3]:+.1f}, "
+                      f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm")
+
+        # Sub-model 의 IScan 들 → master_model.
+        # apply_hints_to_frame_transformations=False 일 때 hint 는 IScan 의
+        # frame_transformations 에 박지 않고 recorded_hints 에 기록만 (병합
+        # 비교용). 같은 raw scan 데이터로 후처리 단계에서 hint on/off 를
+        # swap 가능.
+        if T_pre is not None and not s.apply_hints_to_frame_transformations:
+            idx_before = st.master_model.scan_count()
+            n_added = self._merge_into_master(
+                sub_result.model, st.master_model, None,  # hint 안 박음
+            )
+            for idx in range(idx_before, st.master_model.scan_count()):
+                st.recorded_hints.append((idx, T_pre.copy()))
+            if n_added > 0:
+                print(f"\n  [hint record] T_pre → scan_idx "
+                      f"{idx_before}..{st.master_model.scan_count() - 1} "
+                      f"(apply_hints=False, 후처리에서 선택 적용)")
+        else:
+            # Hint ICP refine — centroid-pivot T_pre 를 init 으로 colored
+            # ICP 돌려 측정된 T 로 교체. 사용자 손회전의 ±10° 오차 흡수.
+            # docs §4.2 face-merging 회피.
+            T_pre_to_apply = T_pre
+            if (T_pre is not None and s.hint_icp_refine_mode
+                    and st.master_model.scan_count() > 0):
+                print(f"  [icp_refine] hint refine 시작 "
+                      f"(voxel={s.icp_voxel_mm}mm, "
+                      f"corr={s.icp_corr_dist_mm}mm, "
+                      f"color_w={s.icp_color_weight})")
+                T_pre_refined, fit, rmse = self._hint_icp_refine(
+                    sub_result.model, T_pre, st.master_model)
+                idx_for_log = st.master_model.scan_count()  # 곧 추가될 인덱스
+                st.icp_refine_log.append(
+                    (idx_for_log, T_pre.copy(), T_pre_refined.copy(),
+                     fit, rmse))
+                T_pre_to_apply = T_pre_refined
+            n_added = self._merge_into_master(
+                sub_result.model, st.master_model, T_pre_to_apply,
+            )
+        print(f"\n  [pass {st.n_pass} / pose {st.pose_idx}] {n_added} scan(s) → master "
+              f"(total scans={st.master_model.scan_count()})")
+
+        # Viewer 를 cleaned master_model 로 재구성 — 회전 중 누적된 raw
+        # 점들 (정합 전 위치) 을 cleanup + T_pre 적용된 점들로 교체.
+        # viewer = scan 일관성 ([[feedback_live_viewer_must_mirror_scan]]).
+        if st.live_viewer is not None:
+            try:
+                st.live_viewer.rebuild_from_model(st.master_model)
+            except Exception as e:
+                print(f"  [live] ⚠ rebuild_from_model 호출 실패 "
+                      f"({type(e).__name__}: {e})")
+
+        # Pass 1 (또는 첫 성공한 IScan) 후 master_center lock
+        if st.master_center is None and st.master_model.scan_count() > 0:
+            st.master_center = self._compute_model_centroid(st.master_model)
+            print(f"  [master_center] locked at "
+                  f"({st.master_center[0]:+.1f}, {st.master_center[1]:+.1f}, "
+                  f"{st.master_center[2]:+.1f}) mm")
+
+        # ── 분기: tracking lost 였나 정상 완료였나 ────────────────
+        if sub_result.tracking_lost:
+            # Drive 통신 사망 / alarm trip — retry 해도 못 풀림. 즉시 종료.
+            # TurntableController 가 watchdog 으로 emergency_stop 시도하지만
+            # 그래도 안 멈출 수 있어 사용자에게 물리 전원 차단 안내.
+            lr = (sub_result.loss_reason or "").lower()
+            drive_dead = ("drive alarm" in lr
+                          or "drive 통신 사망" in lr
+                          or "alarm trip" in lr
+                          or "getactualpos" in lr)
+            if drive_dead:
+                st.aborted_reason = (
+                    f"turntable drive alarm / 통신 사망 — "
+                    f"EziSERVO 전원 OFF→5s→ON 필요"
+                )
+                print(f"\n  ✘ {st.aborted_reason}")
+                print(f"  ✘ 모터가 안 멈추면 emergency_stop 도 실패한 것 — "
+                      f"물리 전원 차단해야 함.")
+                print(f"  ✘ 복구 후 main_artec.py 재실행.")
+                return _ROT_ABORT
+
+            # ── 자동 recovery 시도 ─────────────────────────────────
+            # auto_recovery_enabled 이고 max_recovery_retries 미만이면
+            # turntable safe-back + (probe + 축소 elevation search) 로
+            # 새 robot 자세 결정 후 자동 재시도. docs §6.
+            recovery_initiated = False
+            if (s.auto_recovery_enabled
+                    and st.recovery_retry_count < s.max_recovery_retries):
+                ok, T_BC_new = self._attempt_recovery(
+                    sub_result, st.master_model, st.recovery_retry_count,
+                )
+                if ok:
+                    st.recovery_retry_count += 1
+                    st.n_recovery_attempts += 1
+                    # robot 이 움직였으면 다음 merge 의 T_pre override 용
+                    if T_BC_new is not None:
+                        st.next_T_BC_pending = T_BC_new
+                    # turntable 을 safe-back 으로 manual 이동했으므로
+                    # 다음 streaming session 은 pre-scan clearpos skip.
+                    st.next_skip_clearpos = True
+                    recovery_initiated = True
+                    print(f"  → recovery #{st.recovery_retry_count}/"
+                          f"{s.max_recovery_retries} 진입 — 자동 재시도")
+            elif (s.auto_recovery_enabled
+                    and st.recovery_retry_count >= s.max_recovery_retries):
+                print(f"\n  ⓘ recovery 한계 도달 "
+                      f"({st.recovery_retry_count}/{s.max_recovery_retries}) "
+                      f"— user prompt 로 fallback")
+
+            if recovery_initiated:
+                return _ROT_RETRY   # 같은 pose 재시도
+
+            # ── User-prompt fallback (기존 동작) ────────────────
+            if not s.prompt_on_tracking_lost:
+                st.aborted_reason = (
+                    f"tracking lost (auto, no prompt): {sub_result.loss_reason}"
+                )
+                print(f"  ⚠ {st.aborted_reason}")
+                return _ROT_ABORT
+            print(f"\n  ⚠ Pass {st.n_pass} tracking lost: {sub_result.loss_reason}")
+            print(f"  → 같은 pose (pose {st.pose_idx}) 그대로 두고 [Enter] 재시도 / [q]+Enter 종료")
+            if self._wait_user_quit():
+                st.user_quit = True
+                st.aborted_reason = "사용자 종료 (lost 직후)"
+                return _ROT_ABORT
+            # User 가 수동 retry 한 경우 — recovery_retry_count 는 reset
+            # (수동 개입은 새 시작으로 간주).
+            st.recovery_retry_count = 0
+            return _ROT_RETRY       # 같은 pose 재시도
+
+        # 정상 완료 — recovery 카운터 reset.
+        if st.recovery_retry_count > 0:
+            st.n_recovery_succeeded += 1
+            print(f"\n  ✓ recovery 후 정상 완료 — retry 카운터 reset "
+                  f"(누적 성공: {st.n_recovery_succeeded})")
+            st.recovery_retry_count = 0
+        return _ROT_OK
 
     # ── Recovery ───────────────────────────────────────────────────────
 
@@ -1922,48 +2019,49 @@ class ArtecMultiPassScanSession:
             st.reset_to_zero_first = orig_reset
         return sub, T_pre
 
-    def _phase2_nbv_loop(self, master_model) -> int:
-        """부족면 NBV 보강 루프 (docs/3_phase2.md §3). 반환 = 추가 캡처 수."""
-        from utils.nbv import phase2_nbv as _p2
+    # ── Phase 2 (NBV hole-fill) 프리미티브 — 수렴 루프는 공용 컨트롤러 소유 ──
+    #   (이전 _rank_nbv_candidates per-gap 정면 캡처 → 캡처통일로 대체, 2026-06-30.
+    #    이전 _phase2_nbv_loop → 공용 _run_phase2_nbv 로 통합, 2026-07-01.)
+    def _gap_kw(self) -> dict:
         s = self.s
-        gap_kw = dict(
+        return dict(
             min_seg_vertices=s.nbv_min_seg_vertices,
             min_seg_length=s.nbv_min_seg_length_mm / 1000.0,
             max_seg_length=s.nbv_max_seg_length_mm / 1000.0)
 
-        print("\n═══════════════ Phase 2 — 부족면 NBV 보강 ═══════════════")
-        self._collision_world = self._build_collision_world()   # swept-path 검사용
-        n_captures = 0
-        for k in range(s.nbv_K_max):
-            mesh = self._build_master_mesh_B(master_model)
-            if mesh is None or len(mesh.triangles) == 0:
-                print("  [nbv] master mesh 비어있음 — 종료.")
-                break
-            cov = _p2.coverage_state(
-                mesh, n_dirs=s.nbv_coverage_dirs,
-                parallel_thresh_deg=s.nbv_coverage_parallel_deg, **gap_kw)
-            print(f"  [nbv {k+1}/{s.nbv_K_max}] boundary={cov.boundary_len_m*1000:.1f}mm "
-                  f"cov={cov.angular_cov:.3f} gaps={cov.n_gaps}")
-            if _p2.is_converged(cov, s.nbv_boundary_stop_mm / 1000.0, s.nbv_coverage_tau):
-                print("  [nbv] 커버리지 수렴 — 완료.")
-                break
-            cands = _p2.detect_gaps(mesh, **gap_kw)
-            q_cur = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
-            # ★ 공용 자세선택(sim 과 동일): 부족면 덮을 관측 elevation 자세 → streaming 전회전.
-            #   (이전 _rank_nbv_candidates per-gap 정면 캡처 → 캡처통일로 대체, 2026-06-30.)
-            q = self._plan_nbv_pose(q_cur, cands, mesh)
-            if q is None:
-                print("  [nbv] feasible 관측자세 없음 — 종료(윗면 도달한계 등).")
-                break
-            sub, T_pre = self._capture_nbv_pose(None, q)
-            if sub is None or sub.model.scan_count() == 0:
-                print("  [nbv] 캡처 실패 — 종료.")
-                break
-            n = self._merge_into_master(sub.model, master_model, T_pre)
-            n_captures += 1
-            print(f"  [nbv] {n} scan 병합 (master scans={master_model.scan_count()})")
-        print(f"  [nbv] Phase 2 종료 — 추가 캡처 {n_captures}.")
-        return n_captures
+    def build_coverage_mesh(self):
+        # Phase 2 진입 첫 호출 시 swept-path 검사용 충돌 world 준비(1회).
+        if getattr(self, "_collision_world", None) is None:
+            print("\n═══════════════ Phase 2 — 부족면 NBV 보강 ═══════════════")
+            self._collision_world = self._build_collision_world()
+        mesh = self._build_master_mesh_B(self._st.master_model)
+        if mesh is None or len(mesh.triangles) == 0:
+            print("  [nbv] master mesh 비어있음 — 종료.")
+            return None
+        return mesh
+
+    def is_converged(self, mesh) -> bool:
+        from utils.nbv import phase2_nbv as _p2
+        s = self.s
+        cov = _p2.coverage_state(
+            mesh, n_dirs=s.nbv_coverage_dirs,
+            parallel_thresh_deg=s.nbv_coverage_parallel_deg, **self._gap_kw())
+        print(f"  [nbv] boundary={cov.boundary_len_m*1000:.1f}mm "
+              f"cov={cov.angular_cov:.3f} gaps={cov.n_gaps}")
+        if _p2.is_converged(cov, s.nbv_boundary_stop_mm / 1000.0, s.nbv_coverage_tau):
+            print("  [nbv] 커버리지 수렴 — 완료.")
+            return True
+        return False
+
+    def plan_nbv_pose(self, mesh):
+        # ★ 공용 자세선택(sim 과 동일): 부족면 덮을 관측 elevation 자세 → streaming 전회전.
+        from utils.nbv import phase2_nbv as _p2
+        cands = _p2.detect_gaps(mesh, **self._gap_kw())
+        q_cur = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        q = self._plan_nbv_pose(q_cur, cands, mesh)
+        if q is None:
+            print("  [nbv] feasible 관측자세 없음 — 종료(윗면 도달한계 등).")
+        return q
 
     @staticmethod
     def hint_icp_refine_static(

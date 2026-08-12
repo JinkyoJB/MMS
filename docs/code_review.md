@@ -42,8 +42,8 @@
 
 > ★ **robot 의 IK/FK 는 양쪽 다 `utils/robot/xarm7_kinematics.py`(해석 IK)** 를 쓴다.
 > real `XArmInterface.ik` 도 SDK IK 가 아니라 해석 IK 호출(결정 2026-06, [[decision-ik-analytic-not-sdk]]).
-> → **충돌검사(스캐너 자가충돌 포함)·IK 가 real/sim 동일 결과**. 캡처도 "로봇 자세+전회전"으로
-> 통일됨(2026-06-30). NBV **자세 선택** 로직만 아직 각자(공용추출 예정, §5·§7).
+> → **충돌검사(스캐너 자가충돌 포함)·IK·NBV 자세선택이 real/sim 동일 결과**. 캡처도 "로봇
+> 자세+전회전"으로 통일(2026-06-30). backend 는 카메라규약(USD/OpenCV)·프레임만 주입.
 
 ### (b) 스캔 경로 — `mms_artec/system.py::artec_process()`
 | backend | scan 방법 | 코드 |
@@ -88,7 +88,7 @@ sim 은 점군까지만.
 main()                                                  # main_artec.py:317
  └ with ArtecMMS(CFG) as mms:                           # system.py:95  (build_sensor=scanner 생성)
      ├ robot, turntable = mms.create_hardware()         # system.py:146 → build_hardware (factory)
-     ├ if RUN_CALIBRATION: run_turntable_calibration()  # main_artec.py:280  (옵션, T_B_F0 재설정)
+     │  (T_B_F0 = turntable_frame.yaml 자동 로드; 재보정은 rim-click 별도 스크립트 — §4.1)
      └ result = mms.artec_process(robot, turntable, PROCESS_SETTINGS)   # system.py:411
           ├ [scan] real+multipass → ArtecMultiPassScanSession.run()     # system.py:436-459
           │         = phase_mode 순차 누적: Phase 1(streaming) → 2(NBV) → 3(flip 바닥면)
@@ -114,13 +114,15 @@ main()                                                  # main_artec.py:317
 | 변환 | 의미 | 구하는 법 | 저장 |
 |---|---|---|---|
 | `T_EC` (hand-eye) | EE→카메라 | ChArUco+solvePnP → `hand_eye_calibrator`(AX=ZB). ✅2026-04-29 (3.55mm) | `config/sensor_frames.yaml` |
-| `T_B_F0` | base→턴테이블축 | 구 fixture 점군→`calibrate_turntable_axis`(`turntable_axis.fit_sphere_center/estimate_axis`) | `config/calibration/turntable_frame.yaml` |
+| `T_B_F0` | base→턴테이블축 | **rim 클릭**(턴테이블 가장자리 점 ≥3개)→`turntable_frame.fit_circle_3d`→`build_T_B_F0` | `config/calibration/turntable_frame.yaml` |
 | `T_O_F0` | 내부글로벌→턴테이블 | 런타임 체인 | 세션 메모리 |
 
 - real hand-eye 재보정: `scripts/artec/hand_eye_calib.py`.
-- 턴테이블 축 재보정: `main_artec.py` `RUN_CALIBRATION=True`(또는 `MMS_RUN_CALIB=1`) +
-  **`CALIB_SPHERE_Z_BANDS`(물리 fixture 구 z) 설정 필수**(None 이면 skip, line 35).
-- 진입점 `mms.calibrate_turntable_axis` 는 sim/real 공통 (`system.py:159`).
+- 턴테이블 축 재보정 = **rim 클릭 별도 스크립트**(2026-06 결정, 구 sphere fixture 폐기):
+  - real: `python scripts/artec/turntable_frame_init.py` → rim 클릭 → yaml.
+  - sim 검증: `standalone_examples/play/MMS/MMS_ext_calibration2.py`(rim 자동추출→fit→GT).
+  - main_artec 은 **yaml 만 로드**(인라인 sphere 캘리브 제거됨). 코어=`turntable_frame.py`.
+- ⚠ 폐기 잔존(미사용): `turntable_axis.py`·`calib_fixture.py`·`system.py::calibrate_turntable_axis`(sphere).
 
 ### 4.2 Phase 1 — 5면 streaming SLAM  (docs/2_phase1.md)
 턴테이블 360° 회전 + **로봇 고정** → 윗면+옆면4. real 은 Artec SLAM, sim 은 GT 누적.
@@ -135,8 +137,10 @@ main()                                                  # main_artec.py:317
 `phase_mode=2` 로 활성.
 
 - 본체: `artec_multipass_scan_session.py` 의 `_phase2_nbv_loop` → `_build_master_mesh_B`
-  (pcd→Poisson) → `_rank_nbv_candidates`(**해석 IK + swept 충돌 + 관절이동 최소**) →
-  `_capture_nbv_pose`(**로봇 NBV 자세 이동 → streaming 전회전 → T_pre/relocalization 병합**).
+  (pcd→Poisson) → **`_plan_nbv_pose`**(공용 `phase2_nbv.plan_nbv_elevation_pose` — 관측
+  elevation 자세, 해석 IK + swept 충돌 + 관절이동 최소) → `_capture_nbv_pose`(**로봇 NBV 자세
+  이동 → streaming 전회전 → T_pre/relocalization 병합**). (`_rank_nbv_candidates` per-gap 정면
+  방식은 캡처통일로 대체됨.)
 - 충돌: `_build_collision_world`(턴테이블 calib) + **keep-out 원기둥**(`add_cylinder`) +
   `swept_pose_collision`(공용 `robot_collision`). ★ **스캐너 자가충돌 자동 포함**(공용
   `pose_collision(scanner_self=True)`, 캡슐반경 0.095) — 벌크 스파이더가 베이스 링크(link2 등)에
@@ -181,10 +185,10 @@ GlobalReg → Cleaning → PoissonFusion → Texturize → Export(.obj/.sproj). 
 | 오케스트레이션 | `system.py`,`artec_multipass_*` | ✅ | ✅ | scan만 분기 |
 
 **결론**: 충돌(스캐너 포함)·IK·NBV·calibration 로직은 **공용 lib 에 단일 구현** → real/sim 공유 OK.
-**캡처도 "로봇 자세 + 턴테이블 전회전"으로 통일** → sim 검증이 real 에 직접 이어짐. 유일한 예외는
-**Isaac 하니스(`MMS_ext_*`)의 인라인 미러**(Isaac import 제약). production sim·real 본체는 공용 lib.
-단, NBV **자세 선택 로직**(sim=elevation 선택 / real=`_rank_nbv_candidates`)은 아직 각자 — 공용
-`phase2_nbv` 로 추출 예정(다음 단계).
+**캡처도 "로봇 자세 + 턴테이블 전회전"으로 통일** → sim 검증이 real 에 직접 이어짐. **NBV 자세
+선택도 공용**(`phase2_nbv.plan_nbv_elevation_pose`, real·sim 둘 다 호출 — backend 는 look-at
+규약(USD/OpenCV)·프레임만 주입). 유일한 예외는 **Isaac 하니스(`MMS_ext_*`)의 인라인 미러**
+(Isaac import 제약). production sim·real 본체는 공용 lib 단일 구현.
 
 ---
 
@@ -196,8 +200,8 @@ GlobalReg → Cleaning → PoissonFusion → Texturize → Export(.obj/.sproj). 
    → `create_hardware()` 가 robot/turntable 연결되는지(예외 없이).
 2. **[hand-eye]** `config/sensor_frames.yaml::T_EC_artec` 존재 확인(2026-04-29). 센서 교체했으면
    `scripts/artec/hand_eye_calib.py` 재실행.
-3. **[턴테이블 축]** `turntable_frame.yaml` stale 의심 시(docs/1 경고) `RUN_CALIBRATION=True` +
-   `CALIB_SPHERE_Z_BANDS` 설정 후 재보정.
+3. **[턴테이블 축]** `turntable_frame.yaml` stale 의심 시 **rim-click 재보정**:
+   `python scripts/artec/turntable_frame_init.py` → 턴테이블 가장자리 점 클릭 → yaml 갱신.
 4. **[Phase 1]** `MULTIPASS_SETTINGS` 그대로(또는 `prompt_*`=False 자동화) → 1 pass 5면 스캔.
    live viewer 로 정합 품질 확인. export .obj 확인.
 5. **[Phase 3 — flip 바닥면]** 기존 경로(`phase_mode=3`): pose 회전 prompt 따라 바닥면 추가.
@@ -215,13 +219,13 @@ GlobalReg → Cleaning → PoissonFusion → Texturize → Export(.obj/.sproj). 
 | `phase_mode=2` | 코드 있음, **main_artec 미설정**(기본 flip) | MULTIPASS_SETTINGS 에 추가해야 NBV 동작 |
 | 스캐너 자가충돌 | ✅ **해결**(공용 `pose_collision(scanner_self=True)`, 반경 0.095) | real 실측 스파이더 반경으로 `DEFAULT_LINK_RADII[6]` 미세조정 |
 | 캡처 모달리티 통일 | ✅ sim `_scan_pass`=real 전회전 대응 | — (real `_capture_nbv_pose`=streaming 전회전 그대로) |
-| NBV 자세선택 공용추출 | sim=elevation선택 / real=`_rank_nbv_candidates` 각자 | `phase2_nbv` 로 공용 함수 추출(다음 단계) |
-| NBV 캡처 = 짧은 스윕 | v1=풀회전 | streaming 회전각 override(§3.4) — 시간단축용 |
+| NBV 자세선택 공용추출 | ✅ **해결**(공용 `phase2_nbv.plan_nbv_elevation_pose`, real·sim 둘 다 호출. backend 는 look-at 규약(USD/OpenCV)·프레임만 주입) | real 실기에서 elevation 선택 동작 확인 |
+| NBV 캡처 = 짧은 스윕 | v1=풀회전 | `streaming_settings` 회전각 override(시간단축용) |
 | Artec relocalization R1/R2 | 미배선(R3 fallback) | 실기 검증 후 배선(docs/3 §6.5) |
 | `set_servo_angle` speed 단위 | sim 가정 | real 에서 deg/s 확인 |
 | 충돌 world 치수 | 기본값 | 셀 실측으로 `nbv_turntable_*`/keep-out 보정 |
 | 큰/높은 객체 윗면 | el≈90° 도달불가(스캐너-link2) | **z 수축** 또는 Phase 3 류 별도 처리 |
-| open3d (phase2_nbv) | real 런타임 필요 | Phase2 NBV 는 open3d 설치 환경에서 |
+| open3d (phase2_nbv) | real 런타임 필요 | real env 에 `pip install open3d`(Phase2 NBV mesh/gap 용). isaac=`~/isaacsim/python.sh -m pip install open3d` 완료 |
 | 후처리 hints/GlobalReg skip | flip 경로용 | NBV 경로의 병합 규칙 점검 |
 
 > 이 표가 곧 "Phase 2 NBV 를 real 에서 켜기 전 할 일" 목록이다. Phase 1·calibration·flip 은

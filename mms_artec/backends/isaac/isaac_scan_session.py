@@ -30,8 +30,10 @@ from pxr import Usd, UsdGeom, Gf
 
 # ── 공용 lib (real 과 동일) ─────────────────────────────────────────────────────
 from utils.nbv import phase2_nbv as p2
+from utils.nbv import phase1_viewpoint as p1
+from utils.nbv.scan_phase_controller import run_scan_phases
 from utils.collision.robot_collision import (
-    CollisionWorld, pose_collision, DEFAULT_LINK_RADII)
+    CollisionWorld, pose_collision, DEFAULT_LINK_RADII, capsules_from_joints)
 from utils.robot import xarm7_kinematics as kin
 from utils.control.theta_planner import DEFAULT_JOINT_WEIGHTS
 # look-at = **USD 규약(-Z 광축)** — sim 카메라(USD)와 일치(하니스와 동일). 자기완결(numpy).
@@ -44,7 +46,8 @@ def _envf(k, d): return float(os.environ.get(k, d))
 def _envs(k, d): return os.environ.get(k, d)
 
 OBJECT_SOURCE   = _envs("MMS_SIM_OBJECT", "usd")     # "usd"(ScanTarget) | "spawn"(테스트 형상)
-OBJECT_PRIM     = "/World/ScanTarget/Solid_Marble"   # OBJECT_SOURCE="usd" 일 때 스캔 대상
+OBJECT_PRIM     = _envs("MMS_SIM_OBJECT_PRIM",        # OBJECT_SOURCE="usd" 스캔 대상
+                        "/World/ScanTarget/Solid_Marble")
 SPAWN_SHAPE     = _envs("MMS_SIM_SHAPE", "box")      # spawn: box|cylinder|sphere|cone|lshape|stepped
 SPAWN_PRIM      = "/World/SimScanObject"
 
@@ -52,8 +55,9 @@ SPAWN_PRIM      = "/World/SimScanObject"
 # (카메라 클립=실 스펙 0.2~0.3 유지 → 표면이 0.25 면 근/원접클립 모두 안전).
 WORK_FOCUS      = 0.25
 DRIVE_STEPS     = int(_envf("MMS_SIM_DRIVE_STEPS", 30))   # 관절 보간 스텝(클수록 부드럽고 느림)
-N_THETA         = 36
+N_THETA         = int(_envf("MMS_SIM_NTHETA", 36))     # Phase1/3 전회전 프레임수(낮추면 빠름)
 N_THETA_P2      = int(_envf("MMS_SIM_NTHETA_P2", 24))   # Phase2 보강 전회전 프레임수(빠르게)
+CAPTURE_SETTLE  = int(_envf("MMS_SIM_CAPTURE_SETTLE", 2))  # 캡처 전 정지 렌더 step(정지상태라 2면 충분)
 VIEW_EL_DEG     = _envf("MMS_SIM_VIEW_EL", 30.0)     # Phase1 측면 관측 elevation
 VIEW_AZIS_DEG   = [0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 180.0]
 VOXEL_M         = 0.002
@@ -128,7 +132,7 @@ class IsaacScanResult:
     ctx = None                                       # streaming 호환(없음)
 
 
-# ── 세션 ────────────────────────────────────────────────────────────────────────
+# ── 세션 ─────────────────────────────────────────────────────────────────────
 class IsaacScanSession:
     def __init__(self, mms, robot, turntable, settings=None):
         self.mms = mms
@@ -254,7 +258,7 @@ class IsaacScanSession:
     def _capture_obj_world(self, log=False):
         """capture_points_base → **world** 변환 → 객체 crop(world bbox) + (옵션)입사각 필터.
         ★ world 에서 crop: base 회전·박스높이 무관. 반환 = world 점군."""
-        pc_b = self.scanner.capture_points_base(self.robot, self.mms._T_EC, settle=6)
+        pc_b = self.scanner.capture_points_base(self.robot, self.mms._T_EC, settle=CAPTURE_SETTLE)
         if pc_b is None or len(pc_b) == 0:
             if log: print("    [capture] raw 0 — 카메라 점군 없음")
             return np.zeros((0, 3))
@@ -383,21 +387,128 @@ class IsaacScanSession:
             th_act = float(self.turntable.getActualPos())
             obj = self._capture_obj_world(log=(i % 9 == 0))
             self._accumulate(obj, th_act)
-        self.turntable.move_abs(0.0, float(np.radians(30.0)))
-        self.turntable.wait_motion_done()
+        # 루프 닫기: 350°→360°(≡0°) 앞으로 10° 만 더 회전 후 θ 리셋.
+        # (기존엔 350°를 역방향으로 되감으며 렌더 → 느리고 "홱" 끊김. 360°≡0° 라
+        #  clearpos 의 _co_rotate(0) 는 시각 점프 없음.)
+        self.turntable.move_abs(float(2 * np.pi), float(np.radians(30.0)))
+        self.turntable.clearpos()
         added = sum(len(a) for a in self.accum) - before
         print(f"[isaac_scan]   pass 완료 (+{added}점, 총 {before+added})")
 
-    def _phase1(self):
-        # 작업영역 근처 known-good 자세(artec home)로 먼저 이동 → IK seed 안정.
-        # (default 자세는 IK seed 로 부적합 — 측면뷰로 수렴 실패 가능.)
+    # ── ScanBackend 프리미티브 (공용 utils/nbv/scan_phase_controller) ──────
+    # 순서/게이팅/NBV 루프는 공용 컨트롤러 소유. 여기는 sim 캡처 하드웨어만.
+    def confirm_start(self) -> bool:
+        return True                                   # sim: 사람 확인 불필요
+
+    def go_home(self) -> None:
         try:
             self.robot.go_home(sensor="artec", confirm=False)
             self.world.step(6, render=True)
         except Exception as e:
             print(f"[isaac_scan] ⚠ go_home 실패({e}) — 현재자세로 진행")
+
+    def pick_phase1_pose(self):
+        """Phase 1 시점선정 (E2E, 2026-07-03) — **real 과 동일 경로**:
+        거리스텝 preview 캡처(실제 카메라) → 기하 크롭 → maximin 플래너.
+        반환 = q 또는 [q,...](밴드 계획, 공용 컨트롤러가 대역별 전회전).
+        MMS_SIM_P1_MODE=legacy 면 기존 GT-bbox azimuth sweep 사용."""
+        self.go_home()
         seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
         self.home_q = seed.copy()                    # retract-approach 경유점(known-good home)
+        # 카메라 warm-up (replicator 첫 프레임 빈 점군 방지) — preview 전에 필요.
+        self.world.ensure_camera()
+        self.world.step(30, render=True)
+        _ = self.scanner.capture_points_base(self.robot, self.mms._T_EC, settle=4)
+
+        if _envs("MMS_SIM_P1_MODE", "planner") == "legacy":
+            return self._pick_phase1_legacy(seed)
+
+        try:
+            plan_qs = self._pick_phase1_planner(seed)
+            if plan_qs:
+                return plan_qs
+            print("[isaac_scan] ⚠ P1 플래너 실패 — legacy sweep 으로 fallback")
+        except Exception as e:
+            print(f"[isaac_scan] ⚠ P1 플래너 예외({type(e).__name__}: {e}) — legacy fallback")
+        return self._pick_phase1_legacy(seed)
+
+    # ── Phase 1 시점선정: real 경로 (preview → 크롭 → 플래너) ────────────
+    def _pick_phase1_planner(self, seed):
+        """계획용 preview 수집(거리스텝×턴테이블 0/90°×조준높이) → 기하 크롭
+        (캘리브 축+디스크상단만 사용, GT bbox 미사용) → plan_phase1_viewpoints
+        → 자세별 az-sweep IK. real 은 이 함수의 캡처 호출만 Artec preview 로 바뀜."""
+        axis_xy = self.axis_w[:2]
+        disc_top = float(self.axis_w[2])
+        sensor = p1.SensorModel()
+        d_steps, el_prev = (0.30, 0.38), 25.0
+
+        def preview_at(tz, d):
+            """조준높이 tz·축거리 d 로 구동 후 preview 캡처 → world 점군(기하 크롭)."""
+            for azd in VIEW_AZIS_DEG:                # 도달 azimuth 스윕 (커버리지 무관)
+                q, _ = self._view_q(np.array([axis_xy[0], axis_xy[1], tz]),
+                                    el_prev, azd, d, seed)
+                if q is None:
+                    continue
+                self._drive(q)
+                pc_b = self.scanner.capture_points_base(
+                    self.robot, self.mms._T_EC, settle=CAPTURE_SETTLE)
+                if pc_b is None or len(pc_b) == 0:
+                    return np.zeros((0, 3))
+                # ★ 로봇 자기점 제거 (self-filter) — 프레임에 걸린 링크/스캐너
+                #   점이 크롭 실린더를 오염해 밴드 폭주시키는 것 방지 (real 동일).
+                q_now = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+                pc_b = p1.filter_robot_points(
+                    pc_b, capsules_from_joints(q_now, LINK_RADII, T_EC=self.T_EC))
+                return p1.crop_object_points(self._base_to_world(pc_b),
+                                             axis_xy, disc_top)
+            return np.zeros((0, 3))
+
+        # 실루엣 2방향 = 턴테이블 0°/90° (real 동일: 로봇 대신 물체를 돌림).
+        # 90° 점군은 encoder 각(-θ)으로 역회전해 물체 프레임 통일.
+        acc = []
+        for theta in (0.0, math.pi / 2):
+            self.turntable.move_abs(float(theta), float(np.radians(30.0)))
+            self.turntable.wait_motion_done()
+            tz, prev_top = disc_top + 0.05, -np.inf
+            for _ in range(4):                       # 조준높이 상승 루프
+                for d in d_steps:                    # 거리 2스텝 = 표면반경 0~18cm 커버
+                    obj = preview_at(tz, d)
+                    if len(obj):
+                        acc.append(_rot_about_axis(obj, self.axis_w,
+                                                   self.axis_dir_w, -theta))
+                top = max((a[:, 2].max() for a in acc), default=tz)
+                if top - prev_top < 0.01:            # 상단이 안 늘면 종료 (GT 불요)
+                    break
+                prev_top, tz = top, top + 0.03
+        self.turntable.move_abs(0.0, float(np.radians(30.0)))
+        self.turntable.wait_motion_done()
+
+        pts = np.vstack(acc) if acc else np.zeros((0, 3))
+        pts = p1.voxel_downsample(pts, sensor.voxel_m)
+        if len(pts) < 100:
+            print(f"[isaac_scan] P1 preview 점 부족({len(pts)}) — 플래너 불가")
+            return None
+        nrm = p1.estimate_outward_normals(pts, axis_xy)
+        plan = p1.plan_phase1_viewpoints(pts, nrm, axis_xy, sensor)
+        print(f"[isaac_scan] P1 플랜: {plan.note} risk={plan.tracking_risk} "
+              f"(preview {len(pts)}pt)")
+        qs = []
+        for vp, ev in zip(plan.poses, plan.evals):
+            q = None
+            for azd in VIEW_AZIS_DEG:                # 계획 자세도 az 는 도달성으로
+                q, _ = self._view_q(np.array([axis_xy[0], axis_xy[1], vp.target_z]),
+                                    vp.el_deg, azd, vp.standoff, seed)
+                if q is not None:
+                    print(f"[isaac_scan]   자세 el={vp.el_deg:.0f}° s={vp.standoff:.3f} "
+                          f"tz={vp.target_z:.3f} az={azd:.0f}° "
+                          f"minfill={ev.min_fill_cm2:.0f}cm² IK ok")
+                    break
+            if q is not None:
+                qs.append(q)
+        return qs or None
+
+    # ── Phase 1 시점선정: legacy (GT bbox azimuth sweep, fallback) ────────
+    def _pick_phase1_legacy(self, seed):
         chosen = None
         # 측면 standoff: 표면(중심에서 obj_radius)이 WORK_FOCUS 에 오도록.
         standoff = WORK_FOCUS + self.obj_radius
@@ -413,13 +524,13 @@ class IsaacScanSession:
             print("[isaac_scan] ⚠ Phase1 자세 IK 전부 실패 — home 자세 유지")
             chosen = seed
         self._drive(chosen)
-        # ★ 카메라 pointcloud annotator warm-up — replicator 가 첫 몇 프레임은 빈 점군을 줌.
-        #   (하니스는 SETTLE 120스텝을 돌려 자연히 프라임됨. production 은 명시적 warm-up 필요.)
-        self.world.ensure_camera()
-        self.world.step(30, render=True)
-        _ = self.scanner.capture_points_base(self.robot, self.mms._T_EC, settle=4)
-        # Phase 1 = 측면 자세에서 **턴테이블 전회전 스캔**(real streaming 대응).
-        self._scan_pass(chosen, N_THETA, label=f"Phase 1 측면 el={VIEW_EL_DEG:.0f}°")
+        return chosen
+
+    def capture_rotation(self, pose, label: str, phase: int) -> bool:
+        # sim: 로봇을 pose 로 구동 + 턴테이블 전회전 캡처. Phase 2 는 프레임 수 축소.
+        n_theta = N_THETA_P2 if phase == 2 else N_THETA
+        self._scan_pass(pose, n_theta, label=label)
+        return True
 
     # ── Phase 2 (NBV = 추가 관측 elevation 자세, real 전회전 대응) ──────────────
     def _plan_nbv_pose(self, world, q_cur, gaps):
@@ -449,37 +560,37 @@ class IsaacScanSession:
         print(f"[isaac_scan] NBV 관측자세 el={el:.0f}° az={az:.0f}° — 전회전 스캔")
         return q
 
-    def _phase2(self, world):
-        print("[isaac_scan] === Phase 2 (부족면 보강 = 추가 elevation 전회전 스캔) ===")
-        for k in range(NBV_K_MAX):
-            pcd, _ = self._merged_pcd()
-            if len(pcd.points) < 200:
-                break
-            mesh = p2.pcd_to_mesh_poisson(pcd, depth=8, density_quantile=0.04)
-            cov = p2.coverage_state(mesh, **GAP_KW)
-            print(f"  [{k+1}/{NBV_K_MAX}] boundary={cov.boundary_len_m*1000:.0f}mm "
-                  f"cov={cov.angular_cov:.2f} gaps={cov.n_gaps}")
-            if p2.is_converged(cov, 0.012, 0.92):
-                print("  수렴 — 완료."); break
-            gaps = p2.detect_gaps(mesh, **GAP_KW)
-            q_cur = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
-            q = self._plan_nbv_pose(world, q_cur, gaps)
-            if q is None:
-                break
-            self._scan_pass(q, N_THETA_P2, label=f"Phase 2 보강 #{k+1}")
+    # ── Phase 2 (NBV hole-fill) 프리미티브 — 수렴 루프는 공용 컨트롤러 소유 ──
+    def build_coverage_mesh(self):
+        pcd, _ = self._merged_pcd()
+        if len(pcd.points) < 200:
+            print("[isaac_scan] Phase2 누적점 부족(<200) — 종료.")
+            return None
+        return p2.pcd_to_mesh_poisson(pcd, depth=8, density_quantile=0.04)
 
-    # ── run ───────────────────────────────────────────────────────────────────
-    def run(self) -> IsaacScanResult:
-        # phase_mode 순차 누적 (sim): 1=Phase1만, 2+=Phase1→2(NBV).
-        # Phase 3(바닥면 flip)은 사용자 손회전 필요 → real 전용(sim 미지원).
-        phase_mode = int(os.environ.get("MMS_SIM_PHASE_MODE", "2"))
-        self._setup_object()
-        self._phase1()
-        if phase_mode >= 2:
-            world = self._build_world()
-            self._phase2(world)
-        else:
-            print("[isaac_scan] phase_mode=1 — Phase 1(5면)만 (NBV skip)")
+    def is_converged(self, mesh) -> bool:
+        cov = p2.coverage_state(mesh, **GAP_KW)
+        print(f"[isaac_scan]   boundary={cov.boundary_len_m*1000:.0f}mm "
+              f"cov={cov.angular_cov:.2f} gaps={cov.n_gaps}")
+        if p2.is_converged(cov, 0.012, 0.92):
+            print("[isaac_scan]   수렴 — 완료.")
+            return True
+        return False
+
+    def plan_nbv_pose(self, mesh):
+        if self._world is None:
+            self._world = self._build_world()
+        gaps = p2.detect_gaps(mesh, **GAP_KW)
+        q_cur = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        return self._plan_nbv_pose(self._world, q_cur, gaps)
+
+    def supports_phase3(self) -> bool:
+        return False                                  # sim: 물체 손회전 불가 → Phase 3 미지원
+
+    def next_flip(self) -> bool:
+        return False
+
+    def finalize(self) -> IsaacScanResult:
         pcd, pts = self._merged_pcd()
         mesh = None
         try:
@@ -489,6 +600,16 @@ class IsaacScanSession:
         n = int(len(pts))
         print(f"[isaac_scan] 완료 — 누적 {n}점, mesh={'O' if mesh and len(mesh.triangles) else 'X'}")
         return IsaacScanResult(model=_SimModel(pts, mesh), n_frames=n)
+
+    # ── run — 공용 Phase 컨트롤러에 위임 ────────────────────────────────────
+    def run(self) -> IsaacScanResult:
+        # phase_mode 순차 누적 (sim): 1=Phase1만, 2+=Phase1→2(NBV).
+        # Phase 3(바닥면 flip)은 사용자 손회전 필요 → supports_phase3=False (sim 미지원).
+        self.phase_mode = int(os.environ.get("MMS_SIM_PHASE_MODE", "2"))
+        self.nbv_k_max = NBV_K_MAX
+        self._world = None                            # Phase 2 진입 시 lazy build
+        self._setup_object()
+        return run_scan_phases(self)
 
 
 # ── 모듈 함수(자기완결) ─────────────────────────────────────────────────────────

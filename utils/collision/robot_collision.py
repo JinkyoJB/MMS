@@ -92,6 +92,12 @@ def capsules_from_joints(q, link_radii=DEFAULT_LINK_RADII,
     if T_EC is not None:
         Tm = T.copy(); Tm[:3, 3] /= 1000.0
         tip = (Tm @ np.asarray(T_EC, float))[:3, 3]
+        # ★ 카메라 원점은 스캐너 '끝'이 아니다 (Artec |T_EC t|≈6cm 뿐).
+        #   캡슐이 몸체를 과소포함하지 않게 최소 scanner_len 까지 연장.
+        v = tip - flange
+        L = float(np.linalg.norm(v))
+        if 1e-9 < L < scanner_len:
+            tip = flange + v / L * scanner_len
     else:
         tip = flange - T[:3, 2] * scanner_len    # 플랜지 -Z 로 연장
     origins = list(o[1:8]) + [tip]               # o1..o7(=flange) + 스캐너 끝 = 8점
@@ -187,25 +193,40 @@ class CollisionWorld:
 
 # ── self-collision + 자세별 충돌 + collision-aware IK (real/sim 공용) ──────────
 def self_collision(capsules: List[Tuple[str, Capsule]], scale: float = 0.7,
-                   gap: int = 3, exclude_last: bool = True, margin: float = 0.0):
+                   gap: int = 3, exclude_last: bool = True, margin: float = 0.0,
+                   scanner_scale: float = 0.80):
     """
     로봇 캡슐들 사이 self-collision. 접힌 팔의 오탐 방지를 위해:
       - scale<1 : 캡슐 반경 축소(캡슐은 링크 두께를 과대근사)
-      - gap>=3  : 3칸 이상 떨어진 링크쌍만(인접/근접은 항상 가까움)
-      - exclude_last : 스캐너(마지막 캡슐) 제외(스캔 자세에서 팔과 자연히 가까움)
-    Returns: [(name_i, name_j, 침투 m), …] (비면 충돌 없음). (검증: artec/phoxi home 깨끗)
+      - gap>=3  : 3칸 이상 떨어진 **링크쌍**만(인접/근접은 항상 가까움)
+      - exclude_last : 스캐너(마지막 캡슐)를 검사에서 제외
+    ★ 스캐너 전용 규칙(2026-07-08, exclude_last=False 일 때): 스캐너는 gap 규칙
+      대신 **link1~5 전부**와 검사(link6 만 제외 — 캡슐이 플랜지 끝점을 공유해
+      거리 0 이 구조적이라 무의미). 기존 gap=3 은 scanner↔link5 를 미검사해
+      Phase2 고도각 자세의 스캐너-손목 충돌을 놓쳤음. scanner_scale(0.80)로
+      링크쌍(0.7)보다 엄격하게 보되 known-good 자세 오탐은 회피.
+    Returns: [(name_i, name_j, 침투 m), …] (비면 충돌 없음).
     """
     caps = list(capsules)
-    n = len(caps) - (1 if exclude_last else 0)
+    has_scanner = not exclude_last
+    n_links = len(caps) - 1                      # 스캐너 제외한 링크 수
     hits = []
-    for i in range(n):
+    for i in range(n_links):                     # 링크쌍: 기존 gap 규칙
         ni, ci = caps[i]
-        for j in range(i + gap, n):
+        for j in range(i + gap, n_links):
             nj, cj = caps[j]
             d = seg_seg_distance(ci.p0, ci.p1, cj.p0, cj.p1)
             thr = (ci.r + cj.r) * scale + margin
             if d < thr:
                 hits.append((ni, nj, float(thr - d)))
+    if has_scanner:                              # 스캐너 vs link1..5 (link6 제외)
+        ns, cs = caps[-1]
+        for i in range(n_links - 1):
+            ni, ci = caps[i]
+            d = seg_seg_distance(cs.p0, cs.p1, ci.p0, ci.p1)
+            thr = (cs.r + ci.r) * scanner_scale + margin
+            if d < thr:
+                hits.append((ni, ns, float(thr - d)))
     return hits
 
 

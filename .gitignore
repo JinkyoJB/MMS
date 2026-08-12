@@ -216,6 +216,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+*.npz
+
 
 /debug_calib
 /debug_calib_artec
@@ -223,3 +225,4 @@ __marimo__/
 /output
 /datasets
 /output_a3d
+docs/figures
