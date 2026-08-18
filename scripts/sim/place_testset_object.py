@@ -34,7 +34,7 @@ import math
 import argparse
 
 # ── 경로 상수 ───────────────────────────────────────────────────────────────
-V2_USD         = "/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd"
+V2_USD         = "/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable/v2.usd"
 # testset USD 위치 (Isaac standalone 트리). --testset 로 오버라이드 가능.
 TESTSET_DIR    = "/home/keti/isaacsim/standalone_examples/play/MMS/testset"
 COMPOSED_DIR   = os.path.join(TESTSET_DIR, "composed")

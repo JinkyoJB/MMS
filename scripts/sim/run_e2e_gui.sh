@@ -15,7 +15,7 @@ cd "$(dirname "$0")/../.."
 
 # 씬 선택
 if [[ "$OBJ" == marble* || "$OBJ" == solid* ]]; then
-  scene=/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd
+  scene=/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable/v2.usd
   objprim=""
 else
   scene=$(ls /home/keti/isaacsim/standalone_examples/play/MMS/testset/composed/*${OBJ}*_on_turntable.usd 2>/dev/null | head -1)

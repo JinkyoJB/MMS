@@ -14,7 +14,7 @@ real 도 동일 높이로 개조 예정 — sim 선행 검증 (2026-07-08, ΔH �
 import os
 import argparse
 
-V2 = "/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd"
+V2 = "/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable/v2.usd"
 ROBOT = "/World/xarm7"
 
 

@@ -23,6 +23,7 @@ Notation: pose 는 backend 가 해석하는 로봇 관절해(q). AT_CURRENT = "�
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, Protocol, runtime_checkable
 
 
@@ -86,6 +87,46 @@ class ScanBackend(Protocol):
         """다음 flip pose 로 물체를 뒤집도록 외부(사람)에 안내. 더 없거나 사용자
         종료면 False. real=prompt, sim=미지원(False)."""
         ...
+
+
+# ── phase_mode 해석 (sim·real·main 공용) ────────────────────────────────────
+# ⚠ 예전에는 세 곳이 **각자** 해석했고 기본값이 전부 달랐다:
+#     main_artec.py = 1,  isaac_scan_session = 2,  ArtecMultiPassScanSessionSettings = 3
+#   지금은 MULTIPASS_SETTINGS.phase_mode 가 항상 있어 드러나지 않지만, 없어지는 순간
+#   **화면에 찍히는 단계와 실제 도는 단계가 갈린다.** 해석은 여기 한 곳에서만 한다.
+PHASE_MODE_ENV = "MMS_SIM_PHASE_MODE"
+PHASE_DESC = {
+    1: "Phase 1 (5면)",
+    2: "Phase 1 → 2 (NBV)",
+    3: "Phase 1 → 2 → 3 (바닥면 flip)",
+}
+
+
+def resolve_phase_mode(multipass_settings, *, allow_env: bool = True,
+                       default: int = 2):
+    """(mode, source) — 우선순위: env(sim 전용) → multipass_settings → default.
+
+    allow_env : 환경변수 override 를 허용할지. **real 은 False** 로 부를 것
+                (실물 동작이 셸 환경에 좌우되면 안 된다). sim 스윕 스크립트용.
+    default   : 설정 자체가 없을 때(개발 중 sim 등). 표시와 실제가 같도록
+                호출자들이 **같은 값**을 쓰는 것이 핵심이다.
+    """
+    if allow_env:
+        env = os.environ.get(PHASE_MODE_ENV)
+        if env is not None:
+            try:
+                return int(env), f"env {PHASE_MODE_ENV}"
+            except ValueError:
+                print(f"[phase] ⚠ {PHASE_MODE_ENV}={env!r} 를 정수로 못 읽음 — 무시")
+    if multipass_settings is not None:
+        v = getattr(multipass_settings, "phase_mode", None)
+        if v is not None:
+            return int(v), "multipass_settings.phase_mode"
+    return int(default), f"기본값({default})"
+
+
+def phase_desc(mode) -> str:
+    return PHASE_DESC.get(int(mode), f"phase_mode={mode}")
 
 
 def run_scan_phases(backend: ScanBackend) -> Any:

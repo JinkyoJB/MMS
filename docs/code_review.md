@@ -225,7 +225,8 @@ GlobalReg → Cleaning → PoissonFusion → Texturize → Export(.obj/.sproj). 
 | `set_servo_angle` speed 단위 | sim 가정 | real 에서 deg/s 확인 |
 | 충돌 world 치수 | 기본값 | 셀 실측으로 `nbv_turntable_*`/keep-out 보정 |
 | 큰/높은 객체 윗면 | el≈90° 도달불가(스캐너-link2) | **z 수축** 또는 Phase 3 류 별도 처리 |
-| open3d (phase2_nbv) | real 런타임 필요 | real env 에 `pip install open3d`(Phase2 NBV mesh/gap 용). isaac=`~/isaacsim/python.sh -m pip install open3d` 완료 |
+| open3d (phase2_nbv) | ✅ 양쪽 설치됨 | `mms-env` 0.19 / `env_isaacsim` 0.19 확인(2026-08-12). Phase2 NBV mesh/gap 용 |
+| opencv 버전 | ⚠ **`<5` 고정 필요** | OpenCV 5.x 는 `cv2.calibrateHandEye` 가 python 바인딩에 없어 hand-eye 가 깨진다(상수만 남아 import 는 통과 → 발견이 늦다). `requirements.txt` 에 `opencv-python>=4.9,<5` 명시 |
 | 후처리 hints/GlobalReg skip | flip 경로용 | NBV 경로의 병합 규칙 점검 |
 
 > 이 표가 곧 "Phase 2 NBV 를 real 에서 켜기 전 할 일" 목록이다. Phase 1·calibration·flip 은

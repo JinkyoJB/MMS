@@ -34,6 +34,16 @@ from utils.collision.geometry import seg_seg_distance, seg_halfspace_min_signed
 # 베이스 링크에 닿는 걸 못 잡으므로 실제 외형으로 키움. (real/sim 공용 — 둘 다 이 캡슐로 검사.)
 DEFAULT_LINK_RADII = np.array([0.060, 0.060, 0.055, 0.050, 0.050, 0.050, 0.095])
 
+# 툴(EE 부착물) 캡슐 분할 — (축시작 m, 축끝 m, 반경 m), 축 = 플랜지→T_EC tip 방향.
+# 단일 캡슐로 덮으면 **플랜지 쪽은 과대, 끝단은 과소**가 동시에 발생한다.
+# v3(툴체인저 3단 + Spider) USD 실측 프로파일:
+#     축 -4~ 65mm : 반경 ≤ 57mm (브래킷39·마스터57·툴플레이트43)
+#     축 65~140mm : 반경 ≤106mm (어댑터106)
+#     축140~265mm : 반경 ≤ 99mm (Spider 본체)
+# 구값(0~174mm, r=95) 은 플랜지 쪽을 38mm 과대평가해 link5 와 상시 자가충돌 오탐을
+# 냈고(실측 여유 38mm), 동시에 265mm 까지 뻗는 Spider 본체를 174mm 에서 잘랐다.
+TOOL_SEGMENTS_V3 = ((0.0, 0.065, 0.057), (0.065, 0.265, 0.106))
+
 
 @dataclass
 class Capsule:
@@ -73,7 +83,8 @@ def capsules_from_origins(origins: Sequence[np.ndarray],
 
 
 def capsules_from_joints(q, link_radii=DEFAULT_LINK_RADII,
-                         T_EC=None, scanner_len: float = 0.13
+                         T_EC=None, scanner_len: float = 0.13,
+                         tool_segments=None
                          ) -> List[Tuple[str, Capsule]]:
     """
     관절각(rad,7) → **공칭 xArm7 해석 FK** 로 충돌 캡슐 (base m).
@@ -84,6 +95,9 @@ def capsules_from_joints(q, link_radii=DEFAULT_LINK_RADII,
 
     T_EC : (4,4, m) 손-눈(E→C). 주면 스캐너 끝 = 플랜지·T_EC; 없으면 플랜지 -Z 로
            scanner_len 만큼 연장.
+    tool_segments : ((t0,t1,r), …) 주면 스캐너 단일 캡슐 대신 **축방향 분할 캡슐**을
+           만든다(축 = 플랜지→T_EC tip). 툴체인저처럼 굵기가 급변하는 구성에서
+           단일 캡슐의 과대/과소를 없앤다. 예) TOOL_SEGMENTS_V3.
     """
     from utils.robot.xarm7_kinematics import fk_link_origins, fk_T
     q = np.asarray(q, float)
@@ -100,6 +114,18 @@ def capsules_from_joints(q, link_radii=DEFAULT_LINK_RADII,
             tip = flange + v / L * scanner_len
     else:
         tip = flange - T[:3, 2] * scanner_len    # 플랜지 -Z 로 연장
+    if tool_segments:
+        # 링크 캡슐(link1..link6) + 툴 분할 캡슐
+        caps = capsules_from_origins(list(o[1:8]), link_radii[:6],
+                                     ["link1", "link2", "link3", "link4",
+                                      "link5", "link6"])
+        v = tip - flange
+        L = float(np.linalg.norm(v))
+        u = v / L if L > 1e-9 else -T[:3, 2]      # 축 단위벡터
+        for k, (t0, t1, r) in enumerate(tool_segments):
+            caps.append((f"tool{k}", Capsule(flange + u * float(t0),
+                                             flange + u * float(t1), float(r))))
+        return caps
     origins = list(o[1:8]) + [tip]               # o1..o7(=flange) + 스캐너 끝 = 8점
     names = ["link1", "link2", "link3", "link4", "link5", "link6", "scanner"]
     return capsules_from_origins(origins, link_radii, names)
@@ -194,7 +220,7 @@ class CollisionWorld:
 # ── self-collision + 자세별 충돌 + collision-aware IK (real/sim 공용) ──────────
 def self_collision(capsules: List[Tuple[str, Capsule]], scale: float = 0.7,
                    gap: int = 3, exclude_last: bool = True, margin: float = 0.0,
-                   scanner_scale: float = 0.80):
+                   scanner_scale: float = 0.80, n_tool: int = 1):
     """
     로봇 캡슐들 사이 self-collision. 접힌 팔의 오탐 방지를 위해:
       - scale<1 : 캡슐 반경 축소(캡슐은 링크 두께를 과대근사)
@@ -209,7 +235,9 @@ def self_collision(capsules: List[Tuple[str, Capsule]], scale: float = 0.7,
     """
     caps = list(capsules)
     has_scanner = not exclude_last
-    n_links = len(caps) - 1                      # 스캐너 제외한 링크 수
+    # 툴 캡슐은 뒤에서 n_tool 개(분할 캡슐이면 2개 이상)
+    n_tool = max(1, int(n_tool))
+    n_links = len(caps) - n_tool                 # 툴 제외한 링크 수
     hits = []
     for i in range(n_links):                     # 링크쌍: 기존 gap 규칙
         ni, ci = caps[i]
@@ -219,20 +247,20 @@ def self_collision(capsules: List[Tuple[str, Capsule]], scale: float = 0.7,
             thr = (ci.r + cj.r) * scale + margin
             if d < thr:
                 hits.append((ni, nj, float(thr - d)))
-    if has_scanner:                              # 스캐너 vs link1..5 (link6 제외)
-        ns, cs = caps[-1]
-        for i in range(n_links - 1):
-            ni, ci = caps[i]
-            d = seg_seg_distance(cs.p0, cs.p1, ci.p0, ci.p1)
-            thr = (cs.r + ci.r) * scanner_scale + margin
-            if d < thr:
-                hits.append((ni, ns, float(thr - d)))
+    if has_scanner:                              # 툴 vs link1..5 (link6 제외)
+        for ns, cs in caps[n_links:]:
+            for i in range(n_links - 1):
+                ni, ci = caps[i]
+                d = seg_seg_distance(cs.p0, cs.p1, ci.p0, ci.p1)
+                thr = (cs.r + ci.r) * scanner_scale + margin
+                if d < thr:
+                    hits.append((ni, ns, float(thr - d)))
     return hits
 
 
 def pose_collision(world: CollisionWorld, q, T_EC=None, link_radii=DEFAULT_LINK_RADII,
                    margin: float = 0.0, self_scale: float = 0.7, ignore=(),
-                   scanner_self: bool = True
+                   scanner_self: bool = True, tool_segments=None
                    ) -> Tuple[bool, str]:
     """
     관절각 q → **공칭 해석 FK 캡슐**(capsules_from_joints, base m) → 월드 + self 충돌 검사.
@@ -243,14 +271,15 @@ def pose_collision(world: CollisionWorld, q, T_EC=None, link_radii=DEFAULT_LINK_
 
     Returns (collide, reason).  reason = "rlink↔obstacle" 또는 "self:li↔lj".
     """
-    caps = capsules_from_joints(q, link_radii, T_EC)
+    caps = capsules_from_joints(q, link_radii, T_EC, tool_segments=tool_segments)
     res = world.check(caps, margin=margin, ignore=ignore)
     if res.collide:
         c = res.contacts[0]
         return True, f"{c[0]}↔{c[1]}"
     if self_scale > 0:
         hits = self_collision(caps, scale=self_scale, margin=margin,
-                              exclude_last=not scanner_self)
+                              exclude_last=not scanner_self,
+                              n_tool=len(tool_segments) if tool_segments else 1)
         if hits:
             return True, f"self:{hits[0][0]}↔{hits[0][1]}"
     return False, ""

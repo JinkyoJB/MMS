@@ -1,13 +1,52 @@
-numpy>=2.0
-genicam>=1.5.0
-harvesters>=1.4.0
-# 필요한 경우에만, 그리고 pip에서 잘 설치되는지 확인 후 추가
-# opencv-python>=4.9
+# MMS — Multi Modal 3D Scanning System
+#
+#   conda create -n mms-env python=3.11
+#   conda activate mms-env
+#   pip install -r requirements.txt
+#
+# ⚠ Isaac Sim(sim 백엔드)은 이 env 가 아니라 Isaac 배포판 python 을 쓴다:
+#     ~/isaacsim/python.sh main_artec.py
+#   (isaacsim / omni / pxr 는 배포판에 포함. 부족한 건
+#    `~/isaacsim/python.sh -m pip install open3d` 처럼 그쪽 python 에 설치)
 
-# RGBD 카메라 사용시
-# pyorbbecsdk2==2.0.18
+# ── 코어 (real/sim·스크립트 공통) ──────────────────────────────────────
+numpy>=2.0
+scipy>=1.11
+open3d>=0.19          # numpy 2.x 호환은 0.19+ (0.18 이하는 numpy<2 요구)
+PyYAML>=6.0
 Pillow>=10.0
-opencv-python>=4.9.0
-open3d>=0.15.0
-PyYAML
-scipy
+
+# ── 비전 / 캘리브레이션 ────────────────────────────────────────────────
+# ⚠ 상한 <5 필수: OpenCV 5.x python 바인딩에는 cv2.calibrateHandEye /
+#   calibrateRobotWorldHandEye 가 없어서 hand-eye 캘리브(utils/calibration/
+#   hand_eye_calibrator.py)가 AttributeError 로 깨진다. 상수(CALIB_HAND_EYE_*)만 남아 있어
+#   import 시점엔 멀쩡해 보이므로 주의.
+# ⓘ cv2.aruco(ChArUco 검출)는 OpenCV 4.7+ 부터 main 모듈에 포함 → contrib 불필요.
+opencv-python>=4.9,<5
+
+# ── 시각화 (rim 클릭 UI, 검증 플롯) ────────────────────────────────────
+matplotlib>=3.7
+
+# ── 로봇: xArm7 — real 백엔드 전용 ─────────────────────────────────────
+# utils/robot/xarm_interface.py (`from xarm.wrapper import XArmAPI`).
+# sim(isaac)만 돌릴 거면 없어도 되지만, 모션 명령은 이 SDK 로 나간다.
+# (IK/FK 는 자체 해석 운동학 utils/robot/xarm7_kinematics.py — SDK IK 미사용)
+xArm-Python-SDK>=1.15
+
+# ── 센서: PhoXi (GenICam/GenTL) — mms_phoxi 사용 시 ────────────────────
+harvesters>=1.4.0
+genicam>=1.5.0
+
+# ── pip 로 설치 불가 — 수동 설치가 필요한 의존성 ───────────────────────
+# 1) Artec Spider SDK python 바인딩 (mms_artec/sensor/artec_*.py)
+#    artec_sdk_py, artec_base_py, artec_capturing_py, artec_scanning_py,
+#    artec_algorithm_py, artec_project_py
+#    → SDK 를 직접 빌드해서 PYTHONPATH 에 올린다. docs/artec_SDK/artec0_build_guide.md
+#    없으면 main_artec.py 가 "scan settings import 불가" 로 real 스캔만 비활성(sim 은 정상).
+# 2) Orbbec Femto Bolt (mms_orbbec/sensor/orbbec_client.py) — 벤더 wheel
+#    pip install pyorbbecsdk2==2.0.18   (또는 Orbbec 배포 wheel)
+# 3) 턴테이블 Ezi-SERVO (FAS_EziMOTIONPlusE*) — 벤더 DLL 래퍼, Windows 전용
+# 4) 정합 벤치마크 scripts/artec/reg_benchmark/{run_geotransformer,run_predator}.py
+#    → torch/CUDA 확장 빌드가 필요하므로 **별도 env(reg-dl)** 권장.
+#      torch, easydict + third_party/{GeoTransformer,PREDATOR} 소스
+#      (third_party/build_geot.bat 참고). mms-env 에는 설치하지 않는다.

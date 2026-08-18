@@ -16,22 +16,27 @@ from typing import Optional
 
 import numpy as np
 
-# ── 씬/프리mp 경로 (v2.usd 기준) ──────────────────────────────────────────────
-DEFAULT_USD_PATH = "/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd"
+# ── 씬/프림 경로 (v3_scene.usd — 260811 신규 레이아웃 기준) ───────────────────
+# v3_scene.usd 는 scripts/sim/build_scene_v3.py 가 생성한다(형상 src = v3.usd).
+# 구 v2.usd 경로는 git 이력 참고. 씬은 MMS_SIM_USD 로 override 가능.
+DEFAULT_USD_PATH = ("/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/"
+                    "frame_xarm7_spider_turntable_v2/v3_scene.usd")
 ROBOT_PRIM       = "/World/xarm7"
 JOINTS_SCOPE     = "/World/xarm7/joints"
 EE_LINK_NAME     = "link7"
 EE_LINK_PATH     = f"{ROBOT_PRIM}/{EE_LINK_NAME}"
-CAMERA_PRIM      = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
+# 스캐너가 툴체인저(브래킷→마스터→툴플레이트→어댑터) 뒤로 옮겨져 경로가 깊어졌다.
+CAMERA_PRIM      = "/World/xarm7/link7/tool/spider/Camera"
 # 턴테이블 구조:
-#   DISC_PRIM   — RevoluteJoint(body1, axis Z)로 도는 원판. 객체가 이 위에 놓임.
-#   FRAME_PRIM  — 모터 하우징 프레임(고정, RevoluteJoint body0).
+#   DISC_PRIM   — 도는 원판(kinematic). 객체가 이 위에 놓이고 회전중심을 여기서 읽는다.
+#                 ⚠ RevoluteJoint 는 쓰지 않는다 — isaac_turntable.py 헤더 참고.
+#   FRAME_PRIM  — 고정 베이스(모터 하우징 쪽).
 #   OBJECT_PRIM — 스캔 대상물(원판과 함께 회전).
-DISC_PRIM        = "/World/ScanTarget/turntable_demo/turntable/turntable"
-FRAME_PRIM       = "/World/ScanTarget/turntable_demo/turntable_frame/turntable_frame"
-OBJECT_PRIM      = os.environ.get(   # 스캔 대상(rider). testset 합성 씬은
-    "MMS_SIM_OBJECT_PRIM",           # /World/ScanTarget/TestObject 로 override.
-    "/World/ScanTarget/Solid_Marble")
+DISC_PRIM        = "/World/frame/turntable_disc"
+FRAME_PRIM       = "/World/frame/turntable_base"
+OBJECT_PRIM      = os.environ.get(   # 스캔 대상(rider). build_scene_v3.py --object 가
+    "MMS_SIM_OBJECT_PRIM",           # /World/ScanTarget/TestObject 로 올려둔다.
+    "/World/ScanTarget/TestObject")
 
 # Artec Space Spider 광학 (MMS_ext.py 와 동일)
 SPIDER_HFOV_DEG         = 30.0

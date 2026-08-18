@@ -1914,29 +1914,50 @@ class ArtecMultiPassScanSession:
                 return None
         return q
 
-    def _axis_view_q(self, look_target, el_deg, az_deg, standoff, q_seed):
-        """턴테이블축(look_target)을 (el,az,standoff)에서 보는 카메라 → T_EB → 해석 IK q.
-        OpenCV 규약(`compute_camera_pose_from_normal`, real Artec hand-eye 와 일관). 충돌검사 X
-        (공용 plan_nbv_elevation_pose 의 swept_free_fn 가 담당). 반환 q 또는 None."""
+    def _axis_view_q(self, look_target, el_deg, az_deg, standoff, q_seed, rolls=None):
+        """턴테이블축(look_target, **base**)을 (el,az,standoff)에서 보는 카메라 → 해석 IK q.
+
+        ★ **sim·real 공용** `utils/robot/view_pose.solve_view_q` 위임(2026-08).
+          예전에는 sim 만 roll 6방향·IK 시드 8개를 쓰고 real 은 각각 1개였다. 같은
+          solver(`xarm7_kinematics.ik`)를 쓰면서도 **sim 에서 검증한 자세가 real 에서
+          '도달 불가'로 버려지는** 상태였다(sim 검증이 실물을 보장하지 못함).
+
+          - roll 은 자유 DOF — 스캐너를 광축 둘레로 돌려도 같은 면을 본다.
+            실측: 고정하면 el30 이 0/8, 풀면 5/8(시드를 12개로 늘려도 고정이면 0/8).
+          - DLS IK 는 국소해라 시드 하나면 도달 가능한 자세를 놓친다(0/8 ↔ 8/8).
+          - roll=0·주어진 시드를 **먼저** 쓰므로 기존에 풀리던 해는 그대로다.
+
+          카메라 규약은 real 그대로 **OpenCV**(`T_EC_artec` 와 짝) — 규약은 데이터로만
+          넘기고 캘리브레이션은 건드리지 않는다. USD 규약과는 카메라 로컬 Y축 180°
+          회전 하나 차이임을 실측 확인(모든 el/az 편차 1.8e-12).
+
+        충돌검사는 하지 않는다(공용 plan_nbv_elevation_pose 의 swept_free_fn 담당).
+        """
         from utils.robot import xarm7_kinematics as _kin
-        from utils.nbv.manual_picker import compute_camera_pose_from_normal
-        el, az = math.radians(el_deg), math.radians(az_deg)
-        eye = np.asarray(look_target, float) + standoff * np.array(
-            [math.cos(el)*math.cos(az), math.cos(el)*math.sin(az), math.sin(el)])
-        T_CB = compute_camera_pose_from_normal(            # 카메라→B (OpenCV, base)
-            surface_point=np.asarray(look_target, float),
-            normal=eye - np.asarray(look_target, float), distance_m=standoff)
-        T_EB = T_CB @ self._T_EC
-        pose6d = np.concatenate([T_EB[:3, 3]*1000.0, _kin.R_to_euler_xyz(T_EB[:3, :3])])
-        q, ok = _kin.ik(pose6d, seed=q_seed)
-        return q if ok else None
+        from utils.robot import view_pose as _vp
+        rolls = rolls or getattr(self.s, "view_rolls_deg", None) or _vp.DEFAULT_ROLLS_DEG
+        q, _roll, _eye = _vp.solve_view_q(
+            _kin, look_target, el_deg, az_deg, standoff, q_seed, self._T_EC,
+            T_WB=None,                       # look_target 이 이미 base 프레임
+            convention=_vp.CAM_OPENCV, rolls_deg=rolls)
+        return q
 
     def _plan_nbv_pose(self, q_cur, gaps, mesh):
-        """★ 공용 `phase2_nbv.plan_nbv_elevation_pose` 호출(sim 과 동일 알고리즘).
-        real 은 OpenCV look-at·base 프레임만 주입. 반환 q(그 자세에서 streaming 전회전) or None."""
-        from utils.nbv import phase2_nbv as _p2
+        """Phase 2 관측자세 — 판단은 **sim·real 공용** `utils/nbv/nbv_planner` 가 한다.
+
+        real 이 주입하는 것은 두 가지뿐이다:
+          · 자세 생성 = OpenCV 규약(+Z 광축) + base 프레임 타깃 (`_axis_view_q`)
+          · 충돌 판정 = `swept_pose_collision`
+
+        ★ 2026-08 이전에는 이 함수가 공용 알고리즘을 **얇게만** 감싸서, sim 에만 있던
+          판단들이 real 에 없었다 — 특히 `visited` 를 안 넘겨 **같은 자세를 무한 반복**
+          했다(az 를 '관절이동 최소'로 고르므로 직전 자세 비용이 0). 아랫면 gap 제외·
+          실패 원인 진단도 없었다. 이제 sim 과 같은 코드를 쓴다.
+        """
         from utils.control.theta_planner import DEFAULT_JOINT_WEIGHTS
         from utils.collision.robot_collision import swept_pose_collision
+        from utils.nbv.nbv_planner import NbvPlanner
+
         tt = getattr(self.mms, "turntable_transform", None)
         T_BF0 = getattr(tt, "T_BF0", None) if tt is not None else None
         if T_BF0 is None:
@@ -1946,25 +1967,26 @@ class ArtecMultiPassScanSession:
         look_target = np.array([T_BF0[0, 3], T_BF0[1, 3], float(verts[:, 2].mean())])
         standoff = self.s.nbv_distance_mm / 1000.0
 
-        def pose_q(el, az):
-            return self._axis_view_q(look_target, el, az, standoff, q_cur)
+        if getattr(self, "_nbv", None) is None:
+            # visited 를 pass 사이에 유지해야 하므로 세션에 1회만 만든다.
+            self._nbv = NbvPlanner(joint_weights=DEFAULT_JOINT_WEIGHTS,
+                                   el_floor_deg=self.s.nbv_el_floor_deg,
+                                   log=lambda m: print(f"  [nbv] {m}"))
+
+        def solve_pose(el, az, rolls):
+            q = self._axis_view_q(look_target, el, az, standoff, q_cur, rolls=rolls)
+            return q, None
 
         def swept(q0, q1):
             world = getattr(self, "_collision_world", None)
             if world is None:
-                return True
-            col, _why, _s = swept_pose_collision(
+                return True, ""
+            col, why, _s = swept_pose_collision(
                 world, q0, q1, T_EC=self._T_EC, n_steps=self.s.nbv_swept_steps)
-            return not col
+            return (not col), (why or "")
 
-        res = _p2.plan_nbv_elevation_pose(
-            gaps, q_cur, pose_q, swept, joint_weights=DEFAULT_JOINT_WEIGHTS,
-            el_floor_deg=self.s.nbv_el_floor_deg)
-        if res is None:
-            return None
-        q, el, az = res
-        print(f"  [nbv] 관측자세 el={el:.0f}° az={az:.0f}° — streaming 전회전")
-        return q
+        res = self._nbv.plan(gaps, q_cur, solve_pose, swept)
+        return None if res is None else res[0]
 
     def _rank_nbv_candidates(self, cands, q_cur):
         """frontier 후보 → (cand, T_CB_des, q, cost) feasible만, cost 오름차순.

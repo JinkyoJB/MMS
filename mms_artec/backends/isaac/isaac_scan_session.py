@@ -31,9 +31,15 @@ from pxr import Usd, UsdGeom, Gf
 # ── 공용 lib (real 과 동일) ─────────────────────────────────────────────────────
 from utils.nbv import phase2_nbv as p2
 from utils.nbv import phase1_viewpoint as p1
-from utils.nbv.scan_phase_controller import run_scan_phases
+from utils.nbv.scan_phase_controller import (
+    run_scan_phases, resolve_phase_mode)
+from utils.nbv.nbv_planner import NbvPlanner as _NbvPlanner
 from utils.collision.robot_collision import (
     CollisionWorld, pose_collision, DEFAULT_LINK_RADII, capsules_from_joints)
+from utils.collision import mesh_self_collision as _mesh_sc
+from utils.collision import env_collision as _env_col
+from utils.robot import view_pose as _vp
+from mms_artec.utils.calibration import handeye_error as _he
 from utils.robot import xarm7_kinematics as kin
 from utils.control.theta_planner import DEFAULT_JOINT_WEIGHTS
 # look-at = **USD 규약(-Z 광축)** — sim 카메라(USD)와 일치(하니스와 동일). 자기완결(numpy).
@@ -46,8 +52,14 @@ def _envf(k, d): return float(os.environ.get(k, d))
 def _envs(k, d): return os.environ.get(k, d)
 
 OBJECT_SOURCE   = _envs("MMS_SIM_OBJECT", "usd")     # "usd"(ScanTarget) | "spawn"(테스트 형상)
+# ⚠ 프림 경로는 isaac_world 가 단일 진실 — 여기서 다시 정의하지 않는다.
+#   (v3_scene 전환 때 여기 사본이 v2 경로로 남아 TURNTABLE_MESH 가 null prim 이었다)
+from mms_artec.backends.isaac.isaac_world import (
+    OBJECT_PRIM as _WORLD_OBJECT_PRIM, DISC_PRIM as _WORLD_DISC_PRIM,
+    FRAME_PRIM as _WORLD_FRAME_PRIM, CAMERA_PRIM as _WORLD_CAMERA_PRIM)
+
 OBJECT_PRIM     = _envs("MMS_SIM_OBJECT_PRIM",        # OBJECT_SOURCE="usd" 스캔 대상
-                        "/World/ScanTarget/Solid_Marble")
+                        _WORLD_OBJECT_PRIM)
 SPAWN_SHAPE     = _envs("MMS_SIM_SHAPE", "box")      # spawn: box|cylinder|sphere|cone|lshape|stepped
 SPAWN_PRIM      = "/World/SimScanObject"
 
@@ -58,8 +70,52 @@ DRIVE_STEPS     = int(_envf("MMS_SIM_DRIVE_STEPS", 30))   # 관절 보간 스텝
 N_THETA         = int(_envf("MMS_SIM_NTHETA", 36))     # Phase1/3 전회전 프레임수(낮추면 빠름)
 N_THETA_P2      = int(_envf("MMS_SIM_NTHETA_P2", 24))   # Phase2 보강 전회전 프레임수(빠르게)
 CAPTURE_SETTLE  = int(_envf("MMS_SIM_CAPTURE_SETTLE", 2))  # 캡처 전 정지 렌더 step(정지상태라 2면 충분)
-VIEW_EL_DEG     = _envf("MMS_SIM_VIEW_EL", 30.0)     # Phase1 측면 관측 elevation
+# Phase1 측면 관측 elevation.
+# ★ 정정(2026-08-13) — 한때 "v3 레이아웃은 el≤30 도달 불가" 로 판단해 50 으로 올렸으나,
+#   **하드웨어 한계가 아니라 `_view_q` 가 광축(roll)을 하나로 고정한 탓**이었다.
+#   roll 을 풀면 같은 위치에서 el30 5/8·el40 7/8 az 가 열리고 IK 실패는 0 건이다.
+#   (시드만 12개로 늘린 경우는 여전히 0/8 → 원인은 시드가 아니라 roll 이다.)
+#   낮은 el 이 없으면 측면·하부가 안 찍혀 gap 이 안 줄므로 원래 값으로 되돌린다.
+#   측정: scripts/sim/eval_turntable_layout.py --diag 0.365 --rolls 0   (대조군)
+#         scripts/sim/eval_turntable_layout.py --diag 0.365             (roll 자유)
+VIEW_EL_DEG     = _envf("MMS_SIM_VIEW_EL", 30.0)
+# Phase1 플래너가 고를 수 있는 elevation 후보(p1.DEFAULT_ELS=(20,30,40,50)).
+# el 20 은 실측에서도 도달 자세가 없어 제외한다.
+P1_ELS = tuple(float(x) for x in
+               os.environ.get("MMS_SIM_P1_ELS", "30,40,50,60,70").split(","))
 VIEW_AZIS_DEG   = [0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 180.0]
+# 광축(roll) 둘레 회전 후보 — **크기 순**. 0 을 먼저 쓰므로 기존에 풀리던 자세의 해는
+# 그대로고, IK 가 실패할 때만 최소 각도부터 넓힌다. `_view_q` 주석 참고.
+#   실측(v3, X=0.365): roll 고정이면 시드를 12개로 늘려도 el30·40 이 0/8.
+#                      roll 을 풀면 el30 5/8, el40 7/8, IK 실패 0건.
+#   ⚠ 실물은 스캐너 자체 tracking(master relocalization)에 의존한다. 패스 **내부**는
+#     roll 이 고정이라 무관하지만, 패스 사이 자세 점프의 한 성분으로 들어간다.
+#     실물에서 tracking-lost 가 늘면 MMS_SIM_VIEW_ROLLS=0 으로 되돌릴 것.
+VIEW_ROLLS_DEG = tuple(float(x) for x in
+                       os.environ.get("MMS_SIM_VIEW_ROLLS",
+                                      "0,-45,45,-90,90,180").split(","))
+IK_SEED_TRIES   = int(os.environ.get("MMS_SIM_IK_SEEDS", "7"))
+# Phase2 에서 roll 을 gap 방향에 맞춰 고를지(1) 기본 순서(roll=0 우선)를 쓸지(0).
+# **대조군 스위치** — 효과를 재려면 이것만 끄고 같은 조건으로 비교한다.
+NBV_ROLL_ALIGN  = os.environ.get("MMS_SIM_NBV_ROLL_ALIGN", "1") == "1"
+# 자가충돌 허용 최소 여유(m) — 실제 메시 최소거리 기준. 캡슐 시절의 암묵 임계보다
+# 훨씬 작아 보이지만, 캡슐은 형상을 과대하게 덮어 임계가 부풀려져 있었을 뿐이다.
+SELF_CLEAR_M    = _envf("MMS_SIM_SELF_CLEAR", 0.02)
+# ── 패스 간 정합 (real 과 같은 구조) ─────────────────────────────────────────
+# real 은 새 패스를 master 에 **open3d ICP** 로 붙인다
+# (`artec_multipass_scan_session._hint_icp_refine`, colored ICP + point-to-plane fallback,
+#  init = 로봇 기구학). sim 은 GT θ 로 직접 누적만 해서 이 단계가 **없었다**.
+# → hand-eye 오차를 주입하면 sim 은 흡수 수단이 없어 실물보다 훨씬 심하게 무너진다
+#   (실측: 3mm/0.5° 에서 boundary 967→2178mm, gap 18→72). 즉 지금의 sim 은 실물
+#   강건성을 검증할 수 없다. 같은 정합 단계를 sim 에도 둔다.
+ICP_PASS_ENABLE = _envs("MMS_SIM_ICP_PASS", "1") == "1"
+# coarse→fine 다단. 초기 어긋남이 max_corr 보다 크면 ICP 가 대응점을 못 찾으므로
+# 처음엔 넉넉하게 잡고 좁혀 간다.
+ICP_SCALES_M    = (0.020, 0.008, 0.004)
+ICP_MIN_PTS     = 300
+# 셀 구조물(벽·상판·저울·툴스탠드) 최소 여유(m). 기존 장애물은 턴테이블·프레임뿐이라
+# **칠 수 있는데 안전하다고 판정**하고 있었다(미탐). docs/4_collision.md P1.
+ENV_CLEAR_M     = _envf("MMS_SIM_ENV_CLEAR", 0.025)
 VOXEL_M         = 0.002
 MAX_INCIDENCE_DEG = _envf("MMS_SIM_MAXINC", 50.0)    # grazing 임계(입사각>이값 → 미캡처=gap)
 APPLY_INCIDENCE = _envs("MMS_SIM_INCIDENCE", "1") == "1"
@@ -83,10 +139,10 @@ KEEPOUT_HEIGHT_M = 0.12
 # 스캐너 자가충돌은 **공용 pose_collision(scanner_self=True)** 이 처리(스캐너 캡슐 반경=
 # DEFAULT_LINK_RADII[6]=0.095, real/sim 공용). sim 전용 bbox 체크는 폐기.
 LINK_RADII = DEFAULT_LINK_RADII
-SCANNER_PRIM = "/World/xarm7/link7/Artec_Space_Spider_mm"
+SCANNER_PRIM = _WORLD_CAMERA_PRIM.rsplit("/", 1)[0]      # Camera 의 부모 = 스캐너 프레임
 LINK7_PRIM   = "/World/xarm7/link7"
-TURNTABLE_MESH = "/World/ScanTarget/turntable_demo/turntable/turntable"   # sim 턴테이블(축 산출)
-FRAME_PRIM     = "/World/ScanTarget/turntable_demo/turntable_frame/turntable_frame"  # 모터 프레임(충돌)
+TURNTABLE_MESH = _WORLD_DISC_PRIM      # sim 턴테이블 원판(축 산출)
+FRAME_PRIM     = _WORLD_FRAME_PRIM     # 모터 프레임(충돌)
 FRAME_ENABLE   = _envs("MMS_SIM_FRAME", "1") == "1"   # 프레임을 충돌 장애물로(이동 중 회피)
 
 
@@ -144,7 +200,29 @@ class IsaacScanSession:
         self.scanner = mms.sensor                   # IsaacArtecScanner
         # 트랜스폼
         self.T_WB = self._base_world_T()            # base→world
-        self.T_EC = self._T_EC_gt()                 # E→C (sim GT, look_at 과 일관)
+        # ★ T_EC_true = 실제 카메라 위치(USD GT).  T_EC = 파이프라인이 **믿는** 값.
+        #   기본은 둘이 같다. MMS_SIM_TEC_ERR_MM/DEG 로 캘리브 오차를 주입하면 갈라진다
+        #   — 실물은 캘리브 오차를 안고 계획·재구성하므로, 그 조건을 sim 에서 재현한다.
+        self.T_EC_true = self._T_EC_gt()            # E→C (sim GT)
+        self.T_EC = _he.believed_T_EC(self.T_EC_true)
+        self._seed_alts = None                      # IK 대안 시드 (_ik_seeds 지연생성)
+        # Phase2 자세 선택기(공용). visited 를 세션 동안 들고 있어 같은 자세를
+        # 반복 선택하지 않는다 — az 를 '관절이동 최소'로 고르므로 직전 자세의
+        # 이동비용이 0 이라 넘기지 않으면 무한 반복한다.
+        self._nbv = _NbvPlanner(joint_weights=DEFAULT_JOINT_WEIGHTS,
+                                el_floor_deg=VIEW_EL_DEG,
+                                view_azis_deg=VIEW_AZIS_DEG,
+                                log=lambda m: print(f"[isaac_scan] {m}"))
+        self._last_roll = None                      # _view_q 가 채택한 roll(로그용)
+        # 자가충돌 = 실제 메시 판정(캐시 없으면 None → 캡슐 폴백)
+        self._mesh_self = _mesh_sc.get_default(margin_m=SELF_CLEAR_M)
+        if self._mesh_self is not None:
+            print(f"[isaac_scan] 자가충돌 = 실제 메시 판정 (여유 {SELF_CLEAR_M*1000:.0f}mm)")
+        # 셀 구조물(벽·상판·저울·툴스탠드) — 기존 world 는 턴테이블/프레임만 있었다.
+        self._env_mesh = _env_col.get_default(margin_m=ENV_CLEAR_M)
+        if self._env_mesh is not None:
+            print(f"[isaac_scan] 셀 구조물 충돌 = 실제 메시 {len(self._env_mesh.env)}점 "
+                  f"(여유 {ENV_CLEAR_M*1000:.0f}mm)")
         # ★ 턴테이블 축 = **sim USD** 에서. crop/누적은 **world** 에서(base 회전·박스높이 무관).
         mn, mx = self._aabb_world(TURNTABLE_MESH)
         self.axis_w = np.array([(mn[0]+mx[0])/2.0, (mn[1]+mx[1])/2.0, mx[2]])  # disc 표면중심(world)
@@ -197,8 +275,9 @@ class IsaacScanSession:
             prim = SPAWN_PRIM
         else:
             prim = OBJECT_PRIM
-            UsdGeom.Imageable(self.stage.GetPrimAtPath(
-                "/World/ScanTarget/Solid_Marble")).MakeVisible()
+            _o = self.stage.GetPrimAtPath(prim)
+            if _o.IsValid():
+                UsdGeom.Imageable(_o).MakeVisible()
         mn, mx = self._aabb_world(prim)                       # 객체 world AABB
         self.obj_center_w = (mn + mx) / 2.0                   # 객체 중심(world)
         self.obj_top_w = np.array([self.obj_center_w[0], self.obj_center_w[1], mx[2]])
@@ -213,8 +292,7 @@ class IsaacScanSession:
 
     def _spawn_object(self):
         # 턴테이블 disc 중심/표면(world)
-        mn, mx = self._aabb_world(
-            "/World/ScanTarget/turntable_demo/turntable/turntable")
+        mn, mx = self._aabb_world(TURNTABLE_MESH)
         cx, cy, ztop = (mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, mx[2]
         w, d, h = {"box": (.06, .04, .07), "cylinder": (.06, .06, .07),
                    "sphere": (.06, .06, .06), "cone": (.06, .06, .08),
@@ -244,8 +322,8 @@ class IsaacScanSession:
             cube(gp+"A", (0, 0, -0.2*h), (w, d, 0.6*h)); cube(gp+"B", (0, 0, 0.3*h), (0.5*w, 0.5*d, 0.4*h))
         else:
             cube(gp, (0, 0, 0), (w, d, h))
-        # 마블 숨김(테스트 객체만 스캔)
-        mb = self.stage.GetPrimAtPath("/World/ScanTarget/Solid_Marble")
+        # USD 스캔 대상 숨김(spawn 형상만 스캔)
+        mb = self.stage.GetPrimAtPath(OBJECT_PRIM)
         if mb.IsValid():
             UsdGeom.Imageable(mb).MakeInvisible()
 
@@ -259,6 +337,11 @@ class IsaacScanSession:
         """capture_points_base → **world** 변환 → 객체 crop(world bbox) + (옵션)입사각 필터.
         ★ world 에서 crop: base 회전·박스높이 무관. 반환 = world 점군."""
         pc_b = self.scanner.capture_points_base(self.robot, self.mms._T_EC, settle=CAPTURE_SETTLE)
+        # sim 카메라는 GT 포즈로 점군을 준다. 실물은 카메라 프레임 점군을 **캘리브값**으로
+        # base 에 올리므로 오차가 점군에 실린다 — 주입이 켜져 있으면 그 경로를 재현한다.
+        if pc_b is not None and len(pc_b) and self.T_EC is not self.T_EC_true:
+            q_now = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+            pc_b = _he.apply_to_points(pc_b, q_now, self.T_EC_true, self.T_EC, kin)
         if pc_b is None or len(pc_b) == 0:
             if log: print("    [capture] raw 0 — 카메라 점군 없음")
             return np.zeros((0, 3))
@@ -313,11 +396,26 @@ class IsaacScanSession:
         return col
 
     def _pose_collision_reason(self, world, q):
-        """''=충돌없음. 아니면 사유(scene/self). self = 스캐너 포함 자가충돌."""
+        """''=충돌없음. 아니면 사유(scene/self). self = 스캐너 포함 자가충돌.
+
+        ★ 자가충돌은 **실제 메시**로 판정한다(캐시 있을 때). 캡슐 근사는 이 팔에서
+          오탐이 심해, NBV 후보 32자세를 IK 로 전부 풀고도 전부 기각시켰다
+          (2026-08-13: `IK실패 0, swept충돌 32, self×32`). 근거·수치는
+          `utils/collision/mesh_self_collision` 및 docs/hw_layout.md §5.
+          장애물(scene) 충돌은 캡슐 그대로 — 오탐 근거가 확인된 쪽은 self 뿐이다.
+        """
         c1, why = pose_collision(world, q, T_EC=self.T_EC, link_radii=LINK_RADII)
-        if c1:
-            return ("self" if "self:" in why else "scene")
-        return ""
+        is_self = bool(c1) and "self:" in why
+        if c1 and not is_self:
+            return "scene"
+        if self._env_mesh is not None:
+            hit, who = self._env_mesh.collides(q)
+            if hit:
+                return f"scene({who})"
+        if self._mesh_self is not None:
+            hit, _who = self._mesh_self.collides(q)
+            return "self" if hit else ""
+        return "self" if is_self else ""
 
     def _swept_free(self, world, q0, q1):
         """(free, reason). reason = 첫 충돌 샘플의 사유(scene/self) 또는 ''."""
@@ -336,6 +434,54 @@ class IsaacScanSession:
         canon = _rot_about_axis(pts_w, self.axis_w, self.axis_dir_w, -theta)
         self.accum.append(canon)
 
+    def _merge_pass(self, pass_pts):
+        """한 패스의 canonical 점군을 **master 에 ICP 로 붙여** 누적한다.
+
+        real 과 같은 구조다 — real 은 새 IScan 을 master 에 colored ICP 로 붙인다
+        (`_hint_icp_refine`). sim 은 이 단계가 없어 hand-eye 오차를 흡수할 수단이
+        전혀 없었다(실측: 3mm 오차에서 boundary 2.4배, gap 4배).
+
+        첫 패스는 기준이므로 그대로 넣는다. 이후 패스는 초기값 = identity
+        (로봇 기구학이 이미 맞춰 놨으므로) → coarse→fine ICP → 게이트 통과 시에만 적용.
+        게이트는 `utils/nbv/icp_strategy.icp_with_gates` (RMSE/fitness/drift 3중).
+        """
+        if not pass_pts:
+            return
+        pts = np.vstack(pass_pts)
+        if not self.accum or not ICP_PASS_ENABLE or len(pts) < ICP_MIN_PTS:
+            self.accum.append(pts)
+            return
+        master = np.vstack(self.accum)
+        if len(master) < ICP_MIN_PTS:
+            self.accum.append(pts)
+            return
+        try:
+            import open3d as o3d
+            from utils.nbv.icp_strategy import icp_with_gates
+            src = o3d.geometry.PointCloud()
+            src.points = o3d.utility.Vector3dVector(_voxel(pts, VOXEL_M))
+            tgt = o3d.geometry.PointCloud()
+            tgt.points = o3d.utility.Vector3dVector(_voxel(master, VOXEL_M))
+            T = np.eye(4)
+            res = None
+            for corr in ICP_SCALES_M:       # coarse→fine
+                res = icp_with_gates(src, tgt, T, max_correspondence_distance=corr,
+                                     rmse_thresh=corr / 2.0, fitness_thresh=0.20,
+                                     drift_trans_m=0.030, drift_rot_deg=10.0)
+                T = res.T_refined
+            if res is not None and res.ok:
+                pts = pts @ T[:3, :3].T + T[:3, 3]
+                print(f"[isaac_scan]   ICP 정합 적용: "
+                      f"Δt={res.delta_translation_m*1000:.2f}mm "
+                      f"Δr={res.delta_rotation_deg:.2f}° "
+                      f"fitness={res.fitness:.2f} rmse={res.rmse*1000:.2f}mm")
+            else:
+                why = res.reason if res is not None else "결과 없음"
+                print(f"[isaac_scan]   ⚠ ICP 게이트 실패({why}) — 기구학 그대로 사용")
+        except Exception as e:                       # noqa: BLE001
+            print(f"[isaac_scan]   ⚠ ICP 예외({type(e).__name__}: {e}) — 기구학 그대로")
+        self.accum.append(pts)
+
     def _merged_pcd(self):
         import open3d as o3d
         pts = np.vstack(self.accum) if self.accum else np.zeros((0, 3))
@@ -344,21 +490,32 @@ class IsaacScanSession:
         return pcd, pts
 
     # ── 자세 (해석 IK + set_servo_angle 구동) ────────────────────────────────
-    def _view_q(self, target_w, el_deg, az_deg, standoff, seed):
-        """target(**world**) 을 el/az/standoff(up=world+z) 에서 보는 카메라 → base → 해석 IK q.
-        (q, eye_w) or (None, eye_w). base z 가 world up 과 달라도 정상."""
-        target_w = np.asarray(target_w, float)
-        el, az = math.radians(el_deg), math.radians(az_deg)
-        eye_w = target_w + standoff * np.array(
-            [math.cos(el)*math.cos(az), math.cos(el)*math.sin(az), math.sin(el)])
-        # ★ look_at_camera = **USD 규약(-Z 광축, +Y up)** → sim 카메라(USD)와 일치(하니스 동일).
-        #   (compute_camera_pose_from_normal 은 OpenCV(+Z) 라 flip 필요했으나 규약혼동·꼬임 유발 → 폐기.)
-        T_WC = _make_T(_look_at(eye_w, target_w, (0.0, 0.0, 1.0)), eye_w)
-        T_CB = np.linalg.inv(self.T_WB) @ T_WC         # → base
-        T_EB = T_CB @ self.T_EC
-        pose6d = np.concatenate([T_EB[:3, 3]*1000.0, kin.R_to_euler_xyz(T_EB[:3, :3])])
-        q, ok = kin.ik(pose6d, seed=seed)
-        return (q, eye_w) if ok else (None, eye_w)
+    def _view_q(self, target_w, el_deg, az_deg, standoff, seed, rolls=None):
+        """target(**world**) 을 el/az/standoff 에서 보는 카메라 → base → 해석 IK q.
+        (q, eye_w) or (None, eye_w).
+
+        ★ 실제 계산은 **sim·real 공용** `utils/robot/view_pose.solve_view_q` 가 한다.
+          예전에는 이 함수(sim)만 roll 6방향·시드 8개를 쓰고 real 은 각각 1개였다 —
+          같은 solver 를 쓰면서도 sim 에서 되는 자세가 real 에서 버려졌다.
+          카메라 규약은 데이터로 넘긴다(sim=USD, real=OpenCV). 근거: docs/4_collision.md §2.
+        """
+        q, roll, eye_w = _vp.solve_view_q(
+            kin, target_w, el_deg, az_deg, standoff, seed, self.T_EC,
+            T_WB=self.T_WB, convention=_vp.CAM_USD,
+            rolls_deg=(VIEW_ROLLS_DEG if rolls is None else rolls),
+            n_seed_alt=IK_SEED_TRIES)
+        self._last_roll = roll
+        return q, eye_w
+
+    def _gap_roll_order(self, target_w, el_deg, az_deg, standoff, gaps):
+        """gap 방향에 FOV 넓은 축을 맞추는 roll 순서 (공용 view_pose 위임).
+        `NBV_ROLL_ALIGN=0` 이면 기본 순서(roll=0 우선) — **대조군 스위치**."""
+        if not NBV_ROLL_ALIGN or not gaps:
+            return tuple(VIEW_ROLLS_DEG)
+        eye = _vp.eye_from_el_az(target_w, el_deg, az_deg, standoff)
+        return _vp.roll_order_for_gaps(
+            [c.p_O for c in gaps], [c.L for c in gaps], eye, target_w,
+            convention=_vp.CAM_USD, rolls_deg=VIEW_ROLLS_DEG)
 
     def _drive(self, q, steps=DRIVE_STEPS):
         """현재→q 를 관절 보간으로 **부드럽게** 이동(스텝마다 렌더). 텔레포트 점프 방지 +
@@ -381,12 +538,15 @@ class IsaacScanSession:
             print(f"[isaac_scan] === scan pass: {label} (전회전 {n_theta}프레임) ===")
         before = sum(len(a) for a in self.accum)
         thetas = np.linspace(0.0, 2*np.pi, n_theta, endpoint=False)
+        pass_pts = []                       # 이 패스만 따로 모은다(정합 단위)
         for i, th in enumerate(thetas):
             self.turntable.move_abs(float(th), float(np.radians(30.0)))
             self.turntable.wait_motion_done()
             th_act = float(self.turntable.getActualPos())
             obj = self._capture_obj_world(log=(i % 9 == 0))
-            self._accumulate(obj, th_act)
+            if len(obj):
+                pass_pts.append(_rot_about_axis(obj, self.axis_w, self.axis_dir_w, -th_act))
+        self._merge_pass(pass_pts)
         # 루프 닫기: 350°→360°(≡0°) 앞으로 10° 만 더 회전 후 θ 리셋.
         # (기존엔 350°를 역방향으로 되감으며 렌더 → 느리고 "홱" 끊김. 360°≡0° 라
         #  clearpos 의 _co_rotate(0) 는 시각 점프 없음.)
@@ -440,7 +600,9 @@ class IsaacScanSession:
         axis_xy = self.axis_w[:2]
         disc_top = float(self.axis_w[2])
         sensor = p1.SensorModel()
-        d_steps, el_prev = (0.30, 0.38), 25.0
+        # el_prev — 구값 25.0 은 roll 고정 탓에 IK 전부 실패했다(→ preview 0점). roll 을
+        # 풀어 도달성이 확인된 30 으로. 낮을수록 물체 실루엣·높이가 잘 잡힌다.
+        d_steps, el_prev = (0.30, 0.38), _envf("MMS_SIM_PREVIEW_EL", 30.0)
 
         def preview_at(tz, d):
             """조준높이 tz·축거리 d 로 구동 후 preview 캡처 → world 점군(기하 크롭)."""
@@ -489,7 +651,9 @@ class IsaacScanSession:
             print(f"[isaac_scan] P1 preview 점 부족({len(pts)}) — 플래너 불가")
             return None
         nrm = p1.estimate_outward_normals(pts, axis_xy)
-        plan = p1.plan_phase1_viewpoints(pts, nrm, axis_xy, sensor)
+        # 후보 elevation 을 명시 — p1.DEFAULT_ELS=(20,30,40,50) 의 20 은 실측에서도
+        # 도달 자세가 없다. P1_ELS 는 env 로 조정 가능.
+        plan = p1.plan_phase1_viewpoints(pts, nrm, axis_xy, sensor, els=P1_ELS)
         print(f"[isaac_scan] P1 플랜: {plan.note} risk={plan.tracking_risk} "
               f"(preview {len(pts)}pt)")
         qs = []
@@ -534,31 +698,27 @@ class IsaacScanSession:
 
     # ── Phase 2 (NBV = 추가 관측 elevation 자세, real 전회전 대응) ──────────────
     def _plan_nbv_pose(self, world, q_cur, gaps):
-        """**공용 `phase2_nbv.plan_nbv_elevation_pose` 호출**(real 과 동일 알고리즘).
-        sim 은 USD look-at·world 프레임만 주입(pose_q_fn). 반환 = q(그 자세에서 _scan_pass 전회전)."""
-        def _unit(v):
-            v = np.asarray(v, float); return v / (np.linalg.norm(v) + 1e-12)
-        n_top = sum(1 for c in gaps if abs(_unit(c.n_O)[2]) > 0.6)
-        print(f"[isaac_scan]   gap유형: 윗면(top)={n_top} 측면/뒷면(side)={len(gaps)-n_top}")
+        """Phase 2 관측자세 — 판단은 **sim·real 공용** `utils/nbv/nbv_planner` 가 한다.
+
+        여기서 주입하는 것은 sim 고유의 것 두 가지뿐이다:
+          · 자세 생성 = USD 규약(-Z 광축) look-at + world 프레임 타깃
+          · 충돌 판정 = 캡슐 world + 실제 메시(자가/셀 구조물)
+        gap 분류·아랫면 제외·visited·roll 정렬·실패 진단은 공용 코드가 담당한다.
+        """
         look_target = np.array([self.axis_w[0], self.axis_w[1], self.obj_center_w[2]])
         standoff = WORK_FOCUS + self.obj_radius
 
-        def pose_q(el, az):
-            q, _ = self._view_q(look_target, el, az, standoff, q_cur)   # USD 규약(sim 카메라)
-            return q
+        def solve_pose(el, az, rolls):
+            q, _ = self._view_q(look_target, el, az, standoff, q_cur, rolls=rolls)
+            return q, self._last_roll
 
-        def swept(q0, q1):
-            return self._swept_free(world, q0, q1)[0]
+        def roll_order(el, az, gs):
+            return self._gap_roll_order(look_target, el, az, standoff, gs)
 
-        res = p2.plan_nbv_elevation_pose(
-            gaps, q_cur, pose_q, swept, joint_weights=DEFAULT_JOINT_WEIGHTS,
-            el_floor_deg=VIEW_EL_DEG, view_azis_deg=tuple(VIEW_AZIS_DEG))
-        if res is None:
-            print("[isaac_scan] NBV: feasible 관측자세 없음 — 윗면 도달한계(스캐너-link2). z수축 필요.")
-            return None
-        q, el, az = res
-        print(f"[isaac_scan] NBV 관측자세 el={el:.0f}° az={az:.0f}° — 전회전 스캔")
-        return q
+        res = self._nbv.plan(gaps, q_cur, solve_pose,
+                             lambda a, b: self._swept_free(world, a, b),
+                             roll_order_fn=roll_order)
+        return None if res is None else res[0]
 
     # ── Phase 2 (NBV hole-fill) 프리미티브 — 수렴 루프는 공용 컨트롤러 소유 ──
     def build_coverage_mesh(self):
@@ -605,7 +765,15 @@ class IsaacScanSession:
     def run(self) -> IsaacScanResult:
         # phase_mode 순차 누적 (sim): 1=Phase1만, 2+=Phase1→2(NBV).
         # Phase 3(바닥면 flip)은 사용자 손회전 필요 → supports_phase3=False (sim 미지원).
-        self.phase_mode = int(os.environ.get("MMS_SIM_PHASE_MODE", "2"))
+        #
+        # real 과 **같은 설정**(ArtecProcessSettings.multipass_settings.phase_mode)을 따른다.
+        # 이전에는 sim 만 환경변수를 봐서, main_artec.py 의 phase_mode 를 바꿔도 sim 은
+        # 반응하지 않았다. 환경변수는 스윕 스크립트(scripts/sim/*.sh)용 override 로 남긴다.
+        # 해석은 공용 `resolve_phase_mode` 한 곳에서만 — main_artec.py 의 표시와
+        # 여기의 실제 동작이 **같은 함수**를 쓰므로 어긋날 수 없다.
+        self.phase_mode, src = resolve_phase_mode(
+            getattr(self.s, "multipass_settings", None), allow_env=True)
+        print(f"[isaac_scan] phase_mode={self.phase_mode} ({src})")
         self.nbv_k_max = NBV_K_MAX
         self._world = None                            # Phase 2 진입 시 lazy build
         self._setup_object()

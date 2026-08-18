@@ -254,7 +254,9 @@
       "Bash(inkscape --version)",
       "Bash(timeout 120 libreoffice --headless --convert-to png /home/keti/workspace/MMS/MMS/docs/figures/phase1_viewpoint/fig4_bands.svg --outdir .)",
       "Bash(unzip -l \"\\(포스터\\) 260713_MCP 연동 파라메트릭 모델링 기반 Sim-Ready 3D 에셋 생성 파이프라인_인쇄대상.pptx\")",
-      "Bash(timeout 180 libreoffice --headless --convert-to png --outdir . \"/home/keti/workspace/2_Rapid_Digital_Twin/8_20260608_KSMTE_포스터_발표/KSMTE_포스터_MMS_정진교_v2.pptx\")"
+      "Bash(timeout 180 libreoffice --headless --convert-to png --outdir . \"/home/keti/workspace/2_Rapid_Digital_Twin/8_20260608_KSMTE_포스터_발표/KSMTE_포스터_MMS_정진교_v2.pptx\")",
+      "Bash(/home/keti/miniconda3/envs/mms-env/bin/python -V)",
+      "Bash(/home/keti/miniconda3/envs/mms-env/bin/pip list *)"
     ]
   }
 }

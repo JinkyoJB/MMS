@@ -10,6 +10,8 @@ import numpy as np
 
 from utils import PROJECT_ROOT
 from utils.viz import show_composite_mesh   # open3d 는 함수 안에서 lazy import
+# phase_mode 해석은 sim·real·main 공용 (기본값 불일치 방지)
+from utils.nbv.scan_phase_controller import resolve_phase_mode, phase_desc
 
 # 모든 output 파일에 같은 타임스탬프(_YYYYMMDD_HHMMSS) 붙여 run 별 구분.
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -20,6 +22,9 @@ from mms_artec.sensor.artec_config import ArtecConfig   # 바인딩 비의존(�
 #   "real"  → 실물 xArm + 턴테이블 + Artec 스캐너 (Windows)
 #   "isaac" → Isaac Sim 시뮬레이션 (옆에 실물 없이 개발)
 BACKEND = "isaac"
+# ★ 여기(BACKEND)는 **사람이 바꾸는 스위치**일 뿐이다. CFG 를 만든 뒤부터는
+#   진실의 출처가 `CFG.backend` 하나다 — 코드에서 백엔드를 분기할 때는
+#   반드시 CFG.backend 를 쓸 것(둘을 섞으면 나중에 갈라진다).
 # isaac GUI 표시 여부. 환경변수 MMS_ISAAC_HEADLESS=1 로 헤드리스 강제(서버/CI).
 ISAAC_HEADLESS = os.environ.get("MMS_ISAAC_HEADLESS", "0") == "1"
 
@@ -41,7 +46,7 @@ try:
     _SCAN_SETTINGS_AVAILABLE = True
 except Exception as _e:               # noqa: BLE001
     # scan settings 는 Artec SDK 바인딩에 의존 → real SDK 없으면 import 실패.
-    # isaac 은 이게 False 여도 아래 `elif BACKEND=="isaac"` 로 sim 스캔을 빌드한다.
+    # isaac 은 이게 False 여도 아래 `elif CFG.backend=="isaac"` 로 sim 스캔을 빌드한다.
     print(f"[main] ⓘ scan settings import 불가 ({type(_e).__name__}) — "
           f"real Artec 스캔 비활성 (isaac 은 sim 스캔으로 진행).")
     _SCAN_SETTINGS_AVAILABLE = False
@@ -131,7 +136,7 @@ if _SCAN_SETTINGS_AVAILABLE:
         export_obj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.obj"),
         export_sproj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.sproj"),
     )
-elif BACKEND == "isaac":
+elif CFG.backend == "isaac":
     # isaac: Artec SDK scan-settings 없이 sim 스캔(IsaacScanSession) 실행.
     # IsaacScanSession = Phase1 GT 누적 + Phase2 NBV(공용 phase2_nbv/robot_collision).
     # 후처리(GlobalReg/Fusion/Texturize)는 sim sensor stub 가 skip → 결과=점군/mesh.
@@ -182,7 +187,14 @@ def main() -> None:
                       "  · sim:  BACKEND='isaac' 로 실행하면 sim 스캔이 빌드됩니다.")
                 return
 
-            print("\n[main] === Artec Phase 1 (Phase 2 OFF) ===")
+            # phase_mode 해석은 **공용 함수 한 곳**에서만 한다 — 예전엔 여기와
+            # isaac_scan_session 이 각자 해석했고 기본값도 달라(1 vs 2), 설정이 빠지면
+            # 화면에 찍히는 단계와 실제 도는 단계가 갈렸다.
+            _pm, _pm_src = resolve_phase_mode(
+                MULTIPASS_SETTINGS if _SCAN_SETTINGS_AVAILABLE else None,
+                allow_env=(CFG.backend == "isaac"))   # env override 는 sim 만
+            _pm_desc = phase_desc(_pm)
+            print(f"\n[main] === Artec {_pm_desc}  ({_pm_src}) ===")
             print(f"  T_EC: {CFG.T_EC_key}")
             print(f"  fusion: {PROCESS_SETTINGS.fusion}")
             print(f"  export OBJ:  {PROCESS_SETTINGS.export_obj_path}")
@@ -197,7 +209,7 @@ def main() -> None:
                 # streaming 모드에선 result.ctx=None. model 에서 직접 집계.
                 n_frames = sum(result.model.get_scan(i).frame_count()
                                for i in range(result.model.scan_count()))
-                print(f"\n[main] Phase 1 완료 — frames={n_frames}  "
+                print(f"\n[main] {_pm_desc} 완료 — frames={n_frames}  "
                       f"scans={result.model.scan_count()}")
             except KeyboardInterrupt:
                 print("\n[main] ⚠ KeyboardInterrupt — 현재 상태까지 보존")
@@ -212,35 +224,45 @@ def main() -> None:
                     result, obj_path=PROCESS_SETTINGS.export_obj_path)
 
     finally:
-        # ── 턴테이블 안전 정지 (CRITICAL) ─────────────────────────────
-        # disconnect 만 하면 모터는 계속 돌아감. 반드시 stop → servo OFF → disconnect.
-        if turntable is None:
-            return
-        try:
-            turntable.stop()
-            print("[main] turntable.stop() OK")
-        except Exception as e:
-            print(f"[main] ⚠ turntable.stop() 예외: {e}")
+        # ── 정리 (CRITICAL) ───────────────────────────────────────────
+        # ⚠ 이 블록에서 **`return` 하지 말 것.** finally 안의 return 은
+        #   (1) 전파 중인 예외를 조용히 삼키고 — create_hardware() 가 던진 에러가
+        #       트레이스백 없이 사라져 정상 종료처럼 보인다,
+        #   (2) 그 아래 정리를 통째로 건너뛴다 — robot.disconnect() 와
+        #       shutdown_isaac_world() 가 실행되지 않는다.
+        #   예전에 `if turntable is None: return` 이 있었고, 하필 **하드웨어 생성이
+        #   실패한 경로**(turntable=None)에서 Isaac 종료가 빠져 atexit crash 로 이어졌다.
+        #   각 단계는 개별 None 가드 + try 로만 보호한다.
+        if turntable is not None:
+            # 턴테이블: disconnect 만 하면 모터는 계속 돌아감.
+            # 반드시 stop → servo OFF → disconnect.
             try:
-                if hasattr(turntable, "reconnect"):
-                    turntable.reconnect()
                 turntable.stop()
-                print("[main] turntable.stop() 재시도 OK")
-            except Exception as e2:
-                print(f"[main] ✘ 최종 stop 실패: {e2}  — 물리적 정지/전원차단 필요")
-        try:
-            turntable.set_servo_on(False)
-        except Exception:
-            pass
-        try:
-            turntable.disconnect()
-        except Exception:
-            pass
-        try:
-            robot.disconnect()
-        except Exception:
-            pass
-        # isaac 백엔드: SimulationApp 명시적 종료 (atexit crash 방지)
+                print("[main] turntable.stop() OK")
+            except Exception as e:
+                print(f"[main] ⚠ turntable.stop() 예외: {e}")
+                try:
+                    if hasattr(turntable, "reconnect"):
+                        turntable.reconnect()
+                    turntable.stop()
+                    print("[main] turntable.stop() 재시도 OK")
+                except Exception as e2:
+                    print(f"[main] ✘ 최종 stop 실패: {e2}  — 물리적 정지/전원차단 필요")
+            try:
+                turntable.set_servo_on(False)
+            except Exception:
+                pass
+            try:
+                turntable.disconnect()
+            except Exception:
+                pass
+        if robot is not None:
+            try:
+                robot.disconnect()
+            except Exception:
+                pass
+        # isaac 백엔드: SimulationApp 명시적 종료 (atexit crash 방지).
+        # 하드웨어 생성 실패로 turntable/robot 이 None 이어도 **반드시** 실행돼야 한다.
         if CFG.backend == "isaac":
             try:
                 from mms_artec.backends import shutdown_isaac_world

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -113,6 +114,28 @@ class ArtecMMS:
       solve_T_EB(theta, T_CO_des) — E → B  (NBV → robot target)
     """
 
+    def _sim_T_EC_gt(self) -> Optional[np.ndarray]:
+        """sim(USD) 에서 실측한 E→C. isaac 백엔드 전용.
+
+        정의는 isaac_scan_session._T_EC_gt 와 동일: inv(T_WC) @ T_WE.
+        prim_world_pose 는 scale 이 제거된 회전을 준다(스캐너 mm 노드 대응).
+        """
+        try:
+            from mms_artec.backends.isaac.isaac_world import (
+                CAMERA_PRIM, EE_LINK_PATH)
+            w = getattr(self.sensor, "_world", None)
+            if w is None:
+                return None
+            pc, Rc = w.prim_world_pose(CAMERA_PRIM)
+            pe, Re = w.prim_world_pose(EE_LINK_PATH)
+            T_WC = np.eye(4); T_WC[:3, :3] = Rc; T_WC[:3, 3] = pc
+            T_WE = np.eye(4); T_WE[:3, :3] = Re; T_WE[:3, 3] = pe
+            return np.linalg.inv(T_WC) @ T_WE
+        except Exception as e:                       # noqa: BLE001
+            print(f"[MMS][WARN] sim T_EC GT 취득 실패({type(e).__name__}) — "
+                  f"config 값 사용")
+            return None
+
     def __init__(self, cfg: ArtecMMSConfig) -> None:
         self.cfg = cfg
         # 백엔드에 맞는 sensor (real=ArtecClient, isaac=IsaacArtecScanner)
@@ -125,6 +148,24 @@ class ArtecMMS:
             )
         else:
             self._T_EC = None
+
+        # ★ isaac 백엔드는 **USD ground truth** 로 덮어쓴다.
+        #   sim 에는 캘리브가 필요 없고 USD 가 진실이다. config/sensor_frames.yaml 은
+        #   실물 캘리브(구 장착) 값이라, 툴체인저가 들어간 v3_scene 과 118mm 어긋난다.
+        #   그대로 두면 캡처 점군이 엉뚱한 위치로 변환돼 Phase1 preview 가 0 이 된다.
+        if cfg.backend == "isaac":
+            gt = self._sim_T_EC_gt()
+            if gt is not None:
+                if self._T_EC is not None:
+                    d = float(np.linalg.norm(gt[:3, 3] - self._T_EC[:3, 3])) * 1000.0
+                    print(f"[MMS] (sim) T_EC ← USD ground truth "
+                          f"(config '{cfg.T_EC_key}' 대비 {d:.1f}mm 차이)")
+                else:
+                    print("[MMS] (sim) T_EC ← USD ground truth")
+                self._T_EC = gt
+            # 캘리브 오차 주입(기본 0=무주입). 실물의 hand-eye 오차 조건을 sim 에서 재현.
+            from mms_artec.utils.calibration import handeye_error as _he
+            self._T_EC = _he.believed_T_EC(self._T_EC, log=False)
 
         # B ↔ F
         if cfg.turntable_frame_yaml is not None:
@@ -408,6 +449,106 @@ class ArtecMMS:
 
     # ── Artec process pipeline ─────────────────────────────────────────
 
+    # ── artec_process 의 구성요소 ────────────────────────────────────────
+    def _run_scan(self, robot, turntable, s):
+        """스캔 단계만 담당. (model, ctx, hints_applied) 반환.
+
+        백엔드/설정에 따라 4갈래다. 이걸 artec_process 본문에 두면 '스캔 → 후처리 →
+        export' 라는 큰 흐름이 분기 속에 묻힌다.
+        """
+        ctx = None
+        if self.cfg.backend == "isaac":
+            # Isaac: Artec SLAM(IScanningProcedure) 대신 sim 스캔 경로.
+            # 턴테이블 GT θ + 카메라 포즈로 점군을 직접 누적한다.
+            from mms_artec.backends.isaac.isaac_scan_session import IsaacScanSession
+            r = IsaacScanSession(self, robot, turntable, s).run()
+            print(f"\n[artec_process] (sim) Scan — {r.n_frames} frames")
+            return r.model, ctx, False
+
+        if s.use_streaming_scan and s.use_multipass_scan:
+            # Phase 1 재진행(tracking lost recovery) + phase_mode 분기.
+            # 모든 IScan 이 master IModel 에 누적되고 아래 GlobalReg 에서 정합된다.
+            from mms_artec.nbv.artec_multipass_scan_session import ArtecMultiPassScanSession
+            r = ArtecMultiPassScanSession(self, robot, turntable, s.multipass_settings).run()
+            print(f"\n[artec_process] Multi-pass Scan — {r.n_passes} passes, "
+                  f"{r.n_total_frames} total frames ({r.model.scan_count()} scan(s))")
+            return r.model, ctx, bool(r.hints_applied)
+
+        if s.use_streaming_scan:
+            from mms_artec.nbv.artec_streaming_scan_session import ArtecStreamingScanSession
+            r = ArtecStreamingScanSession(self, robot, turntable, s.streaming_scan_settings).run()
+            print(f"\n[artec_process] Streaming Scan — {r.n_frames} frames "
+                  f"({r.fps_actual:.1f} fps)")
+            return r.model, ctx, False
+
+        from mms_artec.nbv.artec_scan_session import ArtecScanSession
+        ctx = ArtecScanSession(self, robot, turntable, s.scan_settings).run()
+        print(f"\n[artec_process] Discrete Scan — {ctx.n_frames} frames")
+        return ctx.model, ctx, False
+
+    def _stage(self, name: str, fn, current_model):
+        """후처리 한 단계. 실패해도 **이전 모델을 유지**하고 계속한다.
+
+        ★ 예전엔 RuntimeError 만 잡았다. SDK 바인딩이 다른 예외를 던지면 파이프라인이
+          죽고 **이미 끝난 스캔이 통째로 버려진다**(실물 스캔은 수 분).
+          KeyboardInterrupt/SystemExit 은 Exception 하위가 아니라 그대로 전파된다.
+        """
+        print(f"[artec_process] {name} ...")
+        try:
+            out = fn(current_model)
+            try:
+                n_scans = out.scan_count()
+                n_frames = sum(out.get_scan(i).frame_count() for i in range(n_scans))
+                print(f"   ok  scans={n_scans}  frames={n_frames}  "
+                      f"composite={out.has_final_mesh()}")
+            except Exception:
+                pass
+            return out
+        except Exception as e:                       # noqa: BLE001
+            print(f"   ⚠ {name} 실패({type(e).__name__}): {e}")
+            traceback.print_exc()
+            print("   → skip (이전 모델 유지)")
+            return current_model
+
+    def _save_intermediate(self, tag: str, model, s) -> None:
+        """중간 sproj 저장(디버깅용). 실패는 무시."""
+        if not s.export_sproj_path:
+            return
+        try:
+            p = Path(s.export_sproj_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            mid = str(p.with_stem(p.stem + f"_{tag}"))
+            Path(mid).unlink(missing_ok=True)
+            self.sensor.save_project(model, mid)
+            print(f"   mid-save → {mid}")
+        except Exception as e:                       # noqa: BLE001
+            print(f"   mid-save 실패 (무시): {e}")
+
+    def _export(self, model, s, tag: str = "") -> None:
+        """OBJ/sproj 내보내기. **sim·real 공용** — 예전엔 isaac 경로가 별도 블록을
+        갖고 있었고 이미 갈라져 있었다(sproj 저장이 sim 에만 없었다).
+
+        저장 실패가 파이프라인 결과를 버리게 두지 않는다 — mkdir/unlink 도 try 안에.
+        """
+        pre = f"(sim) " if tag else ""
+        if s.export_obj_path:
+            try:
+                Path(s.export_obj_path).parent.mkdir(parents=True, exist_ok=True)
+                model.save_obj(s.export_obj_path)
+                print(f"[artec_process] {pre}saved OBJ → {s.export_obj_path}")
+            except Exception as e:                   # noqa: BLE001
+                print(f"[artec_process] {pre}OBJ 저장 실패({type(e).__name__}): {e}")
+        # sproj 는 Artec SDK 프로젝트 형식 — sim sensor(IsaacArtecScanner)엔 없다.
+        # 능력 확인으로 건너뛴다(설정이 real 것을 쓰고 있어도 조용히 통과).
+        if s.export_sproj_path and hasattr(self.sensor, "save_project"):
+            try:
+                Path(s.export_sproj_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(s.export_sproj_path).unlink(missing_ok=True)
+                self.sensor.save_project(model, s.export_sproj_path)
+                print(f"[artec_process] {pre}saved sproj → {s.export_sproj_path}")
+            except Exception as e:                   # noqa: BLE001
+                print(f"[artec_process] {pre}sproj 저장 실패({type(e).__name__}): {e}")
+
     def artec_process(
         self,
         robot,
@@ -415,163 +556,73 @@ class ArtecMMS:
         settings: Optional["ArtecProcessSettings"] = None,
     ) -> "ArtecProcessResult":
         """
-        Artec 풀 파이프라인. `docs/6_artec_process.md` 부록 B SDK General
-        Pipeline 순서:
-          Scan (streaming/discrete) → SerialReg → GlobalReg → Cleaning
-          → Fusion → Simplify → Texturize → Export
+        Artec 풀 파이프라인. `docs/6_artec_process.md` 부록 B SDK General Pipeline 순서:
+          Scan → SerialReg → GlobalReg → Cleaning → Fusion → Simplify → Texturize → Export
+
+        구성요소는 `_run_scan` / `_stage` / `_save_intermediate` / `_export` 로 분리돼
+        있어, 이 함수는 **흐름만** 보여준다.
         """
         s = settings or ArtecProcessSettings()
+        # ★ settings 는 **읽기 전용 입력**으로 다룬다. 예전에는 hints 분기가
+        #   `s.do_global_registration = False` 로 직접 껐는데, `s` 는 호출자 객체 그
+        #   자체(복사본 아님)라 main_artec.py 의 PROCESS_SETTINGS 가 **영구히 변형**됐다
+        #   → 두 번째 호출부터 GlobalRegistration 이 조용히 꺼진 채 돈다.
+        do_global_reg = bool(s.do_global_registration)
 
         # ── 0. Scanning ─────────────────────────────────────────────────
-        ctx = None
-        if self.cfg.backend == "isaac":
-            # Isaac 백엔드: Artec SLAM(IScanningProcedure) 대신 sim 스캔 경로.
-            # 턴테이블 ground-truth θ + 카메라 포즈로 포인트클라우드를 객체 프레임에
-            # 직접 누적한다. (Phase B: mms_artec/backends/isaac/isaac_scan_session.py)
-            from mms_artec.backends.isaac.isaac_scan_session import IsaacScanSession
-            session = IsaacScanSession(self, robot, turntable, s)
-            sim_result = session.run()
-            model = sim_result.model
-            print(f"\n[artec_process] (sim) Scan — {sim_result.n_frames} frames")
-        elif s.use_streaming_scan:
-            if s.use_multipass_scan:
-                # Multi-pass: Phase 1 재진행(tracking lost recovery) + phase_mode 분기
-                # (1=5면만 / 2=Phase 2 NBV / 3=Phase 3 flip 바닥면).
-                # 모든 IScan 이 master IModel 에 누적되고
-                # 아래 GlobalRegistration 단계에서 정합됨.
-                from mms_artec.nbv.artec_multipass_scan_session import (
-                    ArtecMultiPassScanSession,
-                )
-                session = ArtecMultiPassScanSession(
-                    self, robot, turntable, s.multipass_settings,
-                )
-                multi_result = session.run()
-                model = multi_result.model
-                print(f"\n[artec_process] Multi-pass Scan — "
-                      f"{multi_result.n_passes} passes, "
-                      f"{multi_result.n_total_frames} total frames "
-                      f"({model.scan_count()} scan(s))")
-                # Hints 가 적용됐다면 GlobalReg 가 hint 를 흐트러뜨릴 수 있음.
-                # hint 가 authoritative 이므로 post-merge GlobalReg 자동 skip.
-                if multi_result.hints_applied and s.do_global_registration:
-                    print("[artec_process] ⓘ hints_applied=True → "
-                          "post-merge GlobalRegistration 자동 skip "
-                          "(hint 가 authoritative)")
-                    s.do_global_registration = False
-            else:
-                from mms_artec.nbv.artec_streaming_scan_session import (
-                    ArtecStreamingScanSession,
-                )
-                session = ArtecStreamingScanSession(
-                    self, robot, turntable, s.streaming_scan_settings,
-                )
-                stream_result = session.run()
-                model = stream_result.model
-                print(f"\n[artec_process] Streaming Scan — {stream_result.n_frames} frames "
-                      f"({stream_result.fps_actual:.1f} fps)")
-        else:
-            from mms_artec.nbv.artec_scan_session import ArtecScanSession
-            session = ArtecScanSession(self, robot, turntable, s.scan_settings)
-            ctx = session.run()
-            model = ctx.model
-            print(f"\n[artec_process] Discrete Scan — {ctx.n_frames} frames")
+        model, ctx, hints_applied = self._run_scan(robot, turntable, s)
 
-        # ── isaac: Artec SDK 후처리(SerialReg/GlobalReg/Fusion/Texturize) 없음 ──
-        # IsaacScanSession 이 이미 점군/mesh 를 만들었으므로 그대로 반환(export 만).
+        # hint 가 적용됐다면 GlobalReg 가 hint 를 흐트러뜨릴 수 있다(hint 가 authoritative).
+        if hints_applied and do_global_reg:
+            print("[artec_process] ⓘ hints_applied=True → post-merge "
+                  "GlobalRegistration 자동 skip (hint 가 authoritative)")
+            do_global_reg = False
+
+        # ── isaac: Artec SDK 후처리 없음 ────────────────────────────────
+        # IsaacScanSession 이 이미 점군/mesh 를 만들었으므로 export 만 한다.
         if self.cfg.backend == "isaac":
-            if getattr(s, "export_obj_path", None):
-                try:
-                    from pathlib import Path as _P
-                    _P(s.export_obj_path).parent.mkdir(parents=True, exist_ok=True)
-                    model.save_obj(s.export_obj_path)
-                    print(f"[artec_process] (sim) saved → {s.export_obj_path}")
-                except Exception as e:
-                    print(f"[artec_process] (sim) save 실패: {e}")
+            self._export(model, s, tag="sim")
             return ArtecProcessResult(model=model, ctx=ctx)
 
-        def _safe(name: str, fn, current_model):
-            print(f"[artec_process] {name} ...")
-            try:
-                out = fn(current_model)
-                try:
-                    n_scans = out.scan_count()
-                    n_frames = sum(out.get_scan(i).frame_count() for i in range(n_scans))
-                    has_mesh = out.has_final_mesh()
-                    print(f"   ok  scans={n_scans}  frames={n_frames}  composite={has_mesh}")
-                except Exception:
-                    pass
-                return out
-            except RuntimeError as e:
-                print(f"   ⚠ {name} 실패: {e}")
-                print(f"   → skip")
-                return current_model
-
-        def _save_mid(tag: str, current_model):
-            if not s.export_sproj_path:
-                return
-            try:
-                from pathlib import Path as _P
-                p = _P(s.export_sproj_path)
-                p.parent.mkdir(parents=True, exist_ok=True)
-                mid = str(p.with_stem(p.stem + f"_{tag}"))
-                _P(mid).unlink(missing_ok=True)
-                self.sensor.save_project(current_model, mid)
-                print(f"   mid-save → {mid}")
-            except Exception as _e:
-                print(f"   mid-save 실패 (무시): {_e}")
-
-        # 1-2. Reg
+        # ── 1-2. Registration ───────────────────────────────────────────
         if s.do_serial_registration:
-            model = _safe("SerialRegistration", self.sensor.serial_registration, model)
-        if s.do_global_registration:
-            model = _safe("GlobalRegistration", self.sensor.global_registration, model)
-        _save_mid("post_reg", model)
+            model = self._stage("SerialRegistration", self.sensor.serial_registration, model)
+        if do_global_reg:
+            model = self._stage("GlobalRegistration", self.sensor.global_registration, model)
+        self._save_intermediate("post_reg", model, s)
 
-        # 3. Cleaning (Fusion 전)
+        # ── 3. Cleaning (Fusion 전) ─────────────────────────────────────
         if s.do_outliers_removal:
-            model = _safe("OutliersRemoval", self.sensor.outliers_removal, model)
+            model = self._stage("OutliersRemoval", self.sensor.outliers_removal, model)
         if s.do_small_objects_filter:
-            model = _safe("SmallObjectsFilter", self.sensor.small_objects_filter, model)
-        _save_mid("pre_fusion", model)
+            model = self._stage("SmallObjectsFilter", self.sensor.small_objects_filter, model)
+        self._save_intermediate("pre_fusion", model, s)
 
-        # 4. Fusion
-        fusion = (s.fusion or "none").lower()
-        if fusion == "poisson":
-            model = _safe("PoissonFusion", self.sensor.poisson_fusion, model)
-        elif fusion == "fast":
-            model = _safe("FastFusion", self.sensor.fast_fusion, model)
+        # ── 4. Fusion ───────────────────────────────────────────────────
+        # 값은 ArtecProcessSettings.__post_init__ 에서 FUSION_CHOICES 로 검증·정규화됨.
+        if s.fusion == "poisson":
+            model = self._stage("PoissonFusion", self.sensor.poisson_fusion, model)
+        elif s.fusion == "fast":
+            model = self._stage("FastFusion", self.sensor.fast_fusion, model)
 
-        # 5-6. Simplify + Texturize
+        # ── 5-6. Simplify + Texturize ───────────────────────────────────
         if s.do_simplify:
-            model = _safe("MeshSimplify", self.sensor.mesh_simplify, model)
+            model = self._stage("MeshSimplify", self.sensor.mesh_simplify, model)
         if s.do_texturize:
-            model = _safe("Texturize", self.sensor.texturize, model)
+            model = self._stage("Texturize", self.sensor.texturize, model)
 
-        # Export
-        if s.export_obj_path:
-            from pathlib import Path as _P
-            _P(s.export_obj_path).parent.mkdir(parents=True, exist_ok=True)
-            try:
-                model.save_obj(s.export_obj_path)
-                print(f"[artec_process] saved OBJ → {s.export_obj_path}")
-            except Exception as e:
-                print(f"[artec_process] OBJ 저장 실패: {e}")
-        if s.export_sproj_path:
-            from pathlib import Path as _P
-            _P(s.export_sproj_path).parent.mkdir(parents=True, exist_ok=True)
-            _P(s.export_sproj_path).unlink(missing_ok=True)
-            try:
-                self.sensor.save_project(model, s.export_sproj_path)
-                print(f"[artec_process] saved sproj → {s.export_sproj_path}")
-            except RuntimeError as e:
-                print(f"[artec_process] sproj 저장 실패: {e}")
-
+        # ── Export ──────────────────────────────────────────────────────
+        self._export(model, s)
         return ArtecProcessResult(model=model, ctx=ctx)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ArtecProcessSettings / Result
 # ─────────────────────────────────────────────────────────────────────────────
+
+# artec_process 의 Fusion 단계 dispatch 와 **같은 목록**을 쓴다(둘이 갈라지면
+# 검증을 통과한 값이 dispatch 에서 무시되는 상황이 생긴다).
+FUSION_CHOICES = frozenset({"poisson", "fast", "none"})
+
 
 @dataclass
 class ArtecProcessSettings:
@@ -596,6 +647,9 @@ class ArtecProcessSettings:
     do_serial_registration: bool = True
     do_global_registration: bool = True
 
+    # 허용값: "poisson" | "fast" | "none"(또는 None/"").
+    # __post_init__ 에서 검증한다 — 오타("poison" 등)면 예전엔 아래 dispatch 가
+    # 조용히 아무것도 안 해서 **융합이 빠진 줄 모르고** 결과를 받았다.
     fusion: str = "poisson"
 
     do_outliers_removal: bool = True
@@ -639,6 +693,16 @@ class ArtecProcessSettings:
             # 결과 검증에 도움. PoissonFusion 도 유지 (mesh 결과 자체).
             print("[ArtecProcessSettings] ⚡ dev_mode ON — "
                   "do_outliers_removal=False, do_simplify=False")
+
+        # ── fusion 값 검증 (fail-fast) ───────────────────────────────────
+        # 스캔을 수 분 돌린 뒤 조용히 융합만 빠지는 것보다, **설정을 만드는 시점에**
+        # 즉시 틀렸다고 알리는 편이 낫다. 이 검증은 main 이 뜨자마자 실행된다.
+        _f = (self.fusion or "none")
+        if not isinstance(_f, str) or _f.lower() not in FUSION_CHOICES:
+            raise ValueError(
+                f"ArtecProcessSettings.fusion={self.fusion!r} 은 알 수 없는 값입니다. "
+                f"허용: {sorted(FUSION_CHOICES)} (대소문자 무관, None='none')")
+        self.fusion = _f.lower()
 
 
 @dataclass

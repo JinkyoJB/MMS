@@ -1,6 +1,6 @@
 #!/bin/bash
 # 9종 testset E2E 순회: 합성 씬 → Phase1 플래너(preview→크롭→밴드) → export
-cd /home/keti/workspace/MMS/MMS
+cd "$(dirname "$0")/../.."
 OUT=scripts/sim/log/e2e_sweep; mkdir -p $OUT
 for usd in /home/keti/isaacsim/standalone_examples/play/MMS/testset/composed/*_on_turntable.usd; do
   name=$(basename "$usd" _on_turntable.usd)

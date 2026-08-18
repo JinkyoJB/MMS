@@ -252,6 +252,7 @@ def plan_nbv_elevation_pose(
     joint_weights, el_floor_deg: float = 30.0,
     view_azis_deg=(0., 30., -30., 60., -60., 90., -90., 180.),
     el_extra_deg=(65., 55., 45.), el_cap_deg: float = 88.0,
+    visited=(),
 ):
     """★ 공용 NBV 자세선택 (real/sim 동일) — **부족면을 덮을 관측 elevation 자세** 선택.
 
@@ -262,14 +263,25 @@ def plan_nbv_elevation_pose(
     하드웨어/프레임/카메라규약(USD vs OpenCV) 차이는 **주입 함수**가 캡슐화:
       pose_q_fn(el_deg, az_deg) -> q | None : 턴테이블축을 (el,az,standoff)에서 보는 카메라→IK q.
       swept_free_fn(q_cur, q)  -> bool      : 이동(swept-path) 충돌-free 여부.
+
+    `visited` = 이미 스캔한 (el, az) 목록. **반드시 넘길 것** — az 를 "관절이동 최소"로
+    고르므로, 넘기지 않으면 직전 자세의 이동비용이 0 이라 **같은 자세를 무한 반복**한다
+    (실측: el=65 az=-30 을 4회 연속 선택, gap 18→18→20→19 로 안 줄었다).
+
     Returns (q, el_deg, az_deg) or None(도달 가능 관측자세 없음 = 윗면 도달한계 등).
     """
     if not gaps:
         return None
+    seen = {(round(float(e), 1), round(float(a), 1)) for e, a in visited}
     needs = gap_normal_elevations_deg(gaps)
     el_need = float(np.clip(np.median(needs), el_floor_deg + 5.0, el_cap_deg))
+    # ★ **el_need 에 가까운 순**으로 시도한다. 예전에는 내림차순(=가장 높은 el 우선)이라
+    #   el_extra_deg 의 65 가 항상 이겨 el_need 가 사실상 무시됐다. 그 결과 gap 이
+    #   측면 위주(법선 elevation 낮음)여도 계속 el=65 를 골라 측면이 안 메워졌다
+    #   (실측: NBV 4회 모두 el=65, 측면 gap 11→15 로 오히려 증가).
+    #   윗면 gap 이 많으면 el_need 가 높아지므로 "윗면 보강" 의도는 그대로 유지된다.
     el_cands = sorted(set([el_need, el_need - 10.0, el_need - 20.0, el_need - 30.0,
-                           *el_extra_deg]), reverse=True)
+                           *el_extra_deg]), key=lambda e: abs(e - el_need))
     W = np.asarray(joint_weights, float)
     qc = np.asarray(q_cur, float)
     for el in el_cands:
@@ -277,6 +289,8 @@ def plan_nbv_elevation_pose(
             continue
         best = None
         for az in view_azis_deg:
+            if (round(float(el), 1), round(float(az), 1)) in seen:
+                continue                       # 이미 그 자세로 전회전 스캔했다
             q = pose_q_fn(float(el), float(az))
             if q is None:
                 continue

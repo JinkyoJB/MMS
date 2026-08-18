@@ -16,7 +16,7 @@ import glob
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "log", "testset_points")
-V2_USD = "/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd"
+V2_USD = "/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable/v2.usd"
 COMPOSED_GLOB = ("/home/keti/isaacsim/standalone_examples/play/MMS/"
                  "testset/composed/*_on_turntable.usd")
 
