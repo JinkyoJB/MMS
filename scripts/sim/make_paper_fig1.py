@@ -36,7 +36,7 @@ box(TOPS[2], "Phase 3  bottom face",
     ["flip the object, sweep, and merge", "with the model from Phases 1-2"])
 arrow(TOPS[0] - 0.5, TOPS[1] + BH + 0.5, "gaps remain")
 arrow(TOPS[1] - 0.5, TOPS[2] + BH + 0.5, "downward gaps only")
-ax.text(50, 2.0, "The pose of every sweep is selected by the same search (Section 3.3).",
+ax.text(50, 2.0, "The pose of every sweep is selected by the same search (Section 3.2).",
         ha="center", va="center", fontsize=6.2, color="0.4", style="italic")
 fig.tight_layout(pad=0.1)
 out = os.path.abspath(OUT); os.makedirs(os.path.dirname(out), exist_ok=True)

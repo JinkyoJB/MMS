@@ -141,17 +141,30 @@ def icp_with_gates(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.01, max_nn=30)
         )
 
+    # ★ 원점 근처로 옮겨 풀어야 한다. point-to-plane 은 **원점 기준 미소회전**으로
+    #   선형화하므로, 점군이 원점에서 멀면(로봇 base 기준 물체는 ~0.8m) 회전과 이동이
+    #   심하게 결합해 정규방정식이 나빠지고 ICP 가 발산한다.
+    #   실측(2026-08-19, flip 패스): 월드 좌표 fitness=0.000·이동 2.9m 로 폭주 →
+    #   target 중심으로 평행이동만 해도 fitness=0.981 로 정상 수렴. 회전은 건드리지
+    #   않으므로 결과의 의미는 그대로고, 수치 조건만 좋아진다.
+    c = np.asarray(target_pcd.points, dtype=float).mean(axis=0)
+    To = np.eye(4); To[:3, 3] = -c            # world → centered
+    Ti = np.eye(4); Ti[:3, 3] = c             # centered → world
+    src_c = o3d.geometry.PointCloud(source_pcd).transform(To.copy())
+    tgt_c = o3d.geometry.PointCloud(target_pcd).transform(To.copy())
+
     result = o3d.pipelines.registration.registration_icp(
-        source_pcd, target_pcd,
+        src_c, tgt_c,
         max_correspondence_distance=float(max_correspondence_distance),
-        init=init_T,
+        init=To @ np.asarray(init_T, dtype=float) @ Ti,      # 초기값도 centered 로
         estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
         criteria=o3d.pipelines.registration.ICPConvergenceCriteria(
             max_iteration=int(max_iter),
         ),
     )
 
-    T_ref = np.asarray(result.transformation, dtype=float)
+    # 게이트(drift)는 **월드 좌표 의미**로 재야 하므로 되돌려서 판정한다.
+    T_ref = Ti @ np.asarray(result.transformation, dtype=float) @ To
     delta_T = np.linalg.inv(init_T) @ T_ref
     dt = float(np.linalg.norm(delta_T[:3, 3]))
     try:

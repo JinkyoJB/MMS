@@ -205,6 +205,10 @@ NBV_PATCH_SPAN_DEG = _envf("MMS_SIM_NBV_SPAN", 90.0)   # 목표 θ 중심 ±span
 # 근거하므로 줄이면 내부 취득량이 준다.
 ENSURE_SPAN_DEG    = _envf("MMS_SIM_ENSURE_SPAN", 360.0)
 # 디버그 오버레이 갱신 주기·점수 — 매 프레임 수만 점을 USD 에 쓰면 캡처보다 비싸다.
+DRIFT_TRANS_M   = _envf("MMS_SIM_DRIFT_T", 0.030)
+DRIFT_ROT_DEG   = _envf("MMS_SIM_DRIFT_R", 15.0)
+ICP_DUMP        = os.environ.get("MMS_SIM_ICP_DUMP", "")
+ICP_SCALE_DEBUG = bool(_envf("MMS_SIM_ICP_DEBUG", 0))
 PROFILE_EVERY   = int(_envf("MMS_SIM_PROFILE_EVERY", 20))   # N프레임마다 소요시간 내역
 VIZ_EVERY       = int(_envf("MMS_SIM_VIZ_EVERY", 12))
 VIZ_MAX_PTS     = int(_envf("MMS_SIM_VIZ_MAX_PTS", 12000))
@@ -563,6 +567,10 @@ class IsaacScanSession:
             src.points = o3d.utility.Vector3dVector(_voxel(pts, VOXEL_M))
             tgt = o3d.geometry.PointCloud()
             tgt.points = o3d.utility.Vector3dVector(master)
+            if ICP_DUMP and tag == "flip":      # 오프라인 분석용 입력 덤프
+                np.savez_compressed(ICP_DUMP, src=np.asarray(src.points),
+                                    tgt=np.asarray(tgt.points))
+                print(f"[isaac_scan]   (덤프) ICP 입력 → {ICP_DUMP}")
             # flip 패스(tag="flip")는 hint 기준 오차가 프레임 드리프트보다 크므로
             # 이동 허용치를 넓힌다. 그래도 게이트는 유지 — 틀린 정합이 통과하면
             # 메시 전체가 망가진다.
@@ -571,13 +579,19 @@ class IsaacScanSession:
             #   (bbox Z 79→83mm, 아랫면 정점 25,608→11,033). 뒤집힌 바닥면이 물체 옆면에
             #   미끄러져 붙는 국소최소다. 게이트가 기각한 데는 이유가 있다.
             is_flip = (tag == "flip")
-            drift = 0.080 if is_flip else 0.030
+            drift = 0.080 if is_flip else DRIFT_TRANS_M
+            drot = 15.0 if is_flip else DRIFT_ROT_DEG
             T, res = np.eye(4), None
             for corr in ICP_SCALES_M:
                 self._pump()
                 res = icp_with_gates(src, tgt, T, max_correspondence_distance=corr,
                                      rmse_thresh=corr / 2.0, fitness_thresh=0.20,
-                                     drift_trans_m=drift, drift_rot_deg=15.0)
+                                     drift_trans_m=drift, drift_rot_deg=drot)
+                if ICP_SCALE_DEBUG:
+                    print(f"[isaac_scan]   (icp/{tag}) corr={corr*1000:.0f}mm "
+                          f"ok={res.ok} fitness={res.fitness:.3f} "
+                          f"rmse={res.rmse*1000:.2f}mm Δt={res.delta_translation_m*1000:.1f}mm "
+                          f"Δr={res.delta_rotation_deg:.1f}° [{res.reason}]")
                 T = res.T_refined
             if res is not None and res.ok:
                 return pts @ T[:3, :3].T + T[:3, 3], res
