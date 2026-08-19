@@ -177,7 +177,7 @@ class ArtecMultiPassScanSessionSettings:
     # 아래 키들은 그 알고리즘의 공통 파라미터.
     adaptive_target_standoff_mm: float = 225.0   # 최적대역 중앙 목표 거리
     adaptive_min_preview_verts: int = 1500       # preview 유효 최소 정점
-    adaptive_robot_speed_deg_s: float = 15.0
+    adaptive_robot_speed_deg_s: float = 30.0   # 2026-08-19: 15→30 (2배)
 
     # ── 고도각(elevation) 탐색 공통 파라미터 ───────────────────────────
     # recovery 호출 시의 elevation search 범위·기본 offsets. 재조준은
@@ -268,7 +268,7 @@ class ArtecMultiPassScanSessionSettings:
     nbv_coverage_tau: float = 0.92          # 수렴: 각도 커버리지 ≥ τ
     nbv_coverage_dirs: int = 64
     nbv_coverage_parallel_deg: float = 40.0
-    nbv_robot_speed_deg_s: float = 12.0     # NBV 로봇 이동 속도 (보수적)
+    nbv_robot_speed_deg_s: float = 24.0     # NBV 로봇 이동 속도 (2026-08-19: 12→24, 2배)
     nbv_sweep_deg: float = 15.0             # 캡처 시 턴테이블 ±스윕 (overlap)
     nbv_theta_assist: bool = False          # True=턴테이블 회전 보조(θ planner). 기본 robot-only.
     nbv_theta_n_samples: int = 72           # θ assist 그리드

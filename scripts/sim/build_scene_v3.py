@@ -75,6 +75,7 @@ CAMERA_LOCAL_T = (0.0005422895257581883,
 # 바닥 높이는 캐스터 바퀴 하단(Z=-0.071) 에 맞춘다. CAD 의 'floor' 파트는
 # 카트 자체 베이스판(Z -0.005~0)이라 방 바닥이 아니다.
 GROUND_Z = -0.071
+GROUND_GRID_STEP = 0.25      # 바닥 격자 간격(m)
 GROUND_HALF = 4.0        # 8m × 8m
 
 # ── 물리 ───────────────────────────────────────────────────────────────────
@@ -348,6 +349,67 @@ def consolidate_spider(stage, v2_abs: str, cam_t=CAMERA_LOCAL_T) -> None:
           f"광축 {np.round(-cr[2], 4).tolist()} (스캐너 −Y), clip (0.01, 0.5)m")
 
 
+# ── 재질 (MDL) ────────────────────────────────────────────────────────────────
+# ★ 씬은 build_scene_v3.py 가 **매번 재생성**하므로 GUI 로 입힌 재질은 사라진다.
+#   그래서 여기에 코드로 박는다(2026-08-19, 사용자 지정).
+#   MDL 은 로컬에 없고 Omniverse 콘텐츠 서버 URL 로 참조된다(최초 로드 시 다운로드).
+MDL_BASE = ("https://omniverse-content-production.s3.us-west-2.amazonaws.com"
+            "/Materials/2023_1/Base")
+MATERIALS = {
+    "Aluminum_Cast":           f"{MDL_BASE}/Metals/Aluminum_Cast.mdl",
+    "Aluminum_Anodized_Black": f"{MDL_BASE}/Metals/Aluminum_Anodized_Black.mdl",
+    "Aluminum_Polished":       f"{MDL_BASE}/Metals/Aluminum_Polished.mdl",
+    "Carpet_Cream":            f"{MDL_BASE}/Carpet/Carpet_Cream.mdl",
+}
+# prim 이름 → 재질. 이름 규칙으로 묶어 재생성해도 그대로 붙는다.
+#   툴체인저/툴스탠드 = Aluminum_Cast
+#   턴테이블이 올라가는 상판(universal_plate) = Aluminum_Polished
+#   나머지 프레임 부재(HFS8 압출 등) = Aluminum_Anodized_Black
+#   턴테이블 박스(part_117) = Carpet_Cream
+MATERIAL_RULES = [
+    ("Aluminum_Polished",       lambda n: n == "universal_plate"),
+    ("Aluminum_Cast",           lambda n: "toolchanger" in n or "toolstand" in n),
+    ("Carpet_Cream",            lambda n: n == "part_117"),
+    ("Aluminum_Anodized_Black", lambda n: n.startswith("HFS8")),
+]
+
+
+def add_materials(stage) -> None:
+    """/World/Looks 에 MDL 재질을 만들고 규칙에 따라 프레임 파트에 바인딩."""
+    from pxr import UsdShade, Sdf
+    looks = "/World/Looks"
+    UsdGeom.Scope.Define(stage, looks)
+    mats = {}
+    for name, url in MATERIALS.items():
+        path = f"{looks}/{name}"
+        m = UsdShade.Material.Define(stage, path)
+        sh = UsdShade.Shader.Define(stage, f"{path}/Shader")
+        sh.CreateIdAttr("mdlMaterial")
+        sh.SetSourceAsset(Sdf.AssetPath(url), "mdl")
+        sh.SetSourceAssetSubIdentifier(name, "mdl")
+        m.CreateSurfaceOutput("mdl").ConnectToSource(sh.ConnectableAPI(), "out")
+        m.CreateDisplacementOutput("mdl").ConnectToSource(sh.ConnectableAPI(), "out")
+        m.CreateVolumeOutput("mdl").ConnectToSource(sh.ConnectableAPI(), "out")
+        mats[name] = m
+    # 바닥에는 MDL 을 바인딩하지 않는다 — 격자를 기하로 직접 그리므로(add_environment)
+    # displayColor 가 그대로 보이는 편이 확실하다.
+    n_bound = {k: 0 for k in MATERIALS}
+    frame = stage.GetPrimAtPath("/World/frame")
+    if frame.IsValid():
+        for child in frame.GetChildren():
+            nm = child.GetName()
+            for mat_name, rule in MATERIAL_RULES:
+                if not rule(nm):
+                    continue
+                # 메시가 자식에 있으면 거기에, 없으면 파트 자체에 바인딩
+                targets = [d for d in Usd.PrimRange(child) if d.IsA(UsdGeom.Mesh)]
+                for t in (targets or [child]):
+                    UsdShade.MaterialBindingAPI(t).Bind(mats[mat_name])
+                n_bound[mat_name] += 1
+                break
+    print("  재질: " + ", ".join(f"{k}={v}개" for k, v in n_bound.items()))
+
+
 def add_physics(stage, approx: str = "convexHull") -> None:
     """프레임 파트에 static collider, 턴테이블 disc 에 kinematic rigid body."""
     from pxr import UsdPhysics
@@ -485,11 +547,33 @@ def add_environment(stage, ground: bool, lights: bool) -> None:
         m.CreateFaceVertexIndicesAttr(Vt.IntArray([0, 1, 2, 3]))
         m.CreateNormalsAttr(Vt.Vec3fArray([Gf.Vec3f(0, 0, 1)] * 4))
         m.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
-        m.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.35, 0.36, 0.38)]))
+        # ★ 회색이면 알루미늄 프레임과 헷갈린다(사용자 피드백) → **파란 격자**.
+        #   MDL 로 하려 했으나 Base/Pattern/Grid.mdl 은 **404**(존재하지 않는 경로)였고,
+        #   더 중요한 것은 **displayColor 가 회색의 진짜 출처**라는 점이다 —
+        #   MDL 이 안 뜨면(오프라인 등) 이 값이 그대로 보이고, Material 을 지워도
+        #   색이 안 바뀌는 이유가 이것이다. 그래서 기하+displayColor 로 직접 그린다.
+        m.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.05, 0.11, 0.26)]))
         m.CreateExtentAttr(Vt.Vec3fArray([Gf.Vec3f(-h, -h, z), Gf.Vec3f(h, h, z)]))
         # 물리: 정적 콜라이더 (카트 캐스터가 여기 닿는다)
         UsdPhysics.CollisionAPI.Apply(m.GetPrim())
-        print(f"  바닥: {2*h:.0f}m×{2*h:.0f}m @ Z={z:.3f} (캐스터 하단), 콜라이더 적용")
+
+        step = GROUND_GRID_STEP
+        pts, counts = [], []
+        k = int(h / step)
+        for i in range(-k, k + 1):
+            u = i * step
+            pts += [Gf.Vec3f(-h, u, z + 0.001), Gf.Vec3f(h, u, z + 0.001)]
+            counts.append(2)
+            pts += [Gf.Vec3f(u, -h, z + 0.001), Gf.Vec3f(u, h, z + 0.001)]
+            counts.append(2)
+        g = UsdGeom.BasisCurves.Define(stage, "/World/Environment/GroundGrid")
+        g.CreateTypeAttr("linear")
+        g.CreatePointsAttr(Vt.Vec3fArray(pts))
+        g.CreateCurveVertexCountsAttr(Vt.IntArray(counts))
+        g.CreateWidthsAttr(Vt.FloatArray([0.006] * len(pts)))
+        g.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.30, 0.62, 1.0)]))
+        print(f"  바닥: {2*h:.0f}m×{2*h:.0f}m @ Z={z:.3f}, 파란 격자 {step*100:.0f}cm "
+              f"({len(counts)}선), 콜라이더 적용")
 
 
 def main() -> None:
@@ -514,6 +598,8 @@ def main() -> None:
                     choices=["convexHull", "boundingCube", "none"],
                     help="프레임 파트 콜라이더 근사 (기본 convexHull)")
     ap.add_argument("--no-lights", action="store_true", help="조명 생략")
+    ap.add_argument("--no-materials", action="store_true",
+                    help="MDL 재질 생략(오프라인 등 콘텐츠 서버 접근 불가 시)")
     ap.add_argument("--no-ground", action="store_true", help="바닥 생략")
     ap.add_argument("--scanner-clock-deg", type=float, default=180.0,
                     help="어댑터+Spider 만 툴축 둘레로 회전 deg. 180 이면 스캐너가 "
@@ -618,6 +704,8 @@ def main() -> None:
 
     # (7) 환경 — 조명·바닥
     add_environment(stage, ground=not args.no_ground, lights=not args.no_lights)
+    if not args.no_materials:
+        add_materials(stage)
 
     # (8) 물리 — 충돌·턴테이블
     if not args.no_physics:

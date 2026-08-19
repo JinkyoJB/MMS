@@ -85,23 +85,21 @@ def ik_seeds(seed, n_alt=DEFAULT_N_SEED_ALT, rng_seed=0):
     return [s0] + [s0 + rng.uniform(-1.0, 1.0, len(s0)) for _ in range(int(n_alt))]
 
 
-def solve_view_q(kin, target_w, el_deg, az_deg, standoff, seed, T_EC, *,
-                 T_WB=None, convention=CAM_USD, rolls_deg=DEFAULT_ROLLS_DEG,
-                 n_seed_alt=DEFAULT_N_SEED_ALT, world_up=(0.0, 0.0, 1.0),
-                 min_sigma=DEFAULT_MIN_SIGMA):
-    """(q, roll_deg, eye) — 못 풀면 (None, None, eye).
+def solve_look_at_q(kin, eye, target, seed, T_EC, *,
+                    T_WB=None, convention=CAM_USD, rolls_deg=DEFAULT_ROLLS_DEG,
+                    n_seed_alt=DEFAULT_N_SEED_ALT, world_up=(0.0, 0.0, 1.0),
+                    min_sigma=DEFAULT_MIN_SIGMA):
+    """(q, roll_deg) — **카메라 위치와 겨냥점을 직접** 주는 경로. 못 풀면 (None, None).
 
-    target_w / T_WB 프레임 규칙
-      · T_WB 를 주면 target 은 **world**, 내부에서 base 로 변환한다(sim).
-      · T_WB=None 이면 target 이 이미 **base** 프레임이다(real).
-    T_EC : E→C (카메라→플랜지). 호출자의 `convention` 과 짝이 맞는 값을 넘길 것.
-    min_sigma : 특이점 회피 임계(σ_min). 이보다 조건이 나쁜 해는 **버리고 계속 탐색**한다
-                — roll·시드 후보가 여럿이므로 대개 더 나은 해가 있다. 0 이면 비활성.
+    `solve_view_q` 는 '축을 el/az/standoff 에서 본다'는 규칙이라 **오목·내부 면을
+    겨냥할 수 없다**(카메라가 늘 물체 바깥 구면에 놓인다). 컵 내벽처럼 법선이 안쪽을
+    향하는 면은 표면점 기준으로 카메라를 놓아야 하므로 이 함수를 쓴다.
     """
-    eye = eye_from_el_az(target_w, el_deg, az_deg, standoff)
+    eye = np.asarray(eye, float)
+    target = np.asarray(target, float)
     seeds = ik_seeds(seed, n_seed_alt)
     for roll in rolls_deg:
-        T_C = camera_pose(eye, target_w, convention, roll, world_up)
+        T_C = camera_pose(eye, target, convention, roll, world_up)
         if T_WB is not None:
             T_C = np.linalg.inv(np.asarray(T_WB, float)) @ T_C
         T_EB = T_C @ np.asarray(T_EC, float)
@@ -114,11 +112,28 @@ def solve_view_q(kin, target_w, el_deg, az_deg, standoff, seed, T_EC, *,
             if min_sigma > 0.0:
                 try:
                     if kin.sigma_min(q) < min_sigma:
-                        continue           # 특이점 근처 해 — 다음 후보로
+                        continue
                 except Exception:
-                    pass                   # 지표 미제공 운동학이면 그냥 통과
-            return q, float(roll), eye
-    return None, None, eye
+                    pass
+            return q, float(roll)
+    return None, None
+
+
+def solve_view_q(kin, target_w, el_deg, az_deg, standoff, seed, T_EC, *,
+                 T_WB=None, convention=CAM_USD, rolls_deg=DEFAULT_ROLLS_DEG,
+                 n_seed_alt=DEFAULT_N_SEED_ALT, world_up=(0.0, 0.0, 1.0),
+                 min_sigma=DEFAULT_MIN_SIGMA):
+    """(q, roll_deg, eye) — target 을 (el, az, standoff) 에서 보는 자세. 실패 시 (None, None, eye).
+
+    카메라가 **물체 바깥 구면**에 놓이는 규칙이라 외부 표면 전용이다. 내부·오목면은
+    `solve_look_at_q` 를 쓸 것.
+    """
+    eye = eye_from_el_az(target_w, el_deg, az_deg, standoff)
+    q, roll = solve_look_at_q(kin, eye, target_w, seed, T_EC, T_WB=T_WB,
+                              convention=convention, rolls_deg=rolls_deg,
+                              n_seed_alt=n_seed_alt, world_up=world_up,
+                              min_sigma=min_sigma)
+    return q, roll, eye
 
 
 def roll_order_for_gaps(gap_points, gap_weights, eye, target, convention=CAM_USD,

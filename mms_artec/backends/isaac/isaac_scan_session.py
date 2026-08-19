@@ -41,6 +41,7 @@ from utils.collision import env_collision as _env_col
 from utils.collision import collision_model as _colmodel
 from utils.control.joint_path_planner import plan_joint_path as _plan_path
 from utils.robot import view_pose as _vp
+from mms_artec.backends.isaac import isaac_debug_viz as _viz
 from mms_artec.utils.calibration import handeye_error as _he
 from utils.robot import xarm7_kinematics as kin
 from utils.control.theta_planner import DEFAULT_JOINT_WEIGHTS
@@ -68,10 +69,25 @@ SPAWN_PRIM      = "/World/SimScanObject"
 # Spider working distance(0.2~0.3) 중앙. standoff 는 **표면이 이 거리에 오도록** 동적 계산
 # (카메라 클립=실 스펙 0.2~0.3 유지 → 표면이 0.25 면 근/원접클립 모두 안전).
 WORK_FOCUS      = 0.25
-DRIVE_STEPS     = int(_envf("MMS_SIM_DRIVE_STEPS", 30))   # 관절 보간 스텝(클수록 부드럽고 느림)
-N_THETA         = int(_envf("MMS_SIM_NTHETA", 36))     # Phase1/3 전회전 프레임수(낮추면 빠름)
-N_THETA_P2      = int(_envf("MMS_SIM_NTHETA_P2", 24))   # Phase2 보강 전회전 프레임수(빠르게)
-CAPTURE_SETTLE  = int(_envf("MMS_SIM_CAPTURE_SETTLE", 2))  # 캡처 전 정지 렌더 step(정지상태라 2면 충분)
+# 관절 보간 스텝 — 클수록 부드럽고 느리다. 스텝마다 world.step(render) 하므로
+# **스텝 수가 곧 이동 시간**이다. 30→15 로 속도 2배(2026-08-19 요청).
+# 충돌 검사는 스텝 수와 무관하다(보수적 전진이 별도로 경로를 보증).
+DRIVE_STEPS     = int(_envf("MMS_SIM_DRIVE_STEPS", 15))
+# ★ 프레임 밀도를 **실물과 맞춘다**. 실물 streaming 은 30초/회전 × 스캐너 max_fps(≈8)
+#   ≈ 240프레임/회전이다. sim 은 36프레임이라 **20배 성겼고**, 그 결과
+#     · Poisson 표면이 조각나 gap 이 폭증하고(실측 20 → 418)
+#     · 프레임/패치 간 중첩이 얕아 ICP 정합이 계속 게이트에 걸렸다(RMSE 2.3~2.5mm)
+#   각도 구간에 비례해 프레임을 배분하므로 부분 스윕도 같은 밀도를 유지한다.
+SCAN_FRAMES_PER_REV = int(_envf("MMS_SIM_FRAMES_PER_REV", 240))   # 실물: 30s × 8fps
+# Phase 2 도 **실물 밀도 유지**. 입력을 줄이는 대신 **연산을 가볍게** 해서 소화한다
+# (사용자 방침 2026-08-19). 성긴 입력은 메시 조각남·정합 실패의 원인이었다.
+NBV_FRAMES_PER_REV = int(_envf("MMS_SIM_NBV_FRAMES_PER_REV", SCAN_FRAMES_PER_REV))
+N_THETA         = int(_envf("MMS_SIM_NTHETA", SCAN_FRAMES_PER_REV))
+N_THETA_P2      = int(_envf("MMS_SIM_NTHETA_P2", NBV_FRAMES_PER_REV))
+# 캡처 전 정지 렌더 step. 턴테이블 move_abs 가 이미 렌더하며 이동하므로 1 이면 충분하다.
+# (2 였을 때 프레임당 렌더가 3회 → 240프레임 전회전에서 720회. 실물 밀도로 올린 뒤
+#  이게 Phase 2 지연의 큰 몫이었다.)
+CAPTURE_SETTLE  = int(_envf("MMS_SIM_CAPTURE_SETTLE", 1))
 # Phase1 측면 관측 elevation.
 # ★ 정정(2026-08-13) — 한때 "v3 레이아웃은 el≤30 도달 불가" 로 판단해 50 으로 올렸으나,
 #   **하드웨어 한계가 아니라 `_view_q` 가 광축(roll)을 하나로 고정한 탓**이었다.
@@ -85,7 +101,24 @@ VIEW_EL_DEG     = _envf("MMS_SIM_VIEW_EL", 30.0)
 # el 20 은 실측에서도 도달 자세가 없어 제외한다.
 P1_ELS = tuple(float(x) for x in
                os.environ.get("MMS_SIM_P1_ELS", "30,40,50,60,70").split(","))
-VIEW_AZIS_DEG   = [0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 180.0]
+# 로봇이 만들 방위각(az). **턴테이블이 az 를 담당**하므로 로봇은 안전한 좁은 대역만 쓴다.
+# 실측(el=35/55 × az 8방향, 물체중심 겨냥):
+#     az    관절이동   자가여유   판정
+#      0°     58°       52mm     OK      ← 최적
+#    -30°    362°       12mm     충돌
+#    -60°    409°        3mm     충돌
+#    -90°    445°        1mm     충돌
+# az 를 벌릴수록 팔이 물체를 크게 돌아 감싸 이동량 8배·여유 1mm 까지 떨어진다
+# (16개 조합 중 9개가 충돌 기각). 방위 커버리지는 전회전이 이미 제공하므로
+# 로봇이 az 를 만들 이유가 없다 — 턴테이블이 공짜로 해줄 일을 위험하게 하는 셈.
+VIEW_AZIS_DEG = [float(x) for x in
+                 _envs("MMS_SIM_VIEW_AZIS", "0,30,-30").split(",") if x.strip()]
+# 오목 물체(컵 등) 내부를 보려면 높은 고도각이 필요하다. 그런데 **미관측 내벽은 메시에
+# 없어 gap 으로 잡히지 않아** el_need 가 올라갈 근거가 없다(닭·달걀). 그래서 gap 과
+# 무관하게 이 고도각들을 **최소 한 번** 시도하도록 보장한다.
+# 실측: el=55° az=0° standoff 0.25 한 자세 + 전회전으로 컵 내벽·내부바닥 100% 커버.
+ENSURE_ELS = tuple(float(x) for x in
+                   _envs("MMS_SIM_ENSURE_ELS", "55").split(",") if x.strip())
 # 광축(roll) 둘레 회전 후보 — **크기 순**. 0 을 먼저 쓰므로 기존에 풀리던 자세의 해는
 # 그대로고, IK 가 실패할 때만 최소 각도부터 넓힌다. `_view_q` 주석 참고.
 #   실측(v3, X=0.365): roll 고정이면 시드를 12개로 늘려도 el30·40 이 0/8.
@@ -107,9 +140,20 @@ SELF_CLEAR_M    = _envf("MMS_SIM_SELF_CLEAR", 0.02)
 # **칠 수 있는데 안전하다고 판정**하고 있었다(미탐). docs/4_collision.md P1.
 ENV_CLEAR_M     = _envf("MMS_SIM_ENV_CLEAR", 0.025)
 VOXEL_M         = 0.002
+# 커버리지 메시 재구성용 — 누적이 이보다 크면 다운샘플(판단용이라 원본 해상도 불필요)
+MESH_MAX_PTS    = int(_envf("MMS_SIM_MESH_MAX_PTS", 150000))
+MESH_VOXEL_M    = _envf("MMS_SIM_MESH_VOXEL", 0.003)
+MESH_LOOP_DEPTH = int(_envf("MMS_SIM_MESH_DEPTH", 6))   # 루프용(최종은 8)
 # grazing 임계 — 입사각이 이보다 크면 구조광이 못 잡는다(윗면 gap 생성 = NBV 대상)
 MAX_INCIDENCE_DEG = _envf("MMS_SIM_MAXINC", 50.0)
 APPLY_INCIDENCE = _envs("MMS_SIM_INCIDENCE", "1") == "1"
+# 내부·오목면은 **비스듬히 들여다볼 수밖에 없어** 입사각이 필연적으로 크다.
+# 외부용 임계(50°)를 그대로 쓰면 어렵게 만든 내부 자세의 점이 전부 걸러진다.
+# ⚠ 크게 풀면 안 된다(실측). 70° 로 풀었더니 스치는 각의 얇고 성긴 점이 대량 유입돼
+#   Poisson 메시가 파편화됐다: boundary 915 → **9,286mm**, gaps 18 → **251**.
+#   sim 은 GT 깊이라 그 점들이 '정확'하지만, 실물 구조광은 그 각도에서 못 잡는다 —
+#   즉 완화는 **실물에 없는 데이터를 만들어내는** 셈이라 검증도 무의미해진다.
+MAX_INCIDENCE_INNER_DEG = _envf("MMS_SIM_MAXINC_INNER", 60.0)
 # ── 패스 간 정합 (real 과 같은 구조) ─────────────────────────────────────────
 # real 은 새 패스를 master 에 **open3d ICP** 로 붙인다
 # (`artec_multipass_scan_session._hint_icp_refine`, colored ICP + point-to-plane fallback,
@@ -137,14 +181,37 @@ DISC_REJECT_M = _envf("MMS_SIM_DISC_REJECT", 0.003)
 # 검증할 수 있다. 남은 gap 의 상당수는 법선이 수평 아래를 향해(실측 중앙값 -13°)
 # **어떤 관측 elevation 으로도 못 보므로**, flip 없이는 원리적으로 못 메운다.
 FLIP_AXIS = _envs("MMS_SIM_FLIP_AXIS", "y")
+# 기본은 **180° 만** — 0° 는 Phase 1·2 가 이미 스캔한 원래 자세이고, 바닥면은
+# 180° 뒤집기 하나로 취득된다. 90°(옆으로 눕히기)는 시간이 두 배 들고 이득이 작아
+# **요청 시에만** 쓴다:  MMS_SIM_FLIP_ANGLES=90,180
 FLIP_ANGLES_DEG = tuple(float(x) for x in
-                        _envs("MMS_SIM_FLIP_ANGLES", "90,180").split(",") if x.strip())
+                        _envs("MMS_SIM_FLIP_ANGLES", "180").split(",") if x.strip())
 
 # Phase 2 NBV
 NBV_DISTANCE_M  = 0.225
 NBV_APPROACH_ELS  = [55.0, 50.0, 60.0, 65.0]
 NBV_APPROACH_AZIS = [0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 180.0]
-NBV_K_MAX       = 4
+# Phase 2 반복 횟수. gap 을 **직접 겨냥**하게 되면서 자세마다 덮는 영역이 국소적이라
+# (예전엔 축을 봐서 한 패스가 광역을 덮었다) 더 많은 패스가 필요하다.
+NBV_K_MAX       = int(_envf("MMS_SIM_NBV_K", 8))
+# ★ Phase 2 부분 스윕 — 목표 gap 이 보이는 **좁은 각도 구간만** 돌고 끝낸다.
+#   예전에는 자세마다 무조건 360°(24프레임)를 돌았다. gap 하나 채우려고 한 바퀴를 도는
+#   동안 스캐너는 이미 가진 면만 다시 본다 — 순수한 낭비다.
+# ⚠ 좁히면 정합이 무너진다(실측). 60°/7프레임에서 프레임 간 중첩이 부족해 ICP 가
+#   흔들렸고, 어긋난 점이 이중 표면을 만들어 메시가 조각났다:
+#   boundary 963 → 13,927mm, gaps 20 → 418 (구멍이 는 게 아니라 **메시가 부서진 것**).
+NBV_PATCH_SPAN_DEG = _envf("MMS_SIM_NBV_SPAN", 90.0)   # 목표 θ 중심 ±span/2
+# 보장 고도각 패스의 스윕 폭. 360=전회전(기본). 오목 내부 커버가 전회전에
+# 근거하므로 줄이면 내부 취득량이 준다.
+ENSURE_SPAN_DEG    = _envf("MMS_SIM_ENSURE_SPAN", 360.0)
+# 디버그 오버레이 갱신 주기·점수 — 매 프레임 수만 점을 USD 에 쓰면 캡처보다 비싸다.
+PROFILE_EVERY   = int(_envf("MMS_SIM_PROFILE_EVERY", 20))   # N프레임마다 소요시간 내역
+VIZ_EVERY       = int(_envf("MMS_SIM_VIZ_EVERY", 12))
+VIZ_MAX_PTS     = int(_envf("MMS_SIM_VIZ_MAX_PTS", 12000))
+# master 다운샘플 캐시를 다시 만드는 성장 배수. 1.15 = 점이 15% 늘면 갱신.
+MASTER_DS_GROW  = _envf("MMS_SIM_MASTER_DS_GROW", 1.15)
+# 0 = 각도 구간에 비례해 자동 산정(실물과 같은 프레임 밀도).
+NBV_PATCH_FRAMES   = int(_envf("MMS_SIM_NBV_FRAMES", 0))
 NBV_SWEPT_STEPS = 12
 GAP_KW = dict(min_seg_vertices=8, min_seg_length=0.006, max_seg_length=0.06)
 
@@ -232,6 +299,7 @@ class IsaacScanSession:
         self._nbv = _NbvPlanner(joint_weights=DEFAULT_JOINT_WEIGHTS,
                                 el_floor_deg=VIEW_EL_DEG,
                                 view_azis_deg=VIEW_AZIS_DEG,
+                                ensure_els=ENSURE_ELS,
                                 log=lambda m: print(f"[isaac_scan] {m}"))
         self._last_roll = None                      # _view_q 가 채택한 roll(로그용)
         # 자가충돌 = 실제 메시 판정(캐시 없으면 None → 캡슐 폴백)
@@ -366,7 +434,11 @@ class IsaacScanSession:
     def _capture_obj_world(self, log=False):
         """capture_points_base → **world** 변환 → 객체 crop(world bbox) + (옵션)입사각 필터.
         ★ world 에서 crop: base 회전·박스높이 무관. 반환 = world 점군."""
+        import time as _t
+        _ta = _t.time()
         pc_b = self.scanner.capture_points_base(self.robot, self.mms._T_EC, settle=CAPTURE_SETTLE)
+        self._tick("  ├cam", _ta)
+        _tb = _t.time()
         # sim 카메라는 GT 포즈로 점군을 준다. 실물은 카메라 프레임 점군을 **캘리브값**으로
         # base 에 올리므로 오차가 점군에 실린다 — 주입이 켜져 있으면 그 경로를 재현한다.
         if pc_b is not None and len(pc_b) and self.T_EC is not self.T_EC_true:
@@ -388,9 +460,12 @@ class IsaacScanSession:
              & (pc[:, 2] > max(self.obj_zlo_w - 0.005, z_floor))
              & (pc[:, 2] < self.obj_zhi_w + 0.02))
         obj = _voxel(pc[m], VOXEL_M)
+        self._tick("  ├crop", _tb)
         n_crop = len(obj)
+        _td = _t.time()
         if APPLY_INCIDENCE and len(obj) >= 4:
             obj = self._incidence_filter(obj)
+        self._tick("  └incidence", _td)
         if log:
             print(f"    [capture] raw={len(pc_b)} crop={n_crop} incidence후={len(obj)}")
         return obj
@@ -402,7 +477,9 @@ class IsaacScanSession:
         vd = self._cam_pos_world()[None, :] - pts_w
         vd /= (np.linalg.norm(vd, axis=1, keepdims=True) + 1e-9)
         cos_inc = np.sum(nrm * vd, axis=1)
-        return pts_w[cos_inc > math.cos(math.radians(MAX_INCIDENCE_DEG))]
+        lim = (MAX_INCIDENCE_INNER_DEG if getattr(self, "_gap_pass", False)
+               else MAX_INCIDENCE_DEG)
+        return pts_w[cos_inc > math.cos(math.radians(lim))]
 
     # ── 충돌 (공용 robot_collision + 스캐너 mesh) ────────────────────────────
     def _build_world(self) -> CollisionWorld:
@@ -497,6 +574,7 @@ class IsaacScanSession:
             drift = 0.080 if is_flip else 0.030
             T, res = np.eye(4), None
             for corr in ICP_SCALES_M:
+                self._pump()
                 res = icp_with_gates(src, tgt, T, max_correspondence_distance=corr,
                                      rmse_thresh=corr / 2.0, fitness_thresh=0.20,
                                      drift_trans_m=drift, drift_rot_deg=15.0)
@@ -509,11 +587,19 @@ class IsaacScanSession:
             return pts, None
 
     def _master_ds(self):
-        """누적 master 의 다운샘플 캐시 — 프레임마다 전체를 다시 쌓지 않는다."""
+        """누적 master 의 다운샘플 캐시.
+
+        ⚠ 예전 구현은 `n != 이전 n` 으로 무효화했는데, 프레임마다 점이 늘어 **항상**
+          다시 만들었다 — 즉 캐시가 아니었다. Phase 2 처럼 누적이 30만점을 넘으면
+          프레임마다 vstack+voxel 전체 재계산이라 캡처 간격이 눈에 띄게 벌어졌다.
+          → **일정 비율 이상 늘었을 때만** 갱신한다. ICP 타깃은 조금 옛것이어도
+            정합 품질에 영향이 거의 없다(어차피 다운샘플된 근사 타깃이다).
+        """
         n = sum(len(a) for a in self.accum)
         if n == 0:
             return None
-        if getattr(self, "_ds_n", -1) != n:
+        n0 = getattr(self, "_ds_n", 0)
+        if getattr(self, "_ds_cache", None) is None or n > n0 * MASTER_DS_GROW:
             self._ds_cache = _voxel(np.vstack(self.accum), VOXEL_M * 2.0)
             self._ds_n = n
         return self._ds_cache
@@ -738,6 +824,10 @@ class IsaacScanSession:
                     self._merge_frame(canon)      # 프레임마다 master 에 재고정
                 else:
                     pass_pts.append(canon)
+            if _viz.ENABLED and self.accum and (i % VIZ_EVERY == 0):
+                _viz.show_accum(self.stage, np.vstack(self.accum),
+                                max_pts=VIZ_MAX_PTS,
+                                theta=th_act, axis_xy=self.axis_w[:2])
         if ICP_LEVEL != "frame" or phase == 3:
             self._merge_pass(pass_pts, force_icp=(phase == 3))
         elif getattr(self, "_icp_fail", 0):
@@ -749,8 +839,80 @@ class IsaacScanSession:
         #  clearpos 의 _co_rotate(0) 는 시각 점프 없음.)
         self.turntable.move_abs(float(2 * np.pi), float(np.radians(30.0)))
         self.turntable.clearpos()
+        # ★ 오버레이를 θ=0 으로 되그린다. 캡처 중에는 현재 θ 로 회전시켜 물리 물체에
+        #   겹쳐 보여주는데, clearpos() 로 물체가 0 으로 돌아온 뒤에도 마지막 θ 로
+        #   남아 있으면 어긋나 보인다(패스 종료 시점의 '이상한' 화면의 원인).
+        if _viz.ENABLED and self.accum:
+            _viz.show_accum(self.stage, np.vstack(self.accum))
         added = sum(len(a) for a in self.accum) - before
         print(f"[isaac_scan]   pass 완료 (+{added}점, 총 {before+added})")
+        return True
+
+    def _scan_patch(self, q, theta_c, label="", span_deg=None, n_frames=None):
+        """**부분 스윕** — 목표 θ 주변 좁은 구간만 돌며 캡처한다.
+
+        Phase 2 의 목적은 '특정 결손면 채우기'다. 그 면이 보이는 각도 구간만 돌면 되고,
+        한 바퀴를 도는 동안 이미 가진 면을 다시 보는 것은 순수한 낭비다.
+        (Phase 1·3 은 전면 커버가 목적이라 전회전 `_scan_pass` 를 그대로 쓴다.)
+        """
+        if q is not AT_CURRENT and q is not None:
+            if not self._drive(q):
+                print("[isaac_scan]   ⚠ 이동 불가 — 이 패스 건너뜀")
+                return False
+        span = math.radians(float(span_deg if span_deg is not None else NBV_PATCH_SPAN_DEG))
+        n = int(n_frames if n_frames is not None else NBV_PATCH_FRAMES)
+        if n <= 0:      # 각도 비례 — 전회전과 같은 프레임 밀도를 유지한다
+            n = int(round(NBV_FRAMES_PER_REV * span / (2 * math.pi)))
+        n = max(2, n)
+        before = sum(len(a) for a in self.accum)
+        patch_pts = []      # ★ 프레임마다 붙이지 않는다 — 아래 참고
+        if label:
+            print(f"[isaac_scan] === patch: {label} "
+                  f"(θ={math.degrees(theta_c):.0f}° ±{math.degrees(span)/2:.0f}°, {n}프레임) ===")
+        import time as _t
+        for i, th in enumerate(np.linspace(theta_c - span/2, theta_c + span/2, n)):
+            _tm = _t.time()
+            self.turntable.move_abs(float(th % (2*np.pi)), float(np.radians(30.0)))
+            self.turntable.wait_motion_done()
+            self._tick("turntable", _tm)
+            th_act = float(self.turntable.getActualPos())
+            import time as _t
+            _tc = _t.time()
+            obj = self._capture_obj_world(log=(i == 0))
+            self._tick("capture", _tc)
+            if len(obj):
+                _tm2 = _t.time()
+                canon = _rot_about_axis(obj, self.axis_w, self.axis_dir_w, -th_act)
+                patch_pts.append(self._unflip(canon))
+                self._tick("merge", _tm2)
+            # 실시간 오버레이 — 프레임마다 갱신해 Phase 2 가 무엇을 채우는지 바로 보인다
+            # (예전엔 계획 시점에만 갱신돼 캡처 중에는 고정된 것처럼 보였다).
+            # 오버레이는 **간헐 갱신**. USD 에 수만 점을 매 프레임 쓰면 렌더보다 비싸다.
+            if _viz.ENABLED and (i % VIZ_EVERY == 0) and (self.accum or patch_pts):
+                _tv = _t.time()
+                _viz.show_accum(self.stage, np.vstack(self.accum + patch_pts),
+                                max_pts=VIZ_MAX_PTS,
+                                theta=th_act, axis_xy=self.axis_w[:2])
+                self._tick("viz", _tv)
+            if PROFILE_EVERY and (i + 1) % PROFILE_EVERY == 0:
+                self.profile_report()          # 병목 추적용 (MMS_SIM_PROFILE_EVERY=0 이면 끔)
+        # ★ 정합 단위 = **패치 전체**. 프레임 단위로 붙이면 부분 스윕은 프레임 간
+        #   중첩이 부족해 ICP 가 흔들리고 메시가 조각난다(실측: gaps 20→418).
+        #   패치를 한 덩어리로 모으면 master 와의 중첩이 충분해 안정적으로 붙는다.
+        if patch_pts:
+            pts = np.vstack(patch_pts)
+            aligned, res = self._icp_to_master(pts, ICP_MIN_PTS, "patch")
+            if res is not None and res.ok:
+                print(f"[isaac_scan]   패치 정합: Δt={res.delta_translation_m*1000:.2f}mm "
+                      f"Δr={res.delta_rotation_deg:.2f}° fitness={res.fitness:.2f}")
+                pts = aligned
+            elif res is not None:
+                print(f"[isaac_scan]   ⚠ 패치 정합 게이트 실패({res.reason}) — 기구학 그대로")
+            self.accum.append(pts)
+        if _viz.ENABLED and self.accum:
+            _viz.show_accum(self.stage, np.vstack(self.accum))   # θ=0 기준으로 되그림
+        added = sum(len(a) for a in self.accum) - before
+        print(f"[isaac_scan]   patch 완료 (+{added}점, 총 {before+added})")
         return True
 
     # ── ScanBackend 프리미티브 (공용 utils/nbv/scan_phase_controller) ──────
@@ -894,12 +1056,32 @@ class IsaacScanSession:
         return chosen
 
     def capture_rotation(self, pose, label: str, phase: int) -> bool:
-        # sim: 로봇을 pose 로 구동 + 턴테이블 전회전 캡처. Phase 2 는 프레임 수 축소.
+        """Phase 1·3 = 전회전(전면 커버), **Phase 2 = 부분 스윕**(목표 gap 만).
+
+        Phase 2 에서 계획기가 목표 θ 를 남겨두면(`_next_theta`) 그 주변만 돈다.
+        남기지 않았으면(축-고도각 폴백) 기존대로 전회전한다.
+        """
+        if phase == 2 and getattr(self, "_next_theta", None) is not None:
+            th = self._next_theta
+            sp = getattr(self, "_next_span", None)
+            self._next_theta = None
+            self._next_span = None
+            return self._scan_patch(pose, th, label=label, span_deg=sp)
         n_theta = N_THETA_P2 if phase == 2 else N_THETA
         return self._scan_pass(pose, n_theta, label=label, phase=phase)
 
     # ── Phase 2 (NBV = 추가 관측 elevation 자세, real 전회전 대응) ──────────────
     def _plan_nbv_pose(self, world, q_cur, gaps):
+        import time as _t
+        _tp = _t.time()
+        self._pump(2)
+        try:
+            return self._plan_nbv_pose_inner(world, q_cur, gaps)
+        finally:
+            self._tick("plan", _tp)
+            self._pump(2)
+
+    def _plan_nbv_pose_inner(self, world, q_cur, gaps):
         """Phase 2 관측자세 — 판단은 **sim·real 공용** `utils/nbv/nbv_planner` 가 한다.
 
         여기서 주입하는 것은 sim 고유의 것 두 가지뿐이다:
@@ -917,18 +1099,129 @@ class IsaacScanSession:
         def roll_order(el, az, gs):
             return self._gap_roll_order(look_target, el, az, standoff, gs)
 
-        res = self._nbv.plan(gaps, q_cur, solve_pose,
-                             lambda a, b: self._swept_free(world, a, b),
+        swept = lambda a, b: self._swept_free(world, a, b)
+        # ★ 뷰포트 오버레이 — gap 이 어디 잡혔는지, NBV 가 뭘 겨냥하는지 눈으로 본다.
+        #   MMS_SIM_VIZ=1 일 때만. 시뮬레이터를 쓰는 최대 이점 중 하나.
+        _viz.show_gaps(self.stage, gaps)
+        if self.accum:
+            _acc = np.vstack(self.accum)
+            _viz.show_accum(self.stage, _acc)
+            _viz.show_voxels(self.stage, _acc, self.obj_center_w,
+                             max(self.obj_radius, self.obj_height / 2) + 0.01)
+
+        def solve_lookat(eye, tgt):
+            return _vp.solve_look_at_q(
+                kin, eye, tgt, q_cur, self.T_EC, T_WB=self.T_WB,
+                convention=_vp.CAM_USD, rolls_deg=VIEW_ROLLS_DEG,
+                n_seed_alt=IK_SEED_TRIES)
+
+        # ── ① 보장 고도각 — 오목 내부는 gap 으로 안 잡히므로(닭·달걀) 사전지식 ──
+        need = [e for e in ENSURE_ELS
+                if not any(abs(float(v[0]) - float(e)) < 1e-6
+                           for v in self._nbv.visited)]
+        if need:
+            res0 = self._nbv.plan(gaps, q_cur, solve_pose, swept,
+                                  roll_order_fn=roll_order)
+            if res0 is not None:
+                # 입사각 완화는 하지 않는다 — 광역 스윕에서 풀면 스치는 점이 대량 유입돼
+                # 메시가 붕괴한다(실측: boundary 9,286mm / gaps 251).
+                self._gap_pass = False
+                # 캡처 경로를 patch 로 통일한다. 기본 span=360°(전회전)라 동작은 그대로고,
+                # MMS_SIM_ENSURE_SPAN 으로 줄이면 그만큼 짧아진다(오목 내부는 전회전이
+                # 커버의 근거이므로 줄일 때는 내부 취득량을 함께 확인할 것).
+                self._next_theta = 0.0
+                self._next_span = ENSURE_SPAN_DEG
+                return res0[0]
+
+        # ── ② gap 겨냥 (주경로) ─────────────────────────────────────────────
+        # ★ 축-고도각 방식(`plan_nbv_elevation_pose`)은 카메라가 **늘 턴테이블 축**을
+        #   보므로, gap 이 어디 있든 그쪽을 향하지 않는다. gap 정보도 '법선 고도각의
+        #   중앙값' 하나로 압축돼 **위치가 통째로 버려진다**. 그래서 손잡이·내벽 같은
+        #   국소 결손을 원리적으로 겨냥할 수 없었다(실측: 손잡이 0점).
+        #   → 표면점 p 에서 법선 n 방향 standoff 위치로 **그 gap 을 정면으로** 본다
+        #     (`phase2_nbv.nbv_pose_from_candidate` 와 같은 원리).
+        #   법선 정면이 막히면(작동거리가 물체보다 큰 오목면 등) 개구부 쪽으로 기울인다.
+        fr = self._nbv.plan_frontier(gaps, q_cur, solve_lookat, swept,
+                                     standoff_m=WORK_FOCUS,
+                                     axis_xy=self.axis_w[:2],
+                                     az_pref_deg=tuple(VIEW_AZIS_DEG))
+        if fr is not None:
+            self._gap_pass = True
+            self._next_theta = fr[3]        # 이 θ 주변만 부분 스윕
+            try:                            # 겨냥한 gap + 카메라 위치를 씬에 표시
+                _q = fr[0]
+                _cam = (self.T_WB @ kin._fk_frames_m(_q)[7]
+                        @ np.linalg.inv(self.T_EC))[:3, 3]
+                _viz.show_target(self.stage, fr[1].p_O, _cam)
+            except Exception:
+                pass
+            return fr[0]
+
+        # ── ③ 폴백: 축-고도각 (턴테이블 회전과 궁합이 좋은 광역 스윕) ──────────
+        self._gap_pass = False
+        res = self._nbv.plan(gaps, q_cur, solve_pose, swept,
                              roll_order_fn=roll_order)
         return None if res is None else res[0]
 
     # ── Phase 2 (NBV hole-fill) 프리미티브 — 수렴 루프는 공용 컨트롤러 소유 ──
+    def _pump(self, n=1):
+        """무거운 파이썬 구간 사이에 **UI 이벤트를 한 번 돌려준다**.
+
+        main_artec 은 파이썬 루프에서 world.step 을 직접 돌리고 Isaac UI 도 **같은
+        스레드**라, Poisson·ICP·계획 같은 순수 파이썬 작업 중에는 GUI 가 완전히 멈춘다
+        (사용자 불편). 단일 무거운 호출 중에는 어쩔 수 없지만, 호출 **사이사이**에
+        펌핑하면 클릭·카메라 조작이 살아난다.
+        """
+        try:
+            app = getattr(self.world, "_sim_app", None)
+            if app is not None:
+                for _ in range(int(n)):
+                    app.update()
+        except Exception:
+            pass
+
+    def _tick(self, tag, t0):
+        import time as _t
+        dt = _t.time() - t0
+        self._prof = getattr(self, "_prof", {})
+        self._prof[tag] = self._prof.get(tag, 0.0) + dt
+        return dt
+
+    def profile_report(self):
+        pr = getattr(self, "_prof", {})
+        if pr:
+            tot = sum(pr.values())
+            print("[isaac_scan] 소요시간: " + ", ".join(
+                f"{k} {v:.1f}s({100*v/tot:.0f}%)"
+                for k, v in sorted(pr.items(), key=lambda kv: -kv[1])))
+
     def build_coverage_mesh(self):
+        # ★ Phase 2 는 매 반복 메시를 다시 만든다. 누적 점이 30만을 넘으면 Poisson 이
+        #   반복마다 큰 비용이 된다 — **커버리지 판단용**이므로 원본 해상도가 필요 없다.
+        #   voxel 로 줄여도 경계(gap) 판단은 거의 동일하다.
+        import time as _t
+        _t0 = _t.time()
         pcd, _ = self._merged_pcd()
+        try:
+            import open3d as o3d
+            n0 = len(pcd.points)
+            if n0 > MESH_MAX_PTS:
+                pcd = pcd.voxel_down_sample(MESH_VOXEL_M)
+                print(f"[isaac_scan]   메시용 다운샘플 {n0:,} → {len(pcd.points):,}점")
+        except Exception:
+            pass
         if len(pcd.points) < 200:
             print("[isaac_scan] Phase2 누적점 부족(<200) — 종료.")
             return None
-        return p2.pcd_to_mesh_poisson(pcd, depth=8, density_quantile=0.04)
+        # ★ 루프용 메시는 **저비용**으로. Artec 도 스캔 중에는 FastFusion(복셀 기반)을
+        #   쓰고 Poisson 은 후처리 전용이다. 여기서 필요한 건 '어디가 비었나' 판단이지
+        #   최종 품질이 아니므로 depth 를 낮춘다(비용은 depth 에 급격히 증가).
+        #   최종 메시는 `finalize()` 에서 depth=8 로 한 번만 만든다.
+        self._pump(2)
+        m = p2.pcd_to_mesh_poisson(pcd, depth=MESH_LOOP_DEPTH, density_quantile=0.04)
+        self._pump(2)
+        self._tick("mesh", _t0)
+        return m
 
     def is_converged(self, mesh) -> bool:
         cov = p2.coverage_state(mesh, **GAP_KW)
@@ -1012,6 +1305,7 @@ class IsaacScanSession:
         return True
 
     def finalize(self) -> IsaacScanResult:
+        self.profile_report()
         pcd, pts = self._merged_pcd()
         mesh = None
         try:
@@ -1062,21 +1356,47 @@ def _voxel(pts, v):
     return pts[idx]
 
 
+_PCA_CHUNK = 40000          # (N,k,3) 이웃 버퍼 상한 — 메모리 폭주 방지
+
+
 def _pca_normals(pts, c_ref, k=12):
+    """국소 PCA 법선. KD-tree + 배치 eigh 로 벡터화.
+
+    이전 구현은 점마다 전수 거리(O(N²))를 돌아 8천 점에 2초가 걸렸고, 이것이
+    Phase 2 캡처 간 지연의 95% 였다. 결과는 동일하고 속도만 다르다.
+    """
+    pts = np.ascontiguousarray(pts, dtype=np.float64)
     N = len(pts)
     if N < 4:
         return None
     k = min(k, N)
-    out = np.empty_like(pts)
-    for i in range(N):
-        d = pts - pts[i]
-        idx = np.argpartition(np.einsum('ij,ij->i', d, d), k - 1)[:k]
-        nb = pts[idx] - pts[idx].mean(0)
-        _, v = np.linalg.eigh(nb.T @ nb)
-        n = v[:, 0]
-        if n @ (pts[i] - c_ref) < 0:
-            n = -n
-        out[i] = n
+    c_ref = np.asarray(c_ref, float)
+
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(pts)
+        out = np.empty_like(pts)
+        for s0 in range(0, N, _PCA_CHUNK):          # 청크로 잘라 메모리 상한 유지
+            sl = slice(s0, min(s0 + _PCA_CHUNK, N))
+            _, idx = tree.query(pts[sl], k=k, workers=-1)
+            idx = np.atleast_2d(idx)
+            nb = pts[idx]                            # (n,k,3)
+            nb -= nb.mean(1, keepdims=True)
+            C = np.einsum('nki,nkj->nij', nb, nb)    # (n,3,3) 공분산
+            _, v = np.linalg.eigh(C)                 # 배치 고유분해
+            out[sl] = v[:, :, 0]                     # 최소 고유값 벡터 = 법선
+    except ImportError:                              # scipy 없으면 기존 경로
+        out = np.empty_like(pts)
+        for i in range(N):
+            d = pts - pts[i]
+            idx = np.argpartition(np.einsum('ij,ij->i', d, d), k - 1)[:k]
+            nb = pts[idx] - pts[idx].mean(0)
+            _, v = np.linalg.eigh(nb.T @ nb)
+            out[i] = v[:, 0]
+
+    # 바깥쪽(중심 → 점 방향)으로 부호 통일
+    flip = np.einsum('ni,ni->n', out, pts - c_ref) < 0
+    out[flip] *= -1.0
     return out
 
 

@@ -42,7 +42,19 @@ OBJECT_PRIM      = os.environ.get(   # 스캔 대상(rider). build_scene_v3.py -
 SPIDER_HFOV_DEG         = 30.0
 SPIDER_WORKING_DISTANCE = (0.2, 0.3)
 SPIDER_FOCUS_DISTANCE   = 0.25
-SCANNER_RESOLUTION      = (1280, 960)
+# ★ 스캐너 해상도 — **점군 밀도만 결정**하지 최종 품질을 좌우하지 않는다.
+#   누적은 VOXEL_M(2mm) 로 다운샘플되므로, 0.25m 에서 FOV 134×100mm 를 채우는 데
+#   필요한 점은 (134/2)×(100/2) ≈ 3,300 개다. 1280×960 은 프레임당 **73만 점**을 만들어
+#   그중 2,300 개만 살아남았다(99.7% 낭비). 실물 밀도(240프레임/회전)로 올리자
+#   annotator 자원이 고갈돼 `get_data` 에서 크래시까지 났다.
+#   → 필요량의 여유배수만 남긴다. 더 촘촘히 보려면 VOXEL_M 을 먼저 줄일 것.
+# GUI 초기 뷰포트 시점 — 턴테이블을 −X/+Y/+Z 쪽에서 가깝게 내려다본다(사용자 요청).
+START_VIEW_TARGET = (0.365, 0.0, 0.70)      # 턴테이블 상면 부근
+START_VIEW_DIR    = (-1.0, 1.0, 0.8)        # 카메라가 놓일 방향(타깃 기준)
+START_VIEW_DIST   = float(os.environ.get("MMS_SIM_VIEW_DIST", "1.1"))
+
+SCANNER_RESOLUTION      = tuple(int(v) for v in
+                                os.environ.get("MMS_SIM_SCAN_RES", "384,288").split(","))
 
 # 드라이브 게인 (트램블링 방지) / joint1 한계 정상화
 DRIVE_STIFFNESS        = 2000.0
@@ -57,6 +69,7 @@ class IsaacWorld:
                  robot_collisions: bool = False):
         self.usd_path = usd_path or DEFAULT_USD_PATH
         self._robot_collisions = bool(robot_collisions)
+        self.headless = bool(headless)      # _set_start_view 가 참조
 
         # ── 1. SimulationApp 먼저 (이후 isaac/pxr import 가능) ────────────────
         from isaacsim import SimulationApp
@@ -109,6 +122,8 @@ class IsaacWorld:
         except Exception as e:
             print(f"[IsaacWorld][WARN] disable_gravity 실패(무시): {e}")
 
+        self._set_start_view()
+
         self.view = self.robot._articulation_view
         self.num_dof = int(self.view.num_dof)
         self.dof_names = list(self.robot.dof_names)
@@ -130,6 +145,41 @@ class IsaacWorld:
         if j1.IsValid():
             j1.GetAttribute("physics:lowerLimit").Set(-float(WIDEN_JOINT1_LIMIT_DEG))
             j1.GetAttribute("physics:upperLimit").Set(float(WIDEN_JOINT1_LIMIT_DEG))
+
+    def _set_start_view(self):
+        """GUI 뷰포트 카메라를 작업영역이 잘 보이는 초기 시점으로 옮긴다.
+
+        Isaac 은 씬에 저장된 카메라를 자동으로 쓰지 않고 뷰포트 자체 perspective 로
+        시작한다. 매번 손으로 돌리지 않도록 시작 시 한 번 설정한다(사용자 요청).
+        방향은 **−X / +Y / +Z** 에서 턴테이블을 내려다보는 각.
+        """
+        if self.headless:
+            return
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+            from pxr import UsdGeom, Gf
+            import numpy as _np
+            tgt = _np.array(START_VIEW_TARGET, float)
+            d = _np.array(START_VIEW_DIR, float)
+            d = d / (_np.linalg.norm(d) + 1e-12)
+            eye = tgt + d * float(START_VIEW_DIST)
+            cam_path = "/World/Environment/StartCam"
+            cam = UsdGeom.Camera.Define(self.stage, cam_path)
+            cam.CreateFocalLengthAttr(24.0)
+            f = (tgt - eye); f /= _np.linalg.norm(f)
+            r = _np.cross(f, [0, 0, 1.0]); r /= _np.linalg.norm(r)
+            u = _np.cross(r, f)
+            M = Gf.Matrix4d(*[float(v) for row in (
+                list(r) + [0.0], list(u) + [0.0], list(-f) + [0.0], list(eye) + [1.0])
+                for v in row])
+            x = UsdGeom.Xformable(cam.GetPrim())
+            x.ClearXformOpOrder()
+            x.AddTransformOp().Set(M)
+            get_active_viewport().set_active_camera(cam_path)
+            print(f"[IsaacWorld] 시작 시점: eye={_np.round(eye,2).tolist()} → "
+                  f"target={tgt.tolist()}")
+        except Exception as e:                                   # noqa: BLE001
+            print(f"[IsaacWorld][WARN] 시작 시점 설정 실패(무시): {type(e).__name__}: {e}")
 
     def _configure_scanner_camera(self):
         Sdf, Gf = self._Sdf, self._Gf

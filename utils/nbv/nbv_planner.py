@@ -29,12 +29,16 @@ sim 쪽에만 쌓였다. 2026-08 시점의 실측 격차:
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from utils.nbv import phase2_nbv as p2
 
 DOWN_NZ = -0.6      # 바깥법선 z 가 이보다 작으면 '아랫면'
 UP_NZ = 0.6
+# 바깥법선이 회전축 쪽(안쪽)을 향하면 **오목·내부면**. 컵 내벽이 대표적이다.
+INWARD_DOT = -0.2
 
 
 def classify_gaps(gaps):
@@ -52,6 +56,30 @@ def classify_gaps(gaps):
     return n_up, n_dn, len(gaps) - n_up - n_dn, nz
 
 
+def split_inward(gaps, axis_xy):
+    """(inward, outward) — 바깥법선이 **축 쪽**을 향하는 gap 을 가른다.
+
+    왜 갈라야 하나 — 축-고도각 방식(`plan_nbv_elevation_pose`)은 카메라를 늘
+    **물체 바깥 구면**에 놓고 축을 겨눈다. 그래서 컵 내벽처럼 법선이 안쪽을 향하는 면은
+    (1) 정면으로 볼 수 없고, (2) standoff 가 외곽 기준이라 내부가 작동거리(0.2~0.3m)
+    **far clip 밖**으로 밀려 아예 캡처되지 않는다.
+    이런 면은 표면점 기준으로 카메라를 놓는 **프론티어 방식**이어야 한다.
+    """
+    inw, outw = [], []
+    ax = np.asarray(axis_xy, float)
+    for c in gaps:
+        p = np.asarray(c.p_O, float)
+        n = np.asarray(c.n_O, float)
+        n = n / (np.linalg.norm(n) + 1e-12)
+        radial = p[:2] - ax                      # 축 → 표면점 (수평)
+        rn = float(np.linalg.norm(radial))
+        if rn < 1e-6:
+            outw.append(c)
+            continue
+        (inw if float(n[:2] @ (radial / rn)) < INWARD_DOT else outw).append(c)
+    return inw, outw
+
+
 class NbvPlanner:
     """Phase 2 자세 선택기. **visited 를 세션 동안 유지**한다.
 
@@ -61,13 +89,86 @@ class NbvPlanner:
     """
 
     def __init__(self, *, joint_weights, el_floor_deg, view_azis_deg=None,
-                 log=print, tag=""):
+                 ensure_els=(), log=print, tag=""):
         self.joint_weights = joint_weights
         self.el_floor_deg = float(el_floor_deg)
         self.view_azis_deg = view_azis_deg
         self.log = log
         self.tag = f"{tag} " if tag else ""
         self.visited = []                     # 이미 전회전 스캔한 (el, az)
+        self.visited_frontier = []            # 이미 겨냥한 내부 gap 대표점
+        # gap 과 무관하게 **최소 한 번** 시도할 고도각. 오목 물체 내부는 미관측이라
+        # gap 으로 잡히지 않아 el_need 가 올라갈 근거가 없다(닭·달걀) → 사전지식으로 보완.
+        self.ensure_els = tuple(float(e) for e in (ensure_els or ()))
+
+    def plan_frontier(self, gaps, q_cur, solve_lookat_fn, swept_free_fn, *,
+                      standoff_m=0.25, min_sep_m=0.02,
+                      tilt_degs=(0.0, 30.0, 45.0, 60.0, 75.0),
+                      up=(0.0, 0.0, 1.0), axis_xy=None, az_pref_deg=(0.0, 30.0, -30.0)):
+        """gap 을 **직접 겨냥**한다. (q, cand, roll, theta) 또는 None.
+
+        축-고도각 방식은 카메라가 늘 턴테이블 축을 봐서 **gap 위치를 통째로 버린다**
+        (gap 정보가 '법선 고도각 중앙값' 하나로 압축). 손잡이·내벽 같은 국소 결손을
+        원리적으로 겨냥할 수 없었다. 여기서는 표면점 p 를 정면으로 본다.
+
+        **턴테이블이 gap 을 로봇 앞으로 가져온다** — gap 의 방위각을 로봇이 편한
+        방위(az_pref)로 만드는 θ 를 구하고, 그 θ 에서의 위치를 겨냥한다. 로봇은
+        고도각·거리만 담당하므로 팔이 크게 움직이지 않는다(충돌 위험 ↓).
+
+        법선 정면이 막히면(작동거리가 물체보다 큰 오목면 등) 개구부 쪽으로 기울인다:
+            d(θ_t) = normalize(n̂·cos θ_t + ẑ·sin θ_t)
+        """
+        u = np.asarray(up, float); u = u / (np.linalg.norm(u) + 1e-12)
+        ax = None if axis_xy is None else np.asarray(axis_xy, float)
+        cands = sorted(gaps, key=lambda c: -float(c.L))
+        if not cands:
+            return None
+        self.log(f"{self.tag}gap 겨냥 — 후보 {len(cands)}개 "
+                 f"(최대 L={float(cands[0].L)*1000:.0f}mm)")
+        tried = {"near": 0, "ik": 0, "swept": 0}
+        for c in cands:
+            p0 = np.asarray(c.p_O, float)
+            if any(np.linalg.norm(p0 - v) < min_sep_m for v in self.visited_frontier):
+                tried["near"] += 1
+                continue
+            n0 = np.asarray(c.n_O, float); n0 = n0 / (np.linalg.norm(n0) + 1e-12)
+            # 턴테이블 각 후보: gap 방위를 로봇 편한 방위로 보내는 θ
+            thetas = [0.0]
+            if ax is not None:
+                g = math.atan2(p0[1] - ax[1], p0[0] - ax[0])
+                thetas = [math.radians(a) - g for a in az_pref_deg]
+            for th in thetas:
+                ct, st = math.cos(th), math.sin(th)
+                if ax is not None:
+                    d0 = p0[:2] - ax
+                    p = np.array([ax[0] + ct*d0[0] - st*d0[1],
+                                  ax[1] + st*d0[0] + ct*d0[1], p0[2]])
+                    n = np.array([ct*n0[0] - st*n0[1], st*n0[0] + ct*n0[1], n0[2]])
+                else:
+                    p, n = p0, n0
+                for tilt in tilt_degs:
+                    t = math.radians(float(tilt))
+                    d = n * math.cos(t) + u * math.sin(t)
+                    nd = float(np.linalg.norm(d))
+                    if nd < 1e-9:
+                        continue
+                    q, roll = solve_lookat_fn(p + (d / nd) * float(standoff_m), p)
+                    if q is None:
+                        tried["ik"] += 1
+                        continue
+                    ok, _why = swept_free_fn(q_cur, q)
+                    if not ok:
+                        tried["swept"] += 1
+                        continue
+                    self.visited_frontier.append(p0)
+                    self.log(f"{self.tag}gap 겨냥 채택 — L={float(c.L)*1000:.0f}mm "
+                             f"θ={math.degrees(th) % 360:.0f}° 기울임={tilt:.0f}° "
+                             f"roll={'-' if roll is None else f'{roll:.0f}°'} "
+                             f"(누적 {len(self.visited_frontier)}곳)")
+                    return q, c, roll, float(th)
+        self.log(f"{self.tag}gap 겨냥 실패 — 근접중복 {tried['near']}, "
+                 f"IK {tried['ik']}, 충돌 {tried['swept']}")
+        return None
 
     def plan(self, gaps, q_cur, solve_pose_fn, swept_free_fn, *,
              roll_order_fn=None):
@@ -109,9 +210,14 @@ class NbvPlanner:
             return ok
 
         kw = dict(joint_weights=self.joint_weights,
-                  el_floor_deg=self.el_floor_deg, visited=self.visited)
+                  el_floor_deg=self.el_floor_deg, visited=self.visited,
+                  ensure_els=self.ensure_els)
         if self.view_azis_deg is not None:
             kw["view_azis_deg"] = tuple(self.view_azis_deg)
+        todo = [e for e in self.ensure_els
+                if not any(abs(float(v[0]) - float(e)) < 1e-6 for v in self.visited)]
+        if todo:
+            self.log(f"{self.tag}보장 고도각 우선 시도: {todo} (오목 내부 대비)")
         res = p2.plan_nbv_elevation_pose(usable, q_cur, pose_q, swept, **kw)
 
         if res is None:

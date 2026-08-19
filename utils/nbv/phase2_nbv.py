@@ -252,7 +252,7 @@ def plan_nbv_elevation_pose(
     joint_weights, el_floor_deg: float = 30.0,
     view_azis_deg=(0., 30., -30., 60., -60., 90., -90., 180.),
     el_extra_deg=(65., 55., 45.), el_cap_deg: float = 88.0,
-    visited=(),
+    visited=(), ensure_els=(),
 ):
     """★ 공용 NBV 자세선택 (real/sim 동일) — **부족면을 덮을 관측 elevation 자세** 선택.
 
@@ -282,6 +282,14 @@ def plan_nbv_elevation_pose(
     #   윗면 gap 이 많으면 el_need 가 높아지므로 "윗면 보강" 의도는 그대로 유지된다.
     el_cands = sorted(set([el_need, el_need - 10.0, el_need - 20.0, el_need - 30.0,
                            *el_extra_deg]), key=lambda e: abs(e - el_need))
+    # ★ `ensure_els` — gap 과 무관하게 **최소 한 번** 시도할 고도각을 맨 앞에 놓는다.
+    #   오목 물체(컵 등) 내부는 **미관측이라 메시에 없고, 없으면 경계(gap)로도 안 잡힌다.**
+    #   그래서 el_need 가 올라갈 근거가 없어 NBV 가 계속 낮은 el 만 고른다(닭·달걀).
+    #   실측: el=55° az=0° standoff 0.25 한 자세 + 전회전으로 컵 내벽·내부바닥 100% 커버.
+    todo = [float(e) for e in ensure_els
+            if not any(abs(float(v[0]) - float(e)) < 1e-6 for v in visited)]
+    if todo:
+        el_cands = todo + [e for e in el_cands if e not in todo]
     W = np.asarray(joint_weights, float)
     qc = np.asarray(q_cur, float)
     for el in el_cands:
