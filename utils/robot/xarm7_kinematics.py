@@ -195,6 +195,45 @@ def _numeric_jacobian(q: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     return J
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 특이점(singularity) 지표
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠ 단위 혼합 주의 — `_numeric_jacobian` 은 위치 행이 **mm/rad**, 회전 행이 rad/rad 다.
+#   그대로 SVD 하면 위치 성분이 1000 배 커서 회전 특이점이 묻힌다. 아래 함수들은
+#   위치를 m 로 바꾸고, 회전 행에 **특성길이**(characteristic length)를 곱해 두 성분의
+#   스케일을 맞춘다. 그래야 σ_min 이 '자세 전체가 얼마나 잘 조건화됐는가'를 뜻한다.
+CHAR_LENGTH_M = 0.30       # 팔 규모 대표 길이(회전 1rad ↔ 표면 30cm 이동으로 환산)
+
+
+def jacobian_scaled(q: np.ndarray, char_len_m: float = CHAR_LENGTH_M) -> np.ndarray:
+    """단위 정규화된 (6x7) 자코비안 — 전 행이 **m** 스케일."""
+    J = _numeric_jacobian(np.asarray(q, float)).copy()
+    J[:3, :] /= 1000.0                      # mm → m
+    J[3:, :] *= float(char_len_m)           # rad → m 등가
+    return J
+
+
+def singular_values(q: np.ndarray, char_len_m: float = CHAR_LENGTH_M) -> np.ndarray:
+    return np.linalg.svd(jacobian_scaled(q, char_len_m), compute_uv=False)
+
+
+def manipulability(q: np.ndarray, char_len_m: float = CHAR_LENGTH_M) -> float:
+    """Yoshikawa 조작성 w = sqrt(det(J·Jᵀ)) = 특이값들의 곱. 0 이면 특이점."""
+    return float(np.prod(singular_values(q, char_len_m)))
+
+
+def sigma_min(q: np.ndarray, char_len_m: float = CHAR_LENGTH_M) -> float:
+    """최소 특이값 — **특이점까지의 거리**. w 보다 해석이 직접적이고 덜 민감하다
+    (w 는 6개 곱이라 한 축만 나빠져도 급락하지만 크기 감이 잘 안 온다)."""
+    return float(singular_values(q, char_len_m)[-1])
+
+
+def condition_number(q: np.ndarray, char_len_m: float = CHAR_LENGTH_M) -> float:
+    """σ_max/σ_min — 클수록 특정 방향 이동에 관절이 과도하게 움직인다."""
+    s = singular_values(q, char_len_m)
+    return float(s[0] / max(s[-1], 1e-12))
+
+
 def ik(pose6d: np.ndarray,
        seed: np.ndarray | None = None,
        pos_weight: float = 1.0,

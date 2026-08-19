@@ -1978,6 +1978,10 @@ class ArtecMultiPassScanSession:
             return q, None
 
         def swept(q0, q1):
+            cm = self._collision_gate()
+            if cm is not None:                 # 메시+SDF, 보수적 전진(터널링 불가)
+                ok, why, _ = cm.is_path_safe(q0, q1)
+                return ok, why
             world = getattr(self, "_collision_world", None)
             if world is None:
                 return True, ""
@@ -2010,13 +2014,68 @@ class ArtecMultiPassScanSession:
         out.sort(key=lambda x: x[3])
         return out
 
+    def _collision_gate(self):
+        """단일 충돌 게이트(sim 과 **같은 모듈**). 캐시가 없으면 None → 기존 캡슐 경로.
+
+        ★ 캐시(`utils/collision/data/*.npz`)는 셀 CAD 를 **로봇 base 프레임**으로 구운
+          것이라 sim·real 공용이다. 실물 셀을 개조하면 반드시 재생성할 것:
+              scripts/sim/export_env_mesh.py / export_link_meshes.py
+        """
+        if not hasattr(self, "_cm_cache"):
+            try:
+                from utils.collision import collision_model as _cmod
+                self._cm_cache = _cmod.get_default(
+                    self_margin_m=getattr(self.s, "self_clear_m", 0.020),
+                    env_margin_m=getattr(self.s, "env_clear_m", 0.025))
+            except Exception as e:                      # noqa: BLE001
+                print(f"  [collision] 게이트 사용 불가({type(e).__name__}) — 캡슐 경로")
+                self._cm_cache = None
+        return self._cm_cache
+
     def _move_robot_to_q(self, q, speed_deg_s: float) -> int:
-        """해석 IK q 로 관절구동 (IK 결정: set_position 대신 set_servo_angle)."""
+        """해석 IK q 로 관절구동 (IK 결정: set_position 대신 set_servo_angle).
+
+        ★ 이동 전 **단일 게이트**로 자세·경로를 검사하고, 직선이 막히면 우회 경로를
+          계획해 웨이포인트로 따라간다(sim `_drive` 와 같은 구조).
+          예전에는 real 이 NBV 후보 판정에만 캡슐 충돌을 썼고 **실제 이동은 무검사**였다.
+          계획도 실패하면 움직이지 않고 실패코드를 돌려준다 — 실물에서는 '일단 가본다'가
+          곧 파손이다.
+        """
+        q1 = np.asarray(q, float)
+        cm = self._collision_gate()
+        way = [q1]
+        if cm is not None:
+            try:
+                q0 = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+            except Exception:                           # 관절각을 못 읽으면 검사 생략
+                q0 = None
+            if q0 is not None:
+                ok, why, _ = cm.is_path_safe(q0, q1)
+                if not ok:
+                    if why.startswith(("start", "goal")):
+                        print(f"  [collision] ✘ 이동 거부 — {why} (자세 자체가 불가)")
+                        return -1
+                    print(f"  [collision] 직선 막힘({why}) — 우회 계획")
+                    from utils.control.joint_path_planner import plan_joint_path
+                    from utils.robot import xarm7_kinematics as _kin
+                    path = plan_joint_path(
+                        q0, q1, lambda a, b: cm.is_path_safe(a, b)[:2],
+                        lower=_kin.JOINT_LOWER, upper=_kin.JOINT_UPPER,
+                        step=0.3, max_iter=600, shortcut_iters=60,
+                        log=lambda m: print(f"  [collision] {m}"))
+                    if path is None:
+                        print("  [collision] ✘ 이동 거부 — 우회 경로 없음")
+                        return -1
+                    way = [np.asarray(w, float) for w in path[1:]]
         self.robot.enable_motion()
-        code = self.robot.arm.set_servo_angle(
-            angle=np.asarray(q, float).tolist(),
-            speed=float(speed_deg_s), is_radian=True, wait=True)
-        return int(code) if code is not None else 0
+        code = 0
+        for w in way:
+            code = self.robot.arm.set_servo_angle(
+                angle=w.tolist(), speed=float(speed_deg_s), is_radian=True, wait=True)
+            code = int(code) if code is not None else 0
+            if code != 0:
+                return code
+        return code
 
     def _capture_nbv_pose(self, T_CB_des, q):
         """로봇을 NBV pose 로 관절구동 후 streaming 캡처 → (sub_result, T_pre).

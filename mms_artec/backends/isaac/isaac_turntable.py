@@ -65,7 +65,10 @@ class IsaacTurntable:
         p2w = xc.GetLocalToWorldTransform(prim.GetParent())
         op = xf.MakeMatrixXform()
         op.Set(base)
-        self._riders.append((op, base, p2w, p2w.GetInverse()))
+        # base0 = **원래** local transform (Phase 3 flip 이 절대각으로 합성될 기준).
+        #   path 도 보관 — flip 대상 rider 를 찾아야 한다.
+        self._riders.append([op, base, p2w, p2w.GetInverse(),
+                             str(prim.GetPath()), base])
 
     def add_rider(self, prim_path: str):
         """
@@ -86,8 +89,32 @@ class IsaacTurntable:
         Tp = Gf.Matrix4d().SetTranslate(Gf.Vec3d(self._cx, self._cy, 0.0))
         Tn = Gf.Matrix4d().SetTranslate(Gf.Vec3d(-self._cx, -self._cy, 0.0))
         S = Tn * Rz * Tp
-        for op, base, p2w, p2w_inv in self._riders:
+        for op, base, p2w, p2w_inv, _path, _base0 in self._riders:
             op.Set(base * (p2w * S * p2w_inv))
+
+    def set_rider_flip(self, prim_path: str, M_world) -> bool:
+        """rider 를 world 프레임 변환 `M_world`(4x4, column 규약) 자세로 둔다.
+
+        ★ Phase 3(바닥면 flip) 전용. 물체 prim 의 transform 을 **직접 쓰면 안 된다** —
+          `_co_rotate` 가 캐시된 `base` 로 매 회전마다 덮어써서 flip 이 지워지고,
+          누적 좌표 보정(`_unflip`)만 남아 점군이 망가진다(실측: boundary 887→1606mm,
+          물체 Z 가 74→90mm 로 부풀었다).
+          대신 rider 의 base 를 `base0 * (p2w · M · p2w⁻¹)` 로 바꾼다. 그러면
+          `op = base0 * (p2w · M · S · p2w⁻¹)` 가 되어 flip 과 턴테이블 회전이 함께 성립한다.
+
+        M_world 는 **절대** 자세(원래 기준). 누적이 아니므로 90°→180° 가 real 의
+        `make_axis_physical_rotations` 규약과 같다.
+        """
+        import numpy as _np
+        Gf = self._Gf
+        Mg = Gf.Matrix4d(*[float(v) for v in _np.asarray(M_world, float).T.flatten()])
+        for r in self._riders:
+            if r[4] != prim_path:
+                continue
+            r[1] = r[5] * (r[2] * Mg * r[3])        # base = base0 * conj(M)
+            self._co_rotate(self._theta)            # 현재 각도로 즉시 반영
+            return True
+        return False
 
     # ── 연결/서보 (sim no-op) ───────────────────────────────────────────────
     def connect(self, comm_type: int = 0) -> bool:

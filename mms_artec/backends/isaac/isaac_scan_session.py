@@ -32,12 +32,14 @@ from pxr import Usd, UsdGeom, Gf
 from utils.nbv import phase2_nbv as p2
 from utils.nbv import phase1_viewpoint as p1
 from utils.nbv.scan_phase_controller import (
-    run_scan_phases, resolve_phase_mode)
+    run_scan_phases, resolve_phase_mode, AT_CURRENT)
 from utils.nbv.nbv_planner import NbvPlanner as _NbvPlanner
 from utils.collision.robot_collision import (
     CollisionWorld, pose_collision, DEFAULT_LINK_RADII, capsules_from_joints)
 from utils.collision import mesh_self_collision as _mesh_sc
 from utils.collision import env_collision as _env_col
+from utils.collision import collision_model as _colmodel
+from utils.control.joint_path_planner import plan_joint_path as _plan_path
 from utils.robot import view_pose as _vp
 from mms_artec.utils.calibration import handeye_error as _he
 from utils.robot import xarm7_kinematics as kin
@@ -101,6 +103,13 @@ NBV_ROLL_ALIGN  = os.environ.get("MMS_SIM_NBV_ROLL_ALIGN", "1") == "1"
 # 자가충돌 허용 최소 여유(m) — 실제 메시 최소거리 기준. 캡슐 시절의 암묵 임계보다
 # 훨씬 작아 보이지만, 캡슐은 형상을 과대하게 덮어 임계가 부풀려져 있었을 뿐이다.
 SELF_CLEAR_M    = _envf("MMS_SIM_SELF_CLEAR", 0.02)
+# 셀 구조물(벽·상판·저울·툴스탠드) 최소 여유(m). 기존 장애물은 턴테이블·프레임뿐이라
+# **칠 수 있는데 안전하다고 판정**하고 있었다(미탐). docs/4_collision.md P1.
+ENV_CLEAR_M     = _envf("MMS_SIM_ENV_CLEAR", 0.025)
+VOXEL_M         = 0.002
+# grazing 임계 — 입사각이 이보다 크면 구조광이 못 잡는다(윗면 gap 생성 = NBV 대상)
+MAX_INCIDENCE_DEG = _envf("MMS_SIM_MAXINC", 50.0)
+APPLY_INCIDENCE = _envs("MMS_SIM_INCIDENCE", "1") == "1"
 # ── 패스 간 정합 (real 과 같은 구조) ─────────────────────────────────────────
 # real 은 새 패스를 master 에 **open3d ICP** 로 붙인다
 # (`artec_multipass_scan_session._hint_icp_refine`, colored ICP + point-to-plane fallback,
@@ -109,16 +118,27 @@ SELF_CLEAR_M    = _envf("MMS_SIM_SELF_CLEAR", 0.02)
 #   (실측: 3mm/0.5° 에서 boundary 967→2178mm, gap 18→72). 즉 지금의 sim 은 실물
 #   강건성을 검증할 수 없다. 같은 정합 단계를 sim 에도 둔다.
 ICP_PASS_ENABLE = _envs("MMS_SIM_ICP_PASS", "1") == "1"
-# coarse→fine 다단. 초기 어긋남이 max_corr 보다 크면 ICP 가 대응점을 못 찾으므로
-# 처음엔 넉넉하게 잡고 좁혀 간다.
+# coarse→fine 다단. 초기 어긋남이 max_corr 보다 크면 대응점을 못 찾으므로 넓게 시작한다.
 ICP_SCALES_M    = (0.020, 0.008, 0.004)
 ICP_MIN_PTS     = 300
-# 셀 구조물(벽·상판·저울·툴스탠드) 최소 여유(m). 기존 장애물은 턴테이블·프레임뿐이라
-# **칠 수 있는데 안전하다고 판정**하고 있었다(미탐). docs/4_collision.md P1.
-ENV_CLEAR_M     = _envf("MMS_SIM_ENV_CLEAR", 0.025)
-VOXEL_M         = 0.002
-MAX_INCIDENCE_DEG = _envf("MMS_SIM_MAXINC", 50.0)    # grazing 임계(입사각>이값 → 미캡처=gap)
-APPLY_INCIDENCE = _envs("MMS_SIM_INCIDENCE", "1") == "1"
+# 정합 **단위**: "frame" | "pass" | "off".
+#   real 의 Artec 은 **프레임 단위**로 master 에 재고정한다. sim 이 패스 단위(강체)로만
+#   맞추면, hand-eye 오차가 자세마다 방향이 달라 **한 패스 안에서도 어긋나는 성분**을
+#   못 고친다(실측: 3mm 오차에서 boundary 2178→1903, 13% 개선에 그침).
+#   → real 과 같은 단위로 내린다. 대조군을 위해 env 로 바꿀 수 있게 둔다.
+ICP_LEVEL = _envs("MMS_SIM_ICP_LEVEL", "frame")
+ICP_MIN_PTS_FRAME = 150
+# 원판 상면에서 이 높이 이내의 점은 **원판**으로 보고 버린다. 물체는 원판 위에 앉아
+# 있어 최하단이 원판에 가려 어차피 안 잡히므로 손실이 없다.
+DISC_REJECT_M = _envf("MMS_SIM_DISC_REJECT", 0.003)
+# ── Phase 3 (바닥면 flip) ────────────────────────────────────────────────────
+# real 은 사람이 물체를 손으로 뒤집는다(`make_axis_physical_rotations("y",[0,90,180])`).
+# sim 은 물체가 USD prim 이므로 **프로그램으로** 같은 회전을 준다 → 3단계 전체를 sim 에서
+# 검증할 수 있다. 남은 gap 의 상당수는 법선이 수평 아래를 향해(실측 중앙값 -13°)
+# **어떤 관측 elevation 으로도 못 보므로**, flip 없이는 원리적으로 못 메운다.
+FLIP_AXIS = _envs("MMS_SIM_FLIP_AXIS", "y")
+FLIP_ANGLES_DEG = tuple(float(x) for x in
+                        _envs("MMS_SIM_FLIP_ANGLES", "90,180").split(",") if x.strip())
 
 # Phase 2 NBV
 NBV_DISTANCE_M  = 0.225
@@ -219,6 +239,10 @@ class IsaacScanSession:
         if self._mesh_self is not None:
             print(f"[isaac_scan] 자가충돌 = 실제 메시 판정 (여유 {SELF_CLEAR_M*1000:.0f}mm)")
         # 셀 구조물(벽·상판·저울·툴스탠드) — 기존 world 는 턴테이블/프레임만 있었다.
+        # ★ Phase 무관 **단일 충돌 게이트**. 로봇=메시, 환경/링크=SDF, 경로=보수적 전진.
+        #   예전엔 Phase 2 만 검사하고 Phase 1·3 은 무검사였다(docs/4_collision.md).
+        self._cm = _colmodel.get_default(self_margin_m=SELF_CLEAR_M,
+                                         env_margin_m=ENV_CLEAR_M)
         self._env_mesh = _env_col.get_default(margin_m=ENV_CLEAR_M)
         if self._env_mesh is not None:
             print(f"[isaac_scan] 셀 구조물 충돌 = 실제 메시 {len(self._env_mesh.env)}점 "
@@ -278,12 +302,18 @@ class IsaacScanSession:
             _o = self.stage.GetPrimAtPath(prim)
             if _o.IsValid():
                 UsdGeom.Imageable(_o).MakeVisible()
+        self._obj_prim = prim                                 # flip 대상(Phase 3)
         mn, mx = self._aabb_world(prim)                       # 객체 world AABB
         self.obj_center_w = (mn + mx) / 2.0                   # 객체 중심(world)
         self.obj_top_w = np.array([self.obj_center_w[0], self.obj_center_w[1], mx[2]])
         self.obj_zlo_w, self.obj_zhi_w = float(mn[2]), float(mx[2])   # **실제 객체 z 범위(world)**
         self.obj_radius = float(max(mx[0] - mn[0], mx[1] - mn[1]) / 2.0)
         self.obj_height = float(mx[2] - mn[2])
+        # flip 은 **절대각**(원래 기준)이므로 치수도 항상 **원본**에서 계산해야 한다.
+        # 이전에는 1차 flip 이 덮어쓴 값을 2차가 원본으로 착각해 크롭 창이 틀렸다
+        # (180° 인데 126mm 창을 써서 원판 점이 섞였다).
+        self._obj0 = dict(center=self.obj_center_w.copy(), radius=self.obj_radius,
+                          zlo=self.obj_zlo_w, zhi=self.obj_zhi_w)
         off = float(np.linalg.norm(self.obj_center_w[:2] - self.axis_w[:2]))   # 축 이탈(수평)
         print(f"[isaac_scan] 객체='{prim}' r={self.obj_radius*1000:.0f}mm h={self.obj_height*1000:.0f}mm "
               f"center_w={np.round(self.obj_center_w,3).tolist()} z=[{mn[2]:.3f},{mx[2]:.3f}]")
@@ -348,8 +378,15 @@ class IsaacScanSession:
         pc = self._base_to_world(pc_b)                        # → world
         c = self.obj_center_w
         r = np.linalg.norm(pc[:, :2] - c[:2], axis=1)
+        # ★ 턴테이블 원판 평면을 배제한다. 원판 상면(axis_w[2])에 붙은 점은 물체가
+        #   아니라 **원판**이다 — 물체가 그 위에 앉아 있으므로 물체의 진짜 최하단은
+        #   원판보다 위에 있고, 어차피 원판에 가려 스캔되지 않는다.
+        #   Phase 3 에서 컵을 뒤집으면 **열린 면으로 원판이 그대로 보여** 대량 혼입된다
+        #   (실측: 180° 패스가 +68,899점 = 정상 패스의 3.5배 → 메시 파손).
+        z_floor = float(self.axis_w[2]) + DISC_REJECT_M
         m = ((r < self.obj_radius + 0.02)
-             & (pc[:, 2] > self.obj_zlo_w - 0.005) & (pc[:, 2] < self.obj_zhi_w + 0.02))
+             & (pc[:, 2] > max(self.obj_zlo_w - 0.005, z_floor))
+             & (pc[:, 2] < self.obj_zhi_w + 0.02))
         obj = _voxel(pc[m], VOXEL_M)
         n_crop = len(obj)
         if APPLY_INCIDENCE and len(obj) >= 4:
@@ -396,29 +433,26 @@ class IsaacScanSession:
         return col
 
     def _pose_collision_reason(self, world, q):
-        """''=충돌없음. 아니면 사유(scene/self). self = 스캐너 포함 자가충돌.
-
-        ★ 자가충돌은 **실제 메시**로 판정한다(캐시 있을 때). 캡슐 근사는 이 팔에서
-          오탐이 심해, NBV 후보 32자세를 IK 로 전부 풀고도 전부 기각시켰다
-          (2026-08-13: `IK실패 0, swept충돌 32, self×32`). 근거·수치는
-          `utils/collision/mesh_self_collision` 및 docs/hw_layout.md §5.
-          장애물(scene) 충돌은 캡슐 그대로 — 오탐 근거가 확인된 쪽은 self 뿐이다.
-        """
+        """''=충돌없음, 아니면 사유. **단일 게이트**(자가+환경 메시/SDF) 우선."""
+        if self._cm is not None:
+            ok, why = self._cm.is_pose_safe(q)
+            return "" if ok else why
+        # 폴백: 캐시가 없을 때만 예전 캡슐/메시 경로
         c1, why = pose_collision(world, q, T_EC=self.T_EC, link_radii=LINK_RADII)
         is_self = bool(c1) and "self:" in why
         if c1 and not is_self:
             return "scene"
-        if self._env_mesh is not None:
-            hit, who = self._env_mesh.collides(q)
-            if hit:
-                return f"scene({who})"
+        if self._env_mesh is not None and self._env_mesh.collides(q)[0]:
+            return "scene(env)"
         if self._mesh_self is not None:
-            hit, _who = self._mesh_self.collides(q)
-            return "self" if hit else ""
+            return "self" if self._mesh_self.collides(q)[0] else ""
         return "self" if is_self else ""
 
     def _swept_free(self, world, q0, q1):
-        """(free, reason). reason = 첫 충돌 샘플의 사유(scene/self) 또는 ''."""
+        """(free, reason). 게이트의 **보수적 전진**(터널링 원리적 불가) 사용."""
+        if self._cm is not None:
+            ok, why, _ = self._cm.is_path_safe(q0, q1)
+            return ok, why
         q0, q1 = np.asarray(q0, float), np.asarray(q1, float)
         for k in range(NBV_SWEPT_STEPS + 1):
             r = self._pose_collision_reason(world, q0 + (k / NBV_SWEPT_STEPS) * (q1 - q0))
@@ -434,7 +468,81 @@ class IsaacScanSession:
         canon = _rot_about_axis(pts_w, self.axis_w, self.axis_dir_w, -theta)
         self.accum.append(canon)
 
-    def _merge_pass(self, pass_pts):
+    def _icp_to_master(self, pts, min_pts, tag):
+        """canonical 점군을 누적 master 에 ICP 로 붙여 반환. 게이트 실패 시 원본 그대로.
+
+        real 이 새 스캔을 master 에 붙이는 것(`_hint_icp_refine`)과 같은 역할.
+        초기값은 identity — 로봇 기구학이 이미 맞춰 놨기 때문이다.
+        """
+        if len(pts) < min_pts or not self.accum:
+            return pts, None
+        master = self._master_ds()
+        if master is None or len(master) < ICP_MIN_PTS:
+            return pts, None
+        try:
+            import open3d as o3d
+            from utils.nbv.icp_strategy import icp_with_gates
+            src = o3d.geometry.PointCloud()
+            src.points = o3d.utility.Vector3dVector(_voxel(pts, VOXEL_M))
+            tgt = o3d.geometry.PointCloud()
+            tgt.points = o3d.utility.Vector3dVector(master)
+            # flip 패스(tag="flip")는 hint 기준 오차가 프레임 드리프트보다 크므로
+            # 이동 허용치를 넓힌다. 그래도 게이트는 유지 — 틀린 정합이 통과하면
+            # 메시 전체가 망가진다.
+            # ⚠ 게이트를 완화하면 안 된다(2026-08-18 실측). flip 패스에서 RMSE 임계를
+            #   2→4mm 로 풀었더니 ICP 가 14.6mm·24.6mm 를 보정했는데 **결과가 나빠졌다**
+            #   (bbox Z 79→83mm, 아랫면 정점 25,608→11,033). 뒤집힌 바닥면이 물체 옆면에
+            #   미끄러져 붙는 국소최소다. 게이트가 기각한 데는 이유가 있다.
+            is_flip = (tag == "flip")
+            drift = 0.080 if is_flip else 0.030
+            T, res = np.eye(4), None
+            for corr in ICP_SCALES_M:
+                res = icp_with_gates(src, tgt, T, max_correspondence_distance=corr,
+                                     rmse_thresh=corr / 2.0, fitness_thresh=0.20,
+                                     drift_trans_m=drift, drift_rot_deg=15.0)
+                T = res.T_refined
+            if res is not None and res.ok:
+                return pts @ T[:3, :3].T + T[:3, 3], res
+            return pts, res
+        except Exception as e:                       # noqa: BLE001
+            print(f"[isaac_scan]   ⚠ ICP 예외({type(e).__name__}: {e}) — 기구학 그대로")
+            return pts, None
+
+    def _master_ds(self):
+        """누적 master 의 다운샘플 캐시 — 프레임마다 전체를 다시 쌓지 않는다."""
+        n = sum(len(a) for a in self.accum)
+        if n == 0:
+            return None
+        if getattr(self, "_ds_n", -1) != n:
+            self._ds_cache = _voxel(np.vstack(self.accum), VOXEL_M * 2.0)
+            self._ds_n = n
+        return self._ds_cache
+
+    def _unflip(self, pts_w):
+        """flip 된 물체의 점을 **명목 회전(hint)** 으로 canonical 에 되돌린다.
+
+        실물은 사람이 뒤집으므로 실제 자세를 못 읽는다 → hint 만 쓸 수 있다.
+        남는 잔차(사람 손 오차 / sim 물리 정착)는 **ICP 가 메운다**. real 과 같은 구조.
+        """
+        M = getattr(self, "_flip_hint", None)
+        if M is None or len(pts_w) == 0:
+            return pts_w
+        Mi = np.linalg.inv(M)
+        return pts_w @ Mi[:3, :3].T + Mi[:3, 3]
+
+    def _merge_frame(self, pts_canon):
+        """프레임 하나를 master 에 정합해 누적 (real 의 프레임 단위 재고정 대응)."""
+        if len(pts_canon) == 0:
+            return
+        if ICP_LEVEL != "frame" or not ICP_PASS_ENABLE:
+            self.accum.append(pts_canon)
+            return
+        out, res = self._icp_to_master(pts_canon, ICP_MIN_PTS_FRAME, "frame")
+        self.accum.append(out)
+        if res is not None and not res.ok:
+            self._icp_fail = getattr(self, "_icp_fail", 0) + 1
+
+    def _merge_pass(self, pass_pts, force_icp=False):
         """한 패스의 canonical 점군을 **master 에 ICP 로 붙여** 누적한다.
 
         real 과 같은 구조다 — real 은 새 IScan 을 master 에 colored ICP 로 붙인다
@@ -448,7 +556,54 @@ class IsaacScanSession:
         if not pass_pts:
             return
         pts = np.vstack(pass_pts)
-        if not self.accum or not ICP_PASS_ENABLE or len(pts) < ICP_MIN_PTS:
+        if force_icp and self.accum and len(pts) >= ICP_MIN_PTS:
+            # ★ flip 패스는 **전역 정합**으로 붙인다 — 명목 회전(hint)은 사람 손 오차
+            #   ±10° 를 안고 들어와 폐기된 경로다(벤치마크에서 '오답' baseline).
+            #   전회전 스윕이라 중첩이 크므로(실측 85%) 초기값 없이도 ΔR 0.0° 가 나온다.
+            #   게이트는 fitness 가 아니라 **방법 간 합의 + 형상(AABB) 일치** —
+            #   회전대칭 표면은 틀린 각도로도 fitness 가 높다(실측 0.98 인데 ΔR 144°).
+            from utils.nbv.global_registration import register_consensus
+            T, info = register_consensus(_voxel(pts, VOXEL_M), self._master_ds(),
+                                         log=lambda m: print(f"[isaac_scan]   {m}"))
+            if T is not None:
+                pts = pts @ T[:3, :3].T + T[:3, 3]
+                print(f"[isaac_scan]   flip 정합 채택({info['method']}) "
+                      f"합의ΔR={info['agree_rot_deg']:.1f}° bbox={info['bbox_diff_mm']}mm")
+                self.accum.append(pts)
+                return
+            print(f"[isaac_scan]   ⚠ flip 정합 기각({info.get('reason','')}) "
+                  f"— 명목 회전(hint) + master 국소정합으로 폴백")
+            # hint 는 **원래 좌표(GT)** 기준이지만 master 는 프레임 ICP 로 이미 수 mm
+            # 드리프트해 있다. hint 만 쓰면 표면이 겹쳐 메시가 거칠어진다
+            # (실측: bbox Z 79mm vs 실제 77mm, boundary 1453mm).
+            # → hint 로 대략 맞춘 뒤 **master 에 국소 ICP** 로 붙인다.
+            print(f"[isaac_scan]   (진단) unflip **전** flip패스 z="
+                  f"[{pts[:,2].min():.3f},{pts[:,2].max():.3f}] "
+                  f"중심={np.round(pts.mean(0),3).tolist()} 점={len(pts)}")
+            _h = getattr(self, "_flip_hint", np.eye(4))
+            print(f"[isaac_scan]   (진단) hint 예측 물체 z="
+                  f"[{self.obj_zlo_w:.3f},{self.obj_zhi_w:.3f}]  "
+                  f"hint 이동={np.round(_h[:3,3],3).tolist()}")
+            pts = self._unflip(pts)
+            _m = self._master_ds()
+            if _m is not None and len(pts):
+                print(f"[isaac_scan]   (진단) hint 후 flip패스 중심="
+                      f"{np.round(pts.mean(0),3).tolist()} bbox="
+                      f"{np.round((pts.max(0)-pts.min(0))*1000,0).tolist()}mm / "
+                      f"master 중심={np.round(_m.mean(0),3).tolist()} bbox="
+                      f"{np.round((_m.max(0)-_m.min(0))*1000,0).tolist()}mm")
+            aligned, res = self._icp_to_master(pts, ICP_MIN_PTS, "flip")
+            if res is not None and res.ok:
+                print(f"[isaac_scan]   flip 국소정합 적용: "
+                      f"Δt={res.delta_translation_m*1000:.2f}mm "
+                      f"Δr={res.delta_rotation_deg:.2f}° fitness={res.fitness:.2f}")
+                pts = aligned
+            elif res is not None:
+                print(f"[isaac_scan]   ⚠ flip 국소정합 게이트 실패({res.reason}) — hint 그대로")
+            self.accum.append(pts)
+            return
+        if ((ICP_LEVEL != "pass" and not force_icp) or not self.accum
+                or not ICP_PASS_ENABLE or len(pts) < ICP_MIN_PTS):
             self.accum.append(pts)
             return
         master = np.vstack(self.accum)
@@ -517,23 +672,52 @@ class IsaacScanSession:
             [c.p_O for c in gaps], [c.L for c in gaps], eye, target_w,
             convention=_vp.CAM_USD, rolls_deg=VIEW_ROLLS_DEG)
 
-    def _drive(self, q, steps=DRIVE_STEPS):
-        """현재→q 를 관절 보간으로 **부드럽게** 이동(스텝마다 렌더). 텔레포트 점프 방지 +
-        swept 로 충돌검사한 바로 그 직선 경로를 실제로 traverse(검사=실행 일치)."""
+    def _drive(self, q, steps=DRIVE_STEPS) -> bool:
+        """현재→q 이동. **막히면 우회 경로**를 계획해 따라간다. 반환=이동했는가.
+
+        ★ 예전에는 무조건 직선 보간으로 갔다 — Phase 1·3 은 충돌 검사조차 없었고,
+          Phase 2 도 '막히면 그 자세를 버리는' 식이라 **돌아가면 되는 자세를 잃었다**
+          (실측: 안전 자세 12개 중 직선이 막힌 쌍이 6개, 전부 우회 성공).
+          계획도 실패하면 **움직이지 않고 False** 를 돌려 상위가 그 패스를 건너뛰게 한다.
+        """
         q1 = np.asarray(q, float)
         q0 = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        way = [q0, q1]
+        if self._cm is not None:
+            ok, why, _ = self._cm.is_path_safe(q0, q1)
+            if not ok:
+                if why.startswith(("start", "goal")):
+                    print(f"[isaac_scan] ✘ 이동 거부 — {why} (자세 자체가 충돌)")
+                    return False
+                print(f"[isaac_scan]   직선 막힘({why}) — 우회 계획")
+                path = _plan_path(q0, q1,
+                                  lambda a, b: self._cm.is_path_safe(a, b)[:2],
+                                  lower=kin.JOINT_LOWER, upper=kin.JOINT_UPPER,
+                                  step=0.3, max_iter=600, shortcut_iters=60,
+                                  log=lambda m: print(f"[isaac_scan]   {m}"))
+                if path is None:
+                    print("[isaac_scan] ✘ 이동 거부 — 우회 경로 없음")
+                    return False
+                way = path
         n = max(1, int(steps))
-        for k in range(1, n + 1):
-            qk = q0 + (k / n) * (q1 - q0)
-            self.robot.arm.set_servo_angle(angle=qk.tolist(), is_radian=True, wait=True)
-            self.world.step(1, render=True)
+        for a, b in zip(way[:-1], way[1:]):
+            for k in range(1, n + 1):
+                qk = a + (k / n) * (b - a)
+                self.robot.arm.set_servo_angle(angle=qk.tolist(), is_radian=True, wait=True)
+                self.world.step(1, render=True)
         self.world.step(4, render=True)             # 도착 후 정착
+        return True
 
-    def _scan_pass(self, q, n_theta, label=""):
+    def _scan_pass(self, q, n_theta, label="", phase=1):
         """★ 통합 캡처 = 로봇을 q 자세로 두고 **턴테이블 전회전**하며 프레임 캡처·−θ 누적.
         real 캡처(로봇 pose + streaming 전회전 + relocalization)에 1:1 대응. Phase1·2 공용.
         sim 은 GT θ 라 −θ 회전 = relocalization 역할(정확). 입사각 필터로 좋은 프레임만 기여."""
-        self._drive(q)
+        # AT_CURRENT = '이동 없이 현재 자세에서 캡처'(Phase 3 flip 후). 센티널이므로
+        # 관절해로 해석하면 안 된다 — sim 은 Phase 3 가 미지원이라 이 경로가 미검증이었다.
+        if q is not AT_CURRENT and q is not None:
+            if not self._drive(q):
+                print("[isaac_scan]   ⚠ 이동 불가 — 이 패스 건너뜀")
+                return False
         if label:
             print(f"[isaac_scan] === scan pass: {label} (전회전 {n_theta}프레임) ===")
         before = sum(len(a) for a in self.accum)
@@ -545,8 +729,21 @@ class IsaacScanSession:
             th_act = float(self.turntable.getActualPos())
             obj = self._capture_obj_world(log=(i % 9 == 0))
             if len(obj):
-                pass_pts.append(_rot_about_axis(obj, self.axis_w, self.axis_dir_w, -th_act))
-        self._merge_pass(pass_pts)
+                canon = _rot_about_axis(obj, self.axis_w, self.axis_dir_w, -th_act)
+                if phase != 3:
+                    canon = self._unflip(canon)      # Phase3 는 아래 전역정합이 담당
+                # flip 패스는 프레임 하나의 중첩이 너무 적어 프레임 ICP 가 불안정하다
+                # → 패스 전체를 모아 한 번에 정합한다(중첩 확보).
+                if ICP_LEVEL == "frame" and phase != 3:
+                    self._merge_frame(canon)      # 프레임마다 master 에 재고정
+                else:
+                    pass_pts.append(canon)
+        if ICP_LEVEL != "frame" or phase == 3:
+            self._merge_pass(pass_pts, force_icp=(phase == 3))
+        elif getattr(self, "_icp_fail", 0):
+            print(f"[isaac_scan]   ICP 게이트 실패 프레임 {self._icp_fail}개 "
+                  f"(기구학 값 사용)")
+            self._icp_fail = 0
         # 루프 닫기: 350°→360°(≡0°) 앞으로 10° 만 더 회전 후 θ 리셋.
         # (기존엔 350°를 역방향으로 되감으며 렌더 → 느리고 "홱" 끊김. 360°≡0° 라
         #  clearpos 의 _co_rotate(0) 는 시각 점프 없음.)
@@ -554,6 +751,7 @@ class IsaacScanSession:
         self.turntable.clearpos()
         added = sum(len(a) for a in self.accum) - before
         print(f"[isaac_scan]   pass 완료 (+{added}점, 총 {before+added})")
+        return True
 
     # ── ScanBackend 프리미티브 (공용 utils/nbv/scan_phase_controller) ──────
     # 순서/게이팅/NBV 루프는 공용 컨트롤러 소유. 여기는 sim 캡처 하드웨어만.
@@ -680,6 +878,11 @@ class IsaacScanSession:
         view_target = np.array([self.axis_w[0], self.axis_w[1], self.obj_center_w[2]])
         for azd in VIEW_AZIS_DEG:                    # 도달 가능한 측면 azimuth 채택
             q, _ = self._view_q(view_target, VIEW_EL_DEG, azd, standoff, seed)
+            if q is not None and self._cm is not None:
+                ok, why = self._cm.is_pose_safe(q)
+                if not ok:                     # Phase1 도 이제 충돌을 본다(예전 무검사)
+                    print(f"[isaac_scan]   az={azd:.0f}° 충돌({why}) — 건너뜀")
+                    q = None
             if q is not None:
                 chosen = q
                 print(f"[isaac_scan] Phase1 측면자세 az={azd:.0f}° el={VIEW_EL_DEG:.0f}° IK ok")
@@ -693,8 +896,7 @@ class IsaacScanSession:
     def capture_rotation(self, pose, label: str, phase: int) -> bool:
         # sim: 로봇을 pose 로 구동 + 턴테이블 전회전 캡처. Phase 2 는 프레임 수 축소.
         n_theta = N_THETA_P2 if phase == 2 else N_THETA
-        self._scan_pass(pose, n_theta, label=label)
-        return True
+        return self._scan_pass(pose, n_theta, label=label, phase=phase)
 
     # ── Phase 2 (NBV = 추가 관측 elevation 자세, real 전회전 대응) ──────────────
     def _plan_nbv_pose(self, world, q_cur, gaps):
@@ -745,10 +947,69 @@ class IsaacScanSession:
         return self._plan_nbv_pose(self._world, q_cur, gaps)
 
     def supports_phase3(self) -> bool:
-        return False                                  # sim: 물체 손회전 불가 → Phase 3 미지원
+        """sim 도 Phase 3 지원 — 물체를 USD 에서 회전시킨다(real=사람 손회전)."""
+        return bool(FLIP_ANGLES_DEG) and self.stage.GetPrimAtPath(self._obj_prim).IsValid()
 
     def next_flip(self) -> bool:
-        return False
+        """다음 flip 자세로 물체를 회전. 더 없으면 False.
+
+        ★ 누적 좌표계 주의 — 뒤집은 뒤 캡처한 점은 **flip 된 물체 프레임**에 있다.
+          canonical(원래 물체 자세)로 되돌리지 않으면 점군이 어긋나 병합된다.
+          그래서 회전량을 `self._flip_R` 로 들고 있다가 `_accumulate_canonical` 에서
+          역회전한다. real 은 Artec 이 master 에 재고정해 같은 역할을 한다.
+        """
+        i = getattr(self, "_flip_i", 0)
+        if i >= len(FLIP_ANGLES_DEG):
+            return False
+        ang = float(FLIP_ANGLES_DEG[i])
+        self._flip_i = i + 1
+        R = _axis_rot(FLIP_AXIS, math.radians(ang))
+        o0 = self._obj0                       # ★ 항상 **원본** 치수 기준
+        c = o0["center"]
+        # ★ 중심 기준 회전만 시키면 물체가 **원판을 파고들거나 뜬다**(실측: 90° 에서
+        #   24mm 관통). 실물에서 사람은 물체를 **면에 올려놓는다** — 회전 후 원판
+        #   상면에 앉도록 내려준다. 이 보정은 원래 AABB 와 명목 회전만으로 계산되므로
+        #   **실물에서도 아는 값**이다(물체가 테이블에 놓인다는 물리 제약).
+        lo0 = np.array([c[0] - o0["radius"], c[1] - o0["radius"], o0["zlo"]])
+        hi0 = np.array([c[0] + o0["radius"], c[1] + o0["radius"], o0["zhi"]])
+        corners = np.array([[x, y, z] for x in (lo0[0], hi0[0])
+                            for y in (lo0[1], hi0[1]) for z in (lo0[2], hi0[2])])
+        rc = (corners - c) @ R.T + c
+        disc_top = float(self.axis_w[2])
+        dz = disc_top - float(rc[:, 2].min())        # 원판 위에 앉히기
+        M = np.eye(4); M[:3, :3] = R; M[:3, 3] = c - R @ c + np.array([0.0, 0.0, dz])
+        print(f"[isaac_scan]   flip 배치: 회전 후 원판 위로 {dz*1000:+.0f}mm 이동")
+        # ★ 물체 transform 을 직접 쓰지 않는다 — 턴테이블이 rider base 로 매 회전마다
+        #   덮어써서 flip 이 지워진다(실측 실패). 턴테이블 API 로 base 에 합성한다.
+        if not self.turntable.set_rider_flip(self._obj_prim, M):
+            print(f"[isaac_scan] ⚠ flip 실패 — '{self._obj_prim}' 이 턴테이블 rider 가 아님")
+            return False
+        self.world.step(8, render=True)
+        # ★ 보정에는 **명목 회전(hint)** 만 쓴다 — 실물은 사람이 손으로 뒤집으므로
+        #   물체의 실제 자세를 읽을 방법이 없다. USD 에서 world transform 을 읽으면
+        #   **sim 만 정확해져 'sim 이 real 을 검증한다'는 전제가 깨진다**.
+        #   real 과 같은 구조로 간다: 명목 회전을 hint 로 두고 **ICP 가 잔차를 정제**한다
+        #   (real 은 pose_physical_rotations → _hint_icp_refine).
+        self._flip_hint = M
+        # 크롭 창도 새 자세에 맞춘다 — 원래 자세 기준으로 두면 flip 된 물체의 위아래가
+        # 잘리고 원판 점이 섞인다(실측: 90° 에서 상단 5mm 잘림 + 하부 19mm 손실).
+        rc2 = rc + np.array([0.0, 0.0, dz])
+        self.obj_zlo_w, self.obj_zhi_w = float(rc2[:, 2].min()), float(rc2[:, 2].max())
+        self.obj_radius = float(max(rc2[:, 0].max() - rc2[:, 0].min(),
+                                    rc2[:, 1].max() - rc2[:, 1].min()) / 2.0)
+        self.obj_center_w = np.array([c[0], c[1], (self.obj_zlo_w + self.obj_zhi_w) / 2.0])
+        print(f"[isaac_scan]   크롭 갱신: z=[{self.obj_zlo_w:.3f},{self.obj_zhi_w:.3f}] "
+              f"r={self.obj_radius*1000:.0f}mm")
+        try:    # 진단 전용 — sim 에서만 알 수 있는 실제값. **보정에는 쓰지 않는다.**
+            D_true = self._prim_world_T(self._obj_prim) @ np.linalg.inv(self._obj_W0)
+            err = float(np.linalg.norm(D_true[:3, 3] - M[:3, 3])) * 1000.0
+            print(f"[isaac_scan]   (진단) hint 대비 실제 이동차 {err:.1f}mm "
+                  f"— ICP 가 이만큼을 메워야 한다")
+        except Exception:
+            pass
+        print(f"[isaac_scan] === Phase 3: 물체 {FLIP_AXIS}축 {ang:.0f}° flip "
+              f"({i+1}/{len(FLIP_ANGLES_DEG)}) ===")
+        return True
 
     def finalize(self) -> IsaacScanResult:
         pcd, pts = self._merged_pcd()
@@ -778,6 +1039,17 @@ class IsaacScanSession:
         self._world = None                            # Phase 2 진입 시 lazy build
         self._setup_object()
         return run_scan_phases(self)
+
+
+def _axis_rot(axis: str, ang: float) -> np.ndarray:
+    """base(world Z-up) 기준 단일축 회전 — real `make_axis_physical_rotations` 와 동일 규약."""
+    c, s_ = math.cos(ang), math.sin(ang)
+    a = (axis or "y").lower()
+    if a == "x":
+        return np.array([[1, 0, 0], [0, c, -s_], [0, s_, c]], float)
+    if a == "z":
+        return np.array([[c, -s_, 0], [s_, c, 0], [0, 0, 1]], float)
+    return np.array([[c, 0, s_], [0, 1, 0], [-s_, 0, c]], float)      # y
 
 
 # ── 모듈 함수(자기완결) ─────────────────────────────────────────────────────────

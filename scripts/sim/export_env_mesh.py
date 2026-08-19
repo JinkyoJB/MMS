@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import sys
 
 SCENE = ("/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/"
          "frame_xarm7_spider_turntable_v2/v3_scene.usd")
@@ -23,19 +24,24 @@ def main() -> None:
     ap.add_argument("--out", default="utils/collision/data/cell_env.npz")
     ap.add_argument("--root", default="/World/frame")
     ap.add_argument("--robot", default="/World/xarm7")
-    ap.add_argument("--max-pts", type=int, default=60000)
+    ap.add_argument("--spacing", type=float, default=0.005,
+                    help="표면 샘플 간격 m. SDF 복셀(8mm)보다 촘촘해야 한다")
+    ap.add_argument("--max-pts", type=int, default=2000000)
     ap.add_argument("--exclude-turntable", action="store_true",
                     help="턴테이블 뭉치 제외(별도 캡슐로 볼 때)")
     args = ap.parse_args()
 
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
     from isaacsim import SimulationApp
     app = SimulationApp({"headless": True})
 
     import numpy as np
+    from utils.collision.mesh_sampling import sample_surface
     from omni.isaac.core.utils.stage import open_stage
     from omni.usd import get_context
     from pxr import Usd, UsdGeom
 
+    rng = np.random.default_rng(0)          # 결정적 샘플링
     open_stage(args.scene)
     for _ in range(60):
         app.update()
@@ -55,11 +61,19 @@ def main() -> None:
     for d in Usd.PrimRange(stage.GetPrimAtPath(args.root), pred):
         if not d.IsA(UsdGeom.Mesh):
             continue
-        pts = UsdGeom.Mesh(d).GetPointsAttr().Get() or []
+        m = UsdGeom.Mesh(d)
+        pts = m.GetPointsAttr().Get() or []
         if not len(pts):
             continue
         A = np.array(xc.GetLocalToWorldTransform(d)).T
-        V = np.asarray(pts, float)[::3] @ A[:3, :3].T + A[:3, 3]    # world
+        # ★ 정점이 아니라 **표면**을 샘플링한다. 압출·판재는 정점이 모서리에만 있어
+        #   정점만 담으면 부재 중간이 빈 공간이 된다(실측: 1m 기둥 중간에 점 0개
+        #   → 스캐너가 관통). utils/collision/mesh_sampling 참고.
+        V = sample_surface(np.asarray(pts, float),
+                           m.GetFaceVertexCountsAttr().Get() or [],
+                           m.GetFaceVertexIndicesAttr().Get() or [],
+                           spacing_m=args.spacing, rng=rng)
+        V = V @ A[:3, :3].T + A[:3, 3]                               # world
         c = V.mean(0)
         if (args.exclude_turntable
                 and math.hypot(c[0] - TT_AXIS, c[1]) < TT_R

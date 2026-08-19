@@ -40,6 +40,18 @@ FLIP_USD_TO_CV = np.diag([-1.0, 1.0, -1.0, 1.0])
 DEFAULT_ROLLS_DEG = (0.0, -45.0, 45.0, -90.0, 90.0, 180.0)
 DEFAULT_N_SEED_ALT = 7
 
+# ── 특이점 회피 ──────────────────────────────────────────────────────────────
+# σ_min = 단위정규화 자코비안의 최소 특이값 = **특이점까지의 거리**.
+# 여기서 거르지 않으면 IK 가 조건 나쁜 해를 돌려주고, 그 자세에서
+#   · 작은 카테시안 오차가 큰 관절 이동으로 증폭되고(떨림·오버슈트)
+#   · 경로 보간 중 관절이 급변한다.
+# 실측(xArm7, 무작위 1500자세): 최소 0.0004 / 1% 0.0020 / 5% 0.0076 / 중앙 0.069
+#   home 0.147,  팔꿈치 신전(q4=0°) 0.087,  q4=140° 0.036(최악권)
+# → 0.05 = 하위 ~4% 를 자르는 값. home 대비 3배 여유.
+# ※ 7축 여유자유도라 6축 팔의 '손목 특이점(q5=0)' 은 실제로 특이하지 않다(실측 σ_min
+#   0.16). 남는 축이 보상하므로, 관절각 규칙이 아니라 **σ_min 으로 판정**해야 한다.
+DEFAULT_MIN_SIGMA = 0.05
+
 
 def eye_from_el_az(target_w, el_deg, az_deg, standoff):
     """target 을 (el, az) 방향 standoff 거리에서 보는 카메라 원점."""
@@ -75,13 +87,16 @@ def ik_seeds(seed, n_alt=DEFAULT_N_SEED_ALT, rng_seed=0):
 
 def solve_view_q(kin, target_w, el_deg, az_deg, standoff, seed, T_EC, *,
                  T_WB=None, convention=CAM_USD, rolls_deg=DEFAULT_ROLLS_DEG,
-                 n_seed_alt=DEFAULT_N_SEED_ALT, world_up=(0.0, 0.0, 1.0)):
+                 n_seed_alt=DEFAULT_N_SEED_ALT, world_up=(0.0, 0.0, 1.0),
+                 min_sigma=DEFAULT_MIN_SIGMA):
     """(q, roll_deg, eye) — 못 풀면 (None, None, eye).
 
     target_w / T_WB 프레임 규칙
       · T_WB 를 주면 target 은 **world**, 내부에서 base 로 변환한다(sim).
       · T_WB=None 이면 target 이 이미 **base** 프레임이다(real).
     T_EC : E→C (카메라→플랜지). 호출자의 `convention` 과 짝이 맞는 값을 넘길 것.
+    min_sigma : 특이점 회피 임계(σ_min). 이보다 조건이 나쁜 해는 **버리고 계속 탐색**한다
+                — roll·시드 후보가 여럿이므로 대개 더 나은 해가 있다. 0 이면 비활성.
     """
     eye = eye_from_el_az(target_w, el_deg, az_deg, standoff)
     seeds = ik_seeds(seed, n_seed_alt)
@@ -94,8 +109,15 @@ def solve_view_q(kin, target_w, el_deg, az_deg, standoff, seed, T_EC, *,
                                  kin.R_to_euler_xyz(T_EB[:3, :3])])
         for sd in seeds:
             q, ok = kin.ik(pose6d, seed=sd)
-            if ok:
-                return q, float(roll), eye
+            if not ok:
+                continue
+            if min_sigma > 0.0:
+                try:
+                    if kin.sigma_min(q) < min_sigma:
+                        continue           # 특이점 근처 해 — 다음 후보로
+                except Exception:
+                    pass                   # 지표 미제공 운동학이면 그냥 통과
+            return q, float(roll), eye
     return None, None, eye
 
 

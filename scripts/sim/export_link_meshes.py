@@ -23,18 +23,23 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", default=SCENE)
     ap.add_argument("--out", default="utils/collision/data/xarm7_spider_links.npz")
-    ap.add_argument("--link-pts", type=int, default=4000, help="링크당 목표 점 수")
-    ap.add_argument("--tool-pts", type=int, default=6000, help="툴 목표 점 수")
+    ap.add_argument("--spacing", type=float, default=0.004,
+                    help="표면 샘플 간격 m (링크 SDF 복셀 6mm 보다 촘촘하게)")
+    ap.add_argument("--link-pts", type=int, default=20000, help="링크당 목표 점 수")
+    ap.add_argument("--tool-pts", type=int, default=30000, help="툴 목표 점 수")
     args = ap.parse_args()
 
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
     from isaacsim import SimulationApp
     app = SimulationApp({"headless": True})
 
     import numpy as np
+    from utils.collision.mesh_sampling import sample_surface
     from omni.isaac.core.utils.stage import open_stage
     from omni.usd import get_context
     from pxr import Usd, UsdGeom
 
+    rng = np.random.default_rng(0)
     open_stage(args.scene)
     for _ in range(60):
         app.update()
@@ -55,10 +60,16 @@ def main() -> None:
             if skip_tool and "/tool" in str(d.GetPath()):
                 continue
             A = Li @ np.array(xc.GetLocalToWorldTransform(d)).T
-            q = UsdGeom.Mesh(d).GetPointsAttr().Get() or []
+            m = UsdGeom.Mesh(d)
+            q = m.GetPointsAttr().Get() or []
             if not len(q):
                 continue
-            V = np.asarray(q, dtype=float)
+            # 정점이 아니라 표면 샘플링 — 평평한 부품(툴 플레이트 등)의 면 중앙이
+            # 비는 것을 막는다(환경 쪽에서 실제 관통 사고를 냈던 원인).
+            V = sample_surface(np.asarray(q, float),
+                               m.GetFaceVertexCountsAttr().Get() or [],
+                               m.GetFaceVertexIndicesAttr().Get() or [],
+                               spacing_m=args.spacing, rng=rng)
             P.append(V @ A[:3, :3].T + A[:3, 3])
         return np.vstack(P) if P else np.zeros((0, 3))
 
