@@ -1,0 +1,220 @@
+<title>MMS 9종 스캔 스윕</title>
+<style>
+:root{
+  --ground:#F1F3F5; --surface:#FFFFFF; --sunk:#E7EAEE;
+  --ink:#141A20; --ink-2:#3D4752; --muted:#6A7583; --line:#D6DBE1;
+  --accent:#0E7C86; --accent-soft:#DCEEF0;
+  --ok:#2E7D4F; --fail:#B3261E; --flat:#8A929C;
+  --shadow:0 1px 2px rgba(20,26,32,.06), 0 8px 24px -16px rgba(20,26,32,.30);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1317; --surface:#171C22; --sunk:#1F262E;
+    --ink:#E4E9EE; --ink-2:#B4BDC7; --muted:#8794A2; --line:#2A323B;
+    --accent:#43BCC6; --accent-soft:#123338;
+    --ok:#5FB884; --fail:#E0685D; --flat:#6E7885;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1317; --surface:#171C22; --sunk:#1F262E;
+  --ink:#E4E9EE; --ink-2:#B4BDC7; --muted:#8794A2; --line:#2A323B;
+  --accent:#43BCC6; --accent-soft:#123338;
+  --ok:#5FB884; --fail:#E0685D; --flat:#6E7885;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:system-ui,-apple-system,"Pretendard","Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif;
+  font-size:15px; line-height:1.6; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px;margin:0 auto;padding:56px 24px 96px;display:flex;flex-direction:column;gap:44px}
+.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+
+header.top{display:flex;flex-direction:column;gap:14px}
+.eyebrow{font-size:11.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--accent);font-weight:650}
+h1{margin:0;font-size:clamp(28px,4vw,40px);line-height:1.15;letter-spacing:-.022em;font-weight:680;text-wrap:balance}
+.lede{margin:0;max-width:62ch;color:var(--ink-2);font-size:16.5px}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.stat{background:var(--surface);padding:18px 20px;display:flex;flex-direction:column;gap:5px}
+.stat b{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;
+  font-size:30px;line-height:1;letter-spacing:-.02em;font-weight:600}
+.stat span{font-size:12.5px;color:var(--muted)}
+
+h2{margin:0 0 14px;font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:650}
+section{display:block}
+
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;min-width:720px}
+thead th{font-size:11.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:650;
+  text-align:right;padding:13px 16px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--sunk)}
+thead th:first-child{text-align:left}
+tbody th{text-align:left;font-weight:600;padding:13px 16px;border-bottom:1px solid var(--line);
+  display:flex;flex-direction:column;gap:2px}
+tbody td{padding:13px 16px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+tbody tr:last-child th,tbody tr:last-child td{border-bottom:none}
+tbody tr.bad th{box-shadow:inset 3px 0 0 var(--fail)}
+.nm{font-size:14.5px}
+.dim{font-size:11.5px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+.num{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;font-size:14px}
+.num .u{font-size:11px;color:var(--muted)}
+.num .g{color:var(--muted)}
+.sm{font-size:12.5px;color:var(--ink-2)}
+.delta{min-width:150px}
+.track{display:inline-block;width:76px;height:6px;border-radius:3px;background:var(--sunk);
+  vertical-align:middle;margin-right:9px;overflow:hidden}
+.track i{display:block;height:100%;border-radius:3px}
+.track i.pos{background:var(--ok)} .track i.neg{background:var(--fail)} .track i.flat{background:var(--flat)}
+.delta b{font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:13px;font-weight:600}
+.delta b.pos{color:var(--ok)} .delta b.neg{color:var(--fail)} .delta b.flat{color:var(--muted)}
+.chip{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:600;
+  font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+.chip.ok{background:var(--accent-soft);color:var(--accent)}
+.chip.fail{background:color-mix(in srgb,var(--fail) 14%,transparent);color:var(--fail)}
+.chip.fix{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok)}
+tbody tr.fix th{box-shadow:inset 3px 0 0 var(--ok)}
+.card.fix{box-shadow:inset 3px 0 0 var(--ok),var(--shadow)}
+.was{color:var(--fail)}
+.note.fix{color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent)}
+
+.fixes{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.fix-row{background:var(--surface);padding:18px 20px;display:flex;flex-direction:column;gap:8px}
+.fix-row h3{margin:0;font-size:15.5px;font-weight:650;display:flex;gap:9px;align-items:baseline;flex-wrap:wrap}
+.fix-row h3 code{font-size:11.5px;font-weight:400;color:var(--muted);background:none;padding:0}
+.fix-row p{margin:0;color:var(--ink-2);font-size:14px;max-width:70ch}
+.ba{display:flex;gap:8px;flex-wrap:wrap;font-family:ui-monospace,Menlo,monospace;
+  font-variant-numeric:tabular-nums;font-size:12.5px;margin-top:2px}
+.ba span{padding:3px 9px;border-radius:6px;background:var(--sunk);color:var(--ink-2)}
+.ba span b{color:var(--ok);font-weight:600}
+
+.cards{display:flex;flex-direction:column;gap:18px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:18px 20px 20px;
+  box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px}
+.card.bad{box-shadow:inset 3px 0 0 var(--fail),var(--shadow)}
+.card header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.card h3{margin:0;font-size:17px;font-weight:650;letter-spacing:-.01em}
+.card .meta{margin-left:auto;font-size:11.5px;color:var(--muted);
+  font-family:ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+.views{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+figure{margin:0;display:flex;flex-direction:column;gap:6px}
+figure img{width:100%;height:auto;display:block;border-radius:7px;background:var(--sunk);border:1px solid var(--line)}
+figcaption{font-size:11.5px;color:var(--muted);letter-spacing:.04em}
+.note{margin:0;font-size:13px;color:var(--ink-2);padding:10px 12px;border-radius:7px;background:var(--sunk)}
+.note.fail{color:var(--fail);background:color-mix(in srgb,var(--fail) 9%,transparent)}
+
+.read{max-width:66ch;display:flex;flex-direction:column;gap:12px}
+.read p{margin:0;color:var(--ink-2)}
+.read strong{color:var(--ink);font-weight:650}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;
+  background:var(--sunk);padding:1px 5px;border-radius:4px}
+footer{color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padding-top:18px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">Isaac Sim · 120프레임/rev · Phase 1→2→3</div>
+    <h1>테스트셋 9종 일반성 검증</h1>
+    <p class="lede">머그 하나로 튜닝한 스캔 파이프라인이 다른 물체에도 통하는지 확인했다.
+      물체마다 Phase 1(측면 전회전) → Phase 2(부족면 NBV) → Phase 3(뒤집어 바닥면)을 끝까지 돌리고,
+      결과 메시를 네 방향에서 렌더했다. 스윕은 코드 결함 넷을 드러냈다 — 둘은 스캔을 중단시키는
+      버그였고, 하나는 품질 지표를 반대로 읽게 하는 해석 오류, 하나는 키 큰 물체의 flip 전략이었다.
+      모두 수정한 뒤 아홉 종이 완주하며, 정답(GT) 대조 표준 지표로 개선을 확인했다.</p>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><b>9/9</b><span>끝까지 완주 (수정 후)</span></div>
+    <div class="stat"><b>{{NIMP}}/9</b><span>Phase 2 가 경계를 줄임</span></div>
+    <div class="stat"><b>4</b><span>스윕이 드러낸 결함 (수정 완료)</span></div>
+  </div>
+
+  <section>
+    <h2>스윕이 찾아낸 결함</h2>
+    <div class="fixes">
+      <div class="fix-row">
+        <h3>밴드 하나가 실패하면 스캔 전체를 버렸다 <code>scan_phase_controller.py</code></h3>
+        <p>키를 나눠 스캔하는 물체에서 밴드 한 대역이 도달 불가면 곧바로 종료해, Phase 2·3 이 통째로 사라졌다.
+          도달 못 한 대역은 Phase 1 의 실패가 아니라 부분 결손이고, 그 결손을 메우는 것이 바로 Phase 2 의 역할이다.
+          전부 실패했을 때만 포기하도록 바꿨다.</p>
+        <div class="ba"><span>hand drill 중단 → <b>완주</b></span><span>spray can 중단 → <b>완주</b></span></div>
+      </div>
+      <div class="fix-row">
+        <h3>충돌 검사가 두 경로 중 한쪽에만 있었다 <code>isaac_scan_session.py</code></h3>
+        <p>Phase 1 자세 선정 경로가 둘인데 충돌 게이트가 한쪽에만 들어가 있었다. 밴드 경로는 IK 해가 나오면
+          충돌 여부를 보지 않고 확정해, 충돌 없는 다른 방위를 한 번도 시도하지 않았다. 실제로 az 0° 에서
+          4mm 차이로 자가충돌하던 자세가 az 30° 에서는 멀쩡했다.</p>
+        <div class="ba"><span>spray can 경계 408 → <b>227mm</b></span><span>hand drill 756 → <b>505mm</b></span>
+          <span>높이 206.5 → <b>207.5mm</b> (실제 207)</span></div>
+      </div>
+      <div class="fix-row">
+        <h3>경계 지표를 반대로 읽고 있었다 <code>eval_vs_gt.py 신설</code></h3>
+        <p>런타임 지표(경계 길이)는 "낮을수록 좋다"로 해석돼 왔지만, 커버리지가 넓어지는 동안 새로 붙은
+          표면의 테두리만큼 경계는 오히려 늘어난다. 씬에서 정답(GT) 표면을 뽑아 표준 지표(completeness /
+          accuracy / F-score)로 대조하니, "악화"로 보이던 두 물체 모두 실제로는 단조 개선이었다.
+          이후 수렴 판정은 경계가 아니라 누적 점군의 <strong>신규 점유 복셀</strong>(정보이득)로 바꿨고,
+          비생산 겨냥점만 제외하는 gap 단위 회계로 소진 시 자연 종료하게 했다.</p>
+        <div class="ba"><span>hand drill compl 37.9 → <b>52.7%</b> (경계는 519→800 "악화")</span>
+          <span>mug compl 33.1 → <b>37.7%</b></span><span>불필요 패치 <b>조기 종료</b> 확보</span></div>
+      </div>
+      <div class="fix-row">
+        <h3>키 큰 물체는 180° 만으론 끝면이 남는다 <code>flip_policy.py 신설</code></h3>
+        <p>세장형(키/지름 ≥ 2)은 윗면이 측면 카메라에 grazing 이고 고앙각 자세는 자가충돌이라, 90°(눕히기)
+          flip 을 자동 추가했다 — 눕히면 양 끝면이 측면을 향해 쉽게 잡히고, 실루엣이 비대칭이라 flip
+          정합(ICP)도 처음으로 성공한다. 아울러 flip 후 home 자세 캡처가 낮은 물체에서만 성립하던 문제를
+          찾아, 뒤집힌 물체의 새 치수로 관측자세를 계획해 이동하게 했다(553점 → 315,850점).
+          같은 규칙이 real 에서는 사람에게 "눕혀 주세요" 안내로 나간다.</p>
+        <div class="ba"><span>spray can compl 87.2 → <b>91.6%</b></span>
+          <span>Chamfer 0.80 → <b>0.38mm</b></span><span>F@2mm 94.1 → <b>97.6%</b></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>최종 품질 — GT 대조 (표준 지표)</h2>
+    <div class="tw"><table>
+      <thead><tr>
+        <th>물체</th><th>완전성@1mm</th><th>정확도@1mm</th>
+        <th>F-score@1mm</th><th>F@2mm</th><th>Chamfer</th>
+      </tr></thead>
+      <tbody>{{GTRS}}</tbody>
+    </table></div>
+    <div class="read" style="margin-top:14px">
+      <p>씬에 심은 물체의 정답(GT) 표면과 최종 메시를 직접 대조한 값이다 — 3D 재구성 벤치마크의
+        표준 지표(<strong>완전성</strong>=GT 중 1mm 안에 잡힌 비율, <strong>정확도</strong>=재구성 중
+        GT 1mm 안인 비율, <strong>F-score</strong>=둘의 조화평균, <strong>Chamfer</strong>=양방향
+        평균거리). 단순 회전체(drug bottle·povidone)는 99%에 닿고, 세장형 flip을 받은
+        spray can 이 93.8%로 그 다음이다. 복잡 형상(hand drill)과 최대 크기(laundry detergent)가
+        50%대로 남은 개선 표적이다.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>지표</h2>
+    <div class="tw"><table>
+      <thead><tr>
+        <th>물체</th><th>Phase 1 (경계/gap)</th><th>Phase 2 (경계/gap)</th>
+        <th>변화</th><th>누적점</th><th>flip 정합</th>
+      </tr></thead>
+      <tbody>{{TRS}}</tbody>
+    </table></div>
+    <div class="read" style="margin-top:14px">
+      <p><strong>경계 길이</strong>는 메시에 뚫린 구멍 테두리의 총 길이, <strong>gap</strong>은 그 구멍의
+        개수다. 다만 이 값은 <strong>커버리지가 넓어질 때도 올라간다</strong>(새 표면의 테두리) —
+        그래서 최종 판단은 씬의 정답(GT) 표면 대비 completeness / F-score 로 한다
+        (<code>scripts/sim/eval_vs_gt.py</code>). 표의 값은 실행 중 관측치로만 읽을 것.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>결과 메시</h2>
+    <div class="cards">{{CARDS}}</div>
+  </section>
+
+  <footer>
+    각 메시는 Poisson 재구성(depth 8) 결과이며, 렌더는 스캔 정점색을 제거하고 균일 재질로 조명해
+    표면 굴곡이 드러나게 했다. 아랫면 뷰가 Phase 3 flip 의 성패를 직접 보여준다.
+  </footer>
+</div>

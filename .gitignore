@@ -226,3 +226,10 @@ __marimo__/
 /datasets
 /output_a3d
 docs/figures
+# sim 실험 생성물 — 스크립트로 재생성 가능 (스캔 덤프·렌더·GT 캐시·스윕 로그)
+scripts/sim/log/testset_sweep/
+scripts/sim/log/testset_gate/
+scripts/sim/log/conv_val/
+scripts/sim/log/stage_dump/
+scripts/sim/log/gt/
+scripts/sim/log/testset_points/

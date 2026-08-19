@@ -182,8 +182,10 @@ DISC_REJECT_M = _envf("MMS_SIM_DISC_REJECT", 0.003)
 # **어떤 관측 elevation 으로도 못 보므로**, flip 없이는 원리적으로 못 메운다.
 FLIP_AXIS = _envs("MMS_SIM_FLIP_AXIS", "y")
 # 기본은 **180° 만** — 0° 는 Phase 1·2 가 이미 스캔한 원래 자세이고, 바닥면은
-# 180° 뒤집기 하나로 취득된다. 90°(옆으로 눕히기)는 시간이 두 배 들고 이득이 작아
-# **요청 시에만** 쓴다:  MMS_SIM_FLIP_ANGLES=90,180
+# 180° 뒤집기 하나로 취득된다. 90°(옆으로 눕히기)는 시간이 배로 들어 기본은 끄지만,
+# **세장형(키/지름 ≥ FLIP_ASPECT)은 자동 추가**된다 — 키 큰 물체의 윗면은 측면에서
+# grazing + 고앙각 자세는 자가충돌이라 90° 로 눕혀야 양 끝면이 잡힌다(_flip_angles).
+# env 명시(MMS_SIM_FLIP_ANGLES=90,180)가 항상 우선.
 FLIP_ANGLES_DEG = tuple(float(x) for x in
                         _envs("MMS_SIM_FLIP_ANGLES", "180").split(",") if x.strip())
 
@@ -207,6 +209,14 @@ ENSURE_SPAN_DEG    = _envf("MMS_SIM_ENSURE_SPAN", 360.0)
 # 디버그 오버레이 갱신 주기·점수 — 매 프레임 수만 점을 USD 에 쓰면 캡처보다 비싸다.
 DRIFT_TRANS_M   = _envf("MMS_SIM_DRIFT_T", 0.030)
 DRIFT_ROT_DEG   = _envf("MMS_SIM_DRIFT_R", 15.0)
+FLIP_ASPECT     = _envf("MMS_SIM_FLIP_ASPECT", 2.0)      # 키/지름 이 값 이상=세장형
+CONV_NEW_EPS    = _envf("MMS_SIM_CONV_NEW_EPS", 0.005)   # 전역 백스톱 임계 (보수적:
+#   GT 검증에서 0.5%/3회는 손실 최대 0.27%p. 주 종료는 gap 단위 dry 회계가 맡는다)
+DRY_EPS         = _envf("MMS_SIM_DRY_EPS", 0.015)        # 패치 생산성 판정 (실측:
+#   비생산 패치 0.2~1.2%, 생산 패치 1.7~10.3% — 1.5% 가 그 사이를 가른다)
+CONV_VOX_M      = _envf("MMS_SIM_CONV_VOX", 0.004)       # 커버리지 판정 복셀 크기
+CONV_AREA_N     = int(_envf("MMS_SIM_CONV_AREA_N", 3))   # 연속 정체 횟수
+STAGE_DUMP      = os.environ.get("MMS_SIM_STAGE_DUMP", "")
 ICP_DUMP        = os.environ.get("MMS_SIM_ICP_DUMP", "")
 ICP_SCALE_DEBUG = bool(_envf("MMS_SIM_ICP_DEBUG", 0))
 PROFILE_EVERY   = int(_envf("MMS_SIM_PROFILE_EVERY", 20))   # N프레임마다 소요시간 내역
@@ -1036,6 +1046,17 @@ class IsaacScanSession:
             for azd in VIEW_AZIS_DEG:                # 계획 자세도 az 는 도달성으로
                 q, _ = self._view_q(np.array([axis_xy[0], axis_xy[1], vp.target_z]),
                                     vp.el_deg, azd, vp.standoff, seed)
+                # ★ 충돌 게이트 — legacy 경로(_pick_phase1_legacy)에만 있고 밴드 경로에는
+                #   빠져 있었다. IK 해가 나오면 충돌 여부를 안 보고 break 해서, 충돌 없는
+                #   다른 az 를 **한 번도 시도하지 않았다**. 그 결과 최상단 밴드가
+                #   'tool↔link4 자가충돌'로 이동 단계에서 거부되고 패스가 통째로 날아갔다
+                #   (실측 2026-08-19: hand_drill·spray_can 밴드 3/3).
+                if q is not None and self._cm is not None:
+                    ok, why = self._cm.is_pose_safe(q)
+                    if not ok:
+                        print(f"[isaac_scan]   band tz={vp.target_z:.3f} "
+                              f"az={azd:.0f}° 충돌({why}) — 다음 az 시도")
+                        q = None
                 if q is not None:
                     print(f"[isaac_scan]   자세 el={vp.el_deg:.0f}° s={vp.standoff:.3f} "
                           f"tz={vp.target_z:.3f} az={azd:.0f}° "
@@ -1241,6 +1262,68 @@ class IsaacScanSession:
         cov = p2.coverage_state(mesh, **GAP_KW)
         print(f"[isaac_scan]   boundary={cov.boundary_len_m*1000:.0f}mm "
               f"cov={cov.angular_cov:.2f} gaps={cov.n_gaps}")
+        # 단계별 메시 덤프 — 지표를 계산하는 **바로 그 메시**를 저장한다(숫자와 그림이
+        # 같은 대상을 가리키게). Phase 2 가 정말 나빠지는지 눈으로 확인하는 용도.
+        if STAGE_DUMP:
+            try:
+                import open3d as _o3d
+                i = getattr(self, "_stage_i", 0); self._stage_i = i + 1
+                os.makedirs(STAGE_DUMP, exist_ok=True)
+                f = os.path.join(STAGE_DUMP,
+                                 f"{i:02d}_b{cov.boundary_len_m*1000:.0f}_g{cov.n_gaps}.ply")
+                _o3d.io.write_triangle_mesh(f, mesh)
+                # 런타임 지표 검증용 — **누적 원시 점군**도 같이 남긴다. 메시가 아니라
+                # 이걸로 신규 복셀을 세야 재구성 흔들림에 오염되지 않는다.
+                if self.accum:
+                    np.savez_compressed(f[:-4] + "_accum.npz",
+                                        points=np.vstack(self.accum).astype(np.float32))
+                print(f"[isaac_scan]   (덤프) {os.path.basename(f)}")
+            except Exception as e:                       # noqa: BLE001
+                print(f"[isaac_scan]   ⚠ 단계 덤프 실패({e})")
+        # ── 수렴 판정 ────────────────────────────────────────────────────
+        # ★ boundary 하나로 판정하면 안 된다. 커버리지가 **넓어지는 동안 boundary 는
+        #   늘어난다** — 새로 붙은 표면의 테두리가 그대로 경계로 잡히기 때문이다.
+        #   GT 대조 실측(2026-08-19 hand_drill): Phase 2 가 completeness 를
+        #   37.9%→52.7% 로 올리는 동안 boundary 는 519→800mm 로 '악화'했다.
+        #   "boundary 가 안 준다 = 나빠졌다" 로 읽으면 정반대 결론이 나온다.
+        #
+        #   대신 **새 표면이 더 안 붙는지**를 본다(표면적 한계 이득). GT 를 못 쓰는
+        #   실물에서도 쓸 수 있고, 위 실측에서 Δ면적% 와 Δcompleteness 가 거의
+        #   나란히 움직였다.
+        #
+        #   ⚠ 기본값 1.5%/3회는 **보수적**이다. GT 대조로 (eps,N) 을 훑어보니 더 공격적인
+        #     설정은 머그에서 완전성 2~3%p 를 잃었다(개선이 간헐적이라 두 번 조용했다고
+        #     끝난 게 아니다). 1.5%/3 은 드릴에서 1패치를 아끼고 손실 0.13%p, 머그는
+        #     손실 0 이었다. **물체 2종으로 맞춘 값이니 더 넓게 검증할 것.**
+        #     검증 도구: scripts/sim/eval_vs_gt.py (+ MMS_SIM_STAGE_DUMP)
+        #   지표는 **누적 원시 점군의 신규 점유 복셀**로 잰다. 재구성 메시에서 재면
+        #   Poisson 표면이 패치마다 미세하게 흔들려, 새로 본 게 없어도 복셀이 바뀐다
+        #   (실측: 메시 기반 신규복셀은 머그에서 Δcompleteness 와 r=+0.43 에 그쳤다).
+        #   누적 점군은 점이 더해지기만 하므로 신규 복셀 = 진짜 새로 관측한 공간이다.
+        new_frac = None
+        if self.accum:
+            k = np.floor(np.vstack(self.accum) / CONV_VOX_M).astype(np.int64)
+            cur = set(map(tuple, np.unique(k, axis=0)))
+            seen = getattr(self, "_conv_vox", None)
+            if seen is not None and seen:
+                new_frac = len(cur - seen) / len(seen)
+            self._conv_vox = cur
+        # ── gap 단위 회계 (주 종료 경로) ─────────────────────────────────
+        # 직전 패치가 frontier 겨냥이었으면 결과를 planner 에 보고한다. 비생산
+        # 패치의 겨냥점 주변은 후보에서 빠져, **계획기가 후보를 소진하면 루프가
+        # 자연 종료**된다. 전역 조기종료(아래 백스톱)보다 이것이 주 경로다 —
+        # NBV 개선은 간헐적이라(작은 gap 뒤에 큰 gap) 전역 정지는 이득을 잘린다.
+        if new_frac is not None and getattr(self, "_nbv", None) is not None:
+            self._nbv.report_patch(new_frac >= DRY_EPS)
+        area = float(mesh.get_surface_area())
+        if new_frac is not None:
+            flat = getattr(self, "_conv_flat", 0)
+            self._conv_flat = flat + 1 if new_frac < CONV_NEW_EPS else 0
+            print(f"[isaac_scan]   신규복셀={new_frac*100:.2f}% "
+                  f"표면적={area*1e4:.0f}cm² 정체 {self._conv_flat}/{CONV_AREA_N}")
+            if self._conv_flat >= CONV_AREA_N:
+                print("[isaac_scan]   수렴 — 새로 보이는 곳이 없다. 완료.")
+                return True
         if p2.is_converged(cov, 0.012, 0.92):
             print("[isaac_scan]   수렴 — 완료.")
             return True
@@ -1255,7 +1338,34 @@ class IsaacScanSession:
 
     def supports_phase3(self) -> bool:
         """sim 도 Phase 3 지원 — 물체를 USD 에서 회전시킨다(real=사람 손회전)."""
-        return bool(FLIP_ANGLES_DEG) and self.stage.GetPrimAtPath(self._obj_prim).IsValid()
+        return bool(self._flip_angles()) and self.stage.GetPrimAtPath(self._obj_prim).IsValid()
+
+    def _flip_angles(self):
+        """물체 종횡비로 flip 각을 정한다. env 명시가 항상 우선.
+
+        세장형(키/지름 ≥ FLIP_ASPECT)은 **90° flip 을 추가**한다 — 키 큰 물체의
+        윗면(캡)은 측면 카메라에서 grazing 이고 고앙각 자세는 자가충돌로 도달이
+        어렵다(실측: spray_can 밴드3 tool↔link4). 90° 로 눕히면 양쪽 끝면이
+        측면을 향해 el 30~70° 로 쉽게 잡힌다. 180° 는 항상 마지막(바닥면).
+        """
+        cached = getattr(self, "_flip_angles_c", None)
+        if cached is not None:
+            return cached
+        if os.environ.get("MMS_SIM_FLIP_ANGLES"):
+            self._flip_angles_c = FLIP_ANGLES_DEG          # 명시값 그대로
+            return self._flip_angles_c
+        o0 = getattr(self, "_obj0", None)
+        if o0 is None:
+            return FLIP_ANGLES_DEG                          # 아직 미측정 — 캐시 안 함
+        # 정책은 공용 flip_policy (real 은 같은 규칙으로 사람에게 안내한다)
+        from utils.nbv.flip_policy import flip_angles_for
+        angles, aspect = flip_angles_for(o0["zhi"] - o0["zlo"],
+                                         2.0 * o0["radius"], FLIP_ASPECT)
+        self._flip_angles_c = angles if len(angles) > 1 else FLIP_ANGLES_DEG
+        if len(angles) > 1:
+            print(f"[isaac_scan] 세장형(종횡비 {aspect:.1f}≥{FLIP_ASPECT:g}) — "
+                  f"flip 90° 추가 (90→180 순)")
+        return self._flip_angles_c
 
     def next_flip(self) -> bool:
         """다음 flip 자세로 물체를 회전. 더 없으면 False.
@@ -1265,10 +1375,11 @@ class IsaacScanSession:
           그래서 회전량을 `self._flip_R` 로 들고 있다가 `_accumulate_canonical` 에서
           역회전한다. real 은 Artec 이 master 에 재고정해 같은 역할을 한다.
         """
+        angles = self._flip_angles()
         i = getattr(self, "_flip_i", 0)
-        if i >= len(FLIP_ANGLES_DEG):
+        if i >= len(angles):
             return False
-        ang = float(FLIP_ANGLES_DEG[i])
+        ang = float(angles[i])
         self._flip_i = i + 1
         R = _axis_rot(FLIP_AXIS, math.radians(ang))
         o0 = self._obj0                       # ★ 항상 **원본** 치수 기준
@@ -1307,6 +1418,31 @@ class IsaacScanSession:
         self.obj_center_w = np.array([c[0], c[1], (self.obj_zlo_w + self.obj_zhi_w) / 2.0])
         print(f"[isaac_scan]   크롭 갱신: z=[{self.obj_zlo_w:.3f},{self.obj_zhi_w:.3f}] "
               f"r={self.obj_radius*1000:.0f}mm")
+        # ── flip 후 관측자세 계획 — Phase 3 = "뒤집힌 물체의 Phase 1" ─────────
+        # home 자세 캡처는 낮은 물체에서만 우연히 성립한다. 실측(2026-08-19,
+        # spray_can 90°→180°): home 카메라 가용 z 대역이 0.67~0.74m 라, 다시 세운
+        # 키 207mm 물체는 옆면이 grazing(입사각 필터 전멸) + 꼭대기는 조준 밖
+        # → 553점. 뒤집힌 물체의 새 중심/반경으로 측면 자세를 계획해 이동한다.
+        try:
+            seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+            standoff = WORK_FOCUS + self.obj_radius
+            tgt = np.array([self.axis_w[0], self.axis_w[1], self.obj_center_w[2]])
+            moved = False
+            for azd in VIEW_AZIS_DEG:
+                q3, _ = self._view_q(tgt, VIEW_EL_DEG, azd, standoff, seed)
+                if q3 is not None and self._cm is not None:
+                    ok3, _why3 = self._cm.is_pose_safe(q3)
+                    if not ok3:
+                        q3 = None
+                if q3 is not None and self._drive(q3):
+                    print(f"[isaac_scan]   flip 관측자세 이동: az={azd:.0f}° "
+                          f"el={VIEW_EL_DEG:.0f}° standoff={standoff*1000:.0f}mm")
+                    moved = True
+                    break
+            if not moved:
+                print("[isaac_scan]   ⚠ flip 관측자세 못 찾음 — 현재 자세로 캡처")
+        except Exception as e:                       # noqa: BLE001
+            print(f"[isaac_scan]   ⚠ flip 관측자세 계획 실패({e}) — 현재 자세 유지")
         try:    # 진단 전용 — sim 에서만 알 수 있는 실제값. **보정에는 쓰지 않는다.**
             D_true = self._prim_world_T(self._obj_prim) @ np.linalg.inv(self._obj_W0)
             err = float(np.linalg.norm(D_true[:3, 3] - M[:3, 3])) * 1000.0
@@ -1315,7 +1451,7 @@ class IsaacScanSession:
         except Exception:
             pass
         print(f"[isaac_scan] === Phase 3: 물체 {FLIP_AXIS}축 {ang:.0f}° flip "
-              f"({i+1}/{len(FLIP_ANGLES_DEG)}) ===")
+              f"({i+1}/{len(angles)}) ===")
         return True
 
     def finalize(self) -> IsaacScanResult:

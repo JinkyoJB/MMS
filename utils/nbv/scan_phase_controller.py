@@ -145,11 +145,25 @@ def run_scan_phases(backend: ScanBackend) -> Any:
         return backend.finalize()
     pose1 = backend.pick_phase1_pose()
     poses1 = list(pose1) if isinstance(pose1, (list, tuple)) else [pose1]
+    # ★ 밴드 하나가 실패해도 **중단하지 않는다**. 도달 못 한 밴드는 Phase 1 의 실패가
+    #   아니라 부분적 데이터 결손이고, 그 결손을 메우는 것이 바로 Phase 2 NBV 의 역할이다.
+    #   예전에는 밴드 1개 실패 → 즉시 finalize 라 Phase 2·3 이 통째로 사라졌다
+    #   (실측 2026-08-19: hand_drill 267k점 / spray_can 472k점을 모아놓고 전부 버림.
+    #    스캔 결과 윗부분이 잘려 나갔다). 전부 실패했을 때만 포기한다.
+    n_ok = 0
     for i, p in enumerate(poses1, 1):
         label = ("Phase 1 (측면 5면)" if len(poses1) == 1
                  else f"Phase 1 (band {i}/{len(poses1)})")
-        if not backend.capture_rotation(p, label, phase=1):
-            return backend.finalize()
+        if backend.capture_rotation(p, label, phase=1):
+            n_ok += 1
+        elif len(poses1) > 1:
+            print(f"[phase] ⚠ {label} 실패 — 건너뛰고 계속 "
+                  f"(남은 결손은 Phase 2 가 메운다)")
+    if n_ok == 0:
+        print("[phase] ✘ Phase 1 에서 한 패스도 못 얻음 — 종료")
+        return backend.finalize()
+    if n_ok < len(poses1):
+        print(f"[phase] Phase 1 부분 성공 {n_ok}/{len(poses1)} 밴드 — Phase 2 로 진행")
 
     # ── Phase 2 — 로봇 최소이동 NBV hole-fill ───────────────────────────
     if backend.phase_mode >= 2:

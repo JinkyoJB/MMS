@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, TYPE_CHECKING
@@ -1375,6 +1376,16 @@ class ArtecMultiPassScanSession:
         print(f"\n  ✓ Pass {st.n_pass} (pose {st.pose_idx}) 완료 "
               f"— frames={st.last_n_frames}")
         next_pose = st.pose_idx + 1
+        # 세장형 물체 권고 — sim 과 같은 정책(utils/nbv/flip_policy). 실제 뒤집기는
+        # 사람이 하므로 **안내만** 한다: 설정된 pose 목록에 90°(눕히기)가 없다면
+        # 끝면이 남는다는 것을 사용자에게 알려 준다.
+        dims = getattr(self, "_obj_dims", None)
+        if dims is not None:
+            from utils.nbv.flip_policy import flip_angles_for, describe_flip
+            angles, aspect = flip_angles_for(dims[0], dims[1])
+            if len(angles) > 1:
+                print(f"  ★ 세장형 물체(종횡비 {aspect:.1f}) — 권장 순서: "
+                      + " → ".join(describe_flip(a) for a in angles))
         if next_pose < len(s.pose_physical_rotations):
             print(f"  → 다음 pose ({next_pose}) 자세로 아이템 회전 후 [Enter]")
             self._print_pose_hint_for_user(next_pose)
@@ -2129,6 +2140,31 @@ class ArtecMultiPassScanSession:
             parallel_thresh_deg=s.nbv_coverage_parallel_deg, **self._gap_kw())
         print(f"  [nbv] boundary={cov.boundary_len_m*1000:.1f}mm "
               f"cov={cov.angular_cov:.3f} gaps={cov.n_gaps}")
+        # ── gap 단위 회계 (sim 과 같은 구조) ─────────────────────────────
+        # 직전 frontier 패치가 새 관측을 얻었는지 master 메시 정점의 신규 점유
+        # 복셀로 판정해 planner 에 보고한다. 비생산 겨냥점 주변은 후보에서 빠져
+        # 도달 불가 영역을 반복 겨냥하지 않는다(루프 종료가 아니라 후보 제외 —
+        # 판정이 틀려도 그 영역 하나를 잃을 뿐이다).
+        # ⚠ sim 은 누적 **원시 점군**으로 재지만 real 은 iteration 사이에 남는
+        #   원시 점군이 없어 master 메시 정점으로 잰다. Artec fusion 이 정점을
+        #   얼마나 흔드는지는 실기로 확인 전 — env 로 끌 수 있게 둔다.
+        if os.environ.get("MMS_REAL_DRY_GAP", "1") == "1":
+            try:
+                v = np.asarray(mesh.vertices, float)
+                # flip 정책 안내용 치수 (키, 지름) — next_flip 프롬프트가 쓴다
+                ext = v.max(0) - v.min(0)
+                self._obj_dims = (float(ext[2]), float(max(ext[0], ext[1])))
+                k = np.floor(v / 0.004).astype(np.int64)
+                cur = set(map(tuple, np.unique(k, axis=0)))
+                seen = getattr(self, "_conv_vox", None)
+                if seen and getattr(self, "_nbv", None) is not None:
+                    new_frac = len(cur - seen) / len(seen)
+                    print(f"  [nbv] 신규복셀={new_frac*100:.2f}%")
+                    self._nbv.report_patch(
+                        new_frac >= float(os.environ.get("MMS_REAL_DRY_EPS", "0.015")))
+                self._conv_vox = cur
+            except Exception as e:               # noqa: BLE001
+                print(f"  [nbv] ⚠ 신규복셀 회계 실패({e}) — 건너뜀")
         if _p2.is_converged(cov, s.nbv_boundary_stop_mm / 1000.0, s.nbv_coverage_tau):
             print("  [nbv] 커버리지 수렴 — 완료.")
             return True

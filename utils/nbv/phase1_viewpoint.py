@@ -332,6 +332,12 @@ def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None
         return best
 
     pose, ev = search(tzs)
+    # 밴드 분할 여부를 가르는 값 — 높이가 아니라 **단일 자세의 z-커버율**이다.
+    # standoff 가 물체 반경에 비례해 정해지므로 가는 물체일수록 카메라가 가까워
+    # FOV 가 높이를 못 덮는다(실측: r=97mm/h=293mm 는 단일, r=34mm/h=207mm 는 3밴드).
+    print(f"[phase1] z_cover={ev.z_cover_frac:.2f} (기준 {ZCOVER_MIN:.2f}) "
+          f"standoff={pose.standoff*1000:.0f}mm h={(z_hi-z_lo)*1000:.0f}mm "
+          f"minfill={ev.min_fill_cm2:.0f}cm²")
     if ev.z_cover_frac >= ZCOVER_MIN:
         return Phase1Plan(poses=[pose], evals=[ev], banded=False,
                           tracking_risk=ev.min_fill_cm2 < fill_min,

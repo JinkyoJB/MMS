@@ -97,6 +97,16 @@ class NbvPlanner:
         self.tag = f"{tag} " if tag else ""
         self.visited = []                     # 이미 전회전 스캔한 (el, az)
         self.visited_frontier = []            # 이미 겨냥한 내부 gap 대표점
+        # ── 비생산 gap 회계 ──────────────────────────────────────────────
+        # 패치가 새 관측을 못 얻으면(신규복셀↓) 그 겨냥점 주변은 **도달 불가이거나
+        # 이미 촘촘한** 영역이다. dry 로 표시해 그 근방(dry_sep_m)의 후보를 건너뛴다.
+        # 왜 gap 단위인가 — NBV 는 패치마다 다른 gap 을 겨냥하므로 "직전 패치가
+        # 조용했다 = 끝났다" 는 전역 판정은 틀린다(실측 2026-08-19 hand_drill:
+        # 4패치째 신규복셀 1.2% 로 조용 → 6패치째 +3.3%p 이득). 조용함은 그 gap
+        # 의 속성이지 스캔 전체의 속성이 아니다.
+        self.dry_frontier = []                # 겨냥했지만 신규 관측이 없던 지점
+        self.dry_sep_m = 0.04                 # dry 점 주변 후보 제외 반경
+        self._last_target = None              # 직전 채택 겨냥점 (report_patch 용)
         # gap 과 무관하게 **최소 한 번** 시도할 고도각. 오목 물체 내부는 미관측이라
         # gap 으로 잡히지 않아 el_need 가 올라갈 근거가 없다(닭·달걀) → 사전지식으로 보완.
         self.ensure_els = tuple(float(e) for e in (ensure_els or ()))
@@ -125,11 +135,14 @@ class NbvPlanner:
             return None
         self.log(f"{self.tag}gap 겨냥 — 후보 {len(cands)}개 "
                  f"(최대 L={float(cands[0].L)*1000:.0f}mm)")
-        tried = {"near": 0, "ik": 0, "swept": 0}
+        tried = {"near": 0, "dry": 0, "ik": 0, "swept": 0}
         for c in cands:
             p0 = np.asarray(c.p_O, float)
             if any(np.linalg.norm(p0 - v) < min_sep_m for v in self.visited_frontier):
                 tried["near"] += 1
+                continue
+            if any(np.linalg.norm(p0 - v) < self.dry_sep_m for v in self.dry_frontier):
+                tried["dry"] += 1
                 continue
             n0 = np.asarray(c.n_O, float); n0 = n0 / (np.linalg.norm(n0) + 1e-12)
             # 턴테이블 각 후보: gap 방위를 로봇 편한 방위로 보내는 θ
@@ -161,14 +174,34 @@ class NbvPlanner:
                         tried["swept"] += 1
                         continue
                     self.visited_frontier.append(p0)
+                    self._last_target = p0.copy()
                     self.log(f"{self.tag}gap 겨냥 채택 — L={float(c.L)*1000:.0f}mm "
                              f"θ={math.degrees(th) % 360:.0f}° 기울임={tilt:.0f}° "
                              f"roll={'-' if roll is None else f'{roll:.0f}°'} "
                              f"(누적 {len(self.visited_frontier)}곳)")
                     return q, c, roll, float(th)
         self.log(f"{self.tag}gap 겨냥 실패 — 근접중복 {tried['near']}, "
-                 f"IK {tried['ik']}, 충돌 {tried['swept']}")
+                 f"dry {tried['dry']}, IK {tried['ik']}, 충돌 {tried['swept']}")
         return None
+
+    def report_patch(self, productive: bool) -> None:
+        """직전 frontier 패치의 결과 회계. 백엔드가 패치 후 신규 관측량으로 부른다.
+
+        productive=False 면 겨냥점을 dry 목록에 넣어 근방 후보를 건너뛴다 —
+        도달 불가하거나 이미 촘촘한 영역을 반복 겨냥하지 않게. **루프 종료가
+        아니라 후보 제외**라서, 판단이 틀려도 그 영역 하나를 잃을 뿐 스캔이
+        일찍 끝나지 않는다(전역 조기종료보다 실패 비용이 훨씬 싸다).
+
+        frontier 가 아닌 패스(ensure el / 축-고도각) 뒤에는 no-op — _last_target
+        은 plan_frontier 채택 때만 설정된다. sim 은 누적점군 신규복셀로, real 은
+        _merge_into_master 의 n_added 비율로 productive 를 판정하면 된다.
+        """
+        p0, self._last_target = self._last_target, None
+        if p0 is None or productive:
+            return
+        self.dry_frontier.append(np.asarray(p0, float))
+        self.log(f"{self.tag}겨냥점 dry 처리 — 신규 관측 없음 "
+                 f"(누적 {len(self.dry_frontier)}곳, 반경 {self.dry_sep_m*1000:.0f}mm 제외)")
 
     def plan(self, gaps, q_cur, solve_pose_fn, swept_free_fn, *,
              roll_order_fn=None):
