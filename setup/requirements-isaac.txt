@@ -1,0 +1,37 @@
+# env_isaacsim — Isaac Sim(sim) 백엔드용
+#
+#   conda create -n env_isaacsim python=3.11
+#   conda activate env_isaacsim
+#   pip install -r setup/requirements-isaac.txt
+#
+# ⚠ isaacsim 은 **pip wheel 로 설치**한다(아래). 별도로 받은 배포판(~/isaacsim)이
+#   있어도 이 env 의 python 으로 실행하는 것이 기준이다.
+#   실행:  env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python main_artec.py
+#
+# ⚠ numpy 는 **1.x 로 고정**한다. isaacsim 5.1 wheel 이 numpy<2 로 빌드돼 있어
+#   numpy 2.x 를 넣으면 import 시 ABI 오류가 난다. (mms-env 는 numpy 2.x 사용 — 별개 env)
+
+# ── Isaac Sim 본체 (NVIDIA 인덱스 필요) ────────────────────────────────
+#   pip install isaacsim[all]==5.1.0.0 --extra-index-url https://pypi.nvidia.com
+isaacsim[all]==5.1.0.0
+
+# ── 코어 ───────────────────────────────────────────────────────────────
+numpy==1.26.0           # ★ <2 고정 (위 주석)
+scipy>=1.15
+open3d==0.19.0          # Poisson·ICP·점군. 0.19 는 numpy 1.x/2.x 양쪽 호환
+PyYAML>=6.0
+Pillow>=11.0
+trimesh>=4.5            # GT 메시 샘플링(eval_vs_gt.py)
+
+# ── 비전 ───────────────────────────────────────────────────────────────
+# headless: GUI 는 Isaac 이 담당하므로 opencv 의 Qt 백엔드가 충돌하지 않도록 headless 사용.
+# ⚠ <5 고정 이유는 mms-env requirements.txt 참고 (cv2.calibrateHandEye 부재)
+opencv-python-headless>=4.9,<5
+
+# ── 평가·시각화 ────────────────────────────────────────────────────────
+matplotlib>=3.10
+scikit-learn>=1.9       # KD-tree 기반 법선 추정(입사각 필터 가속)
+tqdm>=4.67
+
+# ── Isaac 이 끌어오는 것 (명시 불필요, 참고용) ─────────────────────────
+# torch==2.7.0+cu128, torchvision, warp-lang  ← isaacsim 의존성으로 자동 설치

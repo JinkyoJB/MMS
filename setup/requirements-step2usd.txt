@@ -1,0 +1,17 @@
+# step2usd — STEP(CAD) → USD 변환 전용
+#
+#   conda create -n step2usd python=3.11
+#   conda activate step2usd
+#   conda install -c conda-forge pythonocc-core=7.9   # ★ pip 불가, conda 전용
+#   pip install -r setup/requirements-step2usd.txt
+#
+# 이 env 는 Isaac Sim 이 필요 없어 가볍고 빠르다.
+# 용도: scripts/sim/step2usd.py, scripts/sim/build_scene_v3.py
+#
+# ⚠ pythonocc-core 는 pip 에 없다. 반드시 conda-forge 로 설치할 것.
+#   (OpenCASCADE 바인딩 — STEP 파일 파싱에 필요)
+
+usd-core==26.8          # USD 생성·편집 (pxr). Isaac 없이 USD 만 다룰 때
+numpy>=2.0
+Pillow>=12.0
+matplotlib>=3.11
