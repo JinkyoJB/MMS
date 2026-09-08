@@ -261,7 +261,10 @@ class ArtecMultiPassScanSessionSettings:
     nbv_min_seg_vertices: int = 8           # frontier 세그먼트 최소 정점
     nbv_min_seg_length_mm: float = 6.0      # frontier 최소 길이
     nbv_max_seg_length_mm: float = 60.0     # frontier 재분할 한계
-    nbv_poisson_depth: int = 8              # master pcd→mesh Poisson depth
+    # 루프용 메시는 **저비용**으로 — 여기서 필요한 건 '어디가 비었나' 판단이지
+    # 최종 품질이 아니다(최종 메시는 ArtecMMS.artec_process 가 SDK 로 별도 생성).
+    # Poisson 비용은 depth 에 급격히 증가 → sim(isaac_scan_session, depth 6)과 통일.
+    nbv_poisson_depth: int = 6              # master pcd→mesh Poisson depth (루프 전용)
     nbv_density_quantile: float = 0.04      # 저밀도 vertex trim 분위수
     nbv_master_voxel_mm: float = 2.0        # master→pcd voxel
     nbv_K_max: int = 12                     # NBV 최대 반복
