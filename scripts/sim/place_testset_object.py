@@ -34,9 +34,12 @@ import math
 import argparse
 
 # ── 경로 상수 ───────────────────────────────────────────────────────────────
-V2_USD         = "/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable/v2.usd"
+V2_USD         = asset("frame_xarm7_spider_turntable/v2.usd")
 # testset USD 위치 (Isaac standalone 트리). --testset 로 오버라이드 가능.
-TESTSET_DIR    = "/home/keti/isaacsim/standalone_examples/play/MMS/testset"
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from mms_paths import asset, testset_dir
+
+TESTSET_DIR    = testset_dir()
 COMPOSED_DIR   = os.path.join(TESTSET_DIR, "composed")
 
 TURNTABLE_MESH = "/World/ScanTarget/turntable_demo/turntable/turntable"

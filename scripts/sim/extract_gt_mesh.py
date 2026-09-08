@@ -15,8 +15,10 @@ import argparse, glob, os, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-ASSET = ("/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/"
-         "frame_xarm7_spider_turntable_v2")
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from mms_paths import asset, testset_dir
+
+ASSET = asset("frame_xarm7_spider_turntable_v2")
 PRIM = "/World/ScanTarget/TestObject"
 
 

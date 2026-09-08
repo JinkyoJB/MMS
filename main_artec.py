@@ -13,6 +13,9 @@ from utils.viz import show_composite_mesh   # open3d 는 함수 안에서 lazy i
 # phase_mode 해석은 sim·real·main 공용 (기본값 불일치 방지)
 from utils.nbv.scan_phase_controller import resolve_phase_mode, phase_desc
 
+# excure command:
+# env -u PYTHONPATH $MMS_PYTHON main_artec.py   # 기본: ~/miniconda3/envs/env_isaacsim/bin/python
+
 # 모든 output 파일에 같은 타임스탬프(_YYYYMMDD_HHMMSS) 붙여 run 별 구분.
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
 from mms_artec.system import ArtecMMS, ArtecMMSConfig, ArtecProcessSettings
@@ -28,14 +31,6 @@ BACKEND = "isaac"
 # isaac GUI 표시 여부. 환경변수 MMS_ISAAC_HEADLESS=1 로 헤드리스 강제(서버/CI).
 ISAAC_HEADLESS = os.environ.get("MMS_ISAAC_HEADLESS", "0") == "1"
 
-# ── 턴테이블 축 (T_B_F0) ──────────────────────────────────────────────
-# 결정(2026-06, docs/main_flow.md): **구(sphere) fixture 방식 폐기 → rim 클릭 방식**.
-#   open3d/스캐너 이미지에서 턴테이블 가장자리(rim) 점 ≥3개 클릭 → 3D 원 피팅 → 중심·축.
-# 캘리브는 **별도 스크립트**에서 수행하고 main_artec 은 결과 yaml 만 로드한다:
-#   real : python scripts/artec/turntable_frame_init.py → config/calibration/turntable_frame.yaml
-#   sim  : standalone_examples/play/MMS/MMS_ext_calibration2.py (rim 자동추출 → fit → GT 검증)
-# (옛 sphere 진입점 run_turntable_calibration/CALIB_SPHERE_*/MMS_RUN_CALIB 제거됨.
-#  코드 백업은 utils/calibration/turntable_axis.py·backends/isaac/calib_fixture.py 에 잔존=미사용.)
 
 try:
     from mms_artec.nbv.artec_streaming_scan_session import ArtecStreamingScanSessionSettings

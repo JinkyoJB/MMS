@@ -14,7 +14,10 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import PolyCollection
 from pxr import Usd, UsdGeom
 
-TESTSET = "/home/keti/isaacsim/standalone_examples/play/MMS/testset"
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from mms_paths import asset, testset_dir
+
+TESTSET = testset_dir()
 OUT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "8_paper",
                    "2_논문작성", "figures", "gt")
 MAX_TRI = 600000          # 렌더 속도용 상한

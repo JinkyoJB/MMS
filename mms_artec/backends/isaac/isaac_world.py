@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 from typing import Optional
 
 import numpy as np
@@ -19,8 +20,14 @@ import numpy as np
 # ── 씬/프림 경로 (v3_scene.usd — 260811 신규 레이아웃 기준) ───────────────────
 # v3_scene.usd 는 scripts/sim/build_scene_v3.py 가 생성한다(형상 src = v3.usd).
 # 구 v2.usd 경로는 git 이력 참고. 씬은 MMS_SIM_USD 로 override 가능.
-DEFAULT_USD_PATH = ("/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/"
-                    "frame_xarm7_spider_turntable_v2/v3_scene.usd")
+# 자산 루트는 mms_paths 가 리포 위치에 맞춰 해석한다 (MMS_ASSET_ROOT 로 override).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from mms_paths import asset  # noqa: E402
+
+DEFAULT_USD_PATH = asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
 ROBOT_PRIM       = "/World/xarm7"
 JOINTS_SCOPE     = "/World/xarm7/joints"
 EE_LINK_NAME     = "link7"

@@ -96,8 +96,10 @@ TT_GROUP_Z = (0.50, 0.70)
 COLLIDER_SKIP = ("keyboard", "Cordless_Mouse")
 
 # 스캔 대상 기본값 — testset 은 m·Z-up·defaultPrim=root 라 v3_scene 규약과 같다.
-TESTSET_DEFAULT = ("/home/keti/isaacsim/standalone_examples/play/MMS/testset/"
-                   "0146_mug.usd")
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from mms_paths import asset, testset_dir
+
+TESTSET_DEFAULT = os.path.join(testset_dir(), "0146_mug.usd")
 
 
 def set_matrix(prim, M: Gf.Matrix4d) -> None:
@@ -578,7 +580,8 @@ def add_environment(stage, ground: bool, lights: bool) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", required=True, help="v3.usd 가 있는 디렉토리")
+    ap.add_argument("--dir", default=asset("frame_xarm7_spider_turntable_v2"),
+                    help="v3.usd 가 있는 디렉토리 (기본: 자산 루트의 frame_xarm7_spider_turntable_v2)")
     ap.add_argument("--src", default="v3.usd")
     ap.add_argument("--out", default="v3_scene.usd")
     ap.add_argument("--v2", default=None,

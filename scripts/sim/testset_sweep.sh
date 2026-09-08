@@ -10,14 +10,15 @@
 # ⚠ Isaac 은 인스턴스를 **동시에 띄우면 물리엔진이 깨진다**. 반드시 순차 실행.
 set -u
 cd "$(dirname "$0")/../.."
+source scripts/sim/_paths.sh
 OUT=${OUT:-scripts/sim/log/testset_sweep}; mkdir -p "$OUT"
 FRAMES=${MMS_SIM_FRAMES_PER_REV:-120}
 TIMEOUT=${TIMEOUT:-1500}
-PY=/home/keti/miniconda3/envs/env_isaacsim/bin/python
+PY=$(mms_python)
 # ★ v3 기준 씬을 쓴다. composed/*.usd 는 **구 v2 레이아웃**이라 턴테이블/카메라
 #   prim 을 못 찾고 스캔 없이 30초만에 끝난다(실측 2026-08-19).
 #   씬 생성: build_scene_v3.py --out v3_ts_<name>.usd --object <testset>.usd
-ASSET=/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable_v2
+ASSET=$(mms_asset_root)/frame_xarm7_spider_turntable_v2 || exit 1
 
 if [ $# -gt 0 ]; then LIST=(); for n in "$@"; do LIST+=("$ASSET/v3_ts_${n}.usd"); done
 else LIST=("$ASSET"/v3_ts_*.usd); fi

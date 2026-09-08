@@ -13,8 +13,10 @@ import argparse
 import os
 import sys
 
-SCENE = ("/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/"
-         "frame_xarm7_spider_turntable_v2/v3_scene.usd")
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from mms_paths import asset, testset_dir
+
+SCENE = asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
 LINK7 = "/World/xarm7/link7"
 TOOL = "/World/xarm7/link7/tool"
 

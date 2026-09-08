@@ -14,7 +14,10 @@ real 도 동일 높이로 개조 예정 — sim 선행 검증 (2026-07-08, ΔH �
 import os
 import argparse
 
-V2 = "/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable/v2.usd"
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from mms_paths import asset, testset_dir
+
+V2 = asset("frame_xarm7_spider_turntable/v2.usd")
 ROBOT = "/World/xarm7"
 
 

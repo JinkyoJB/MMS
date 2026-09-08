@@ -12,13 +12,15 @@
 # 원본 v2.usd/composed 는 절대 수정하지 않음 — real 개조 전 sim 선행 검증용.
 OBJ=${1:-marble}; PM=${2:-1}; MODE=${3:-planner}; DH=${4:-0}
 cd "$(dirname "$0")/../.."
+source scripts/sim/_paths.sh
+ASSET_ROOT=$(mms_asset_root) || exit 1
 
 # 씬 선택
 if [[ "$OBJ" == marble* || "$OBJ" == solid* ]]; then
-  scene=/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable/v2.usd
+  scene=$ASSET_ROOT/frame_xarm7_spider_turntable/v2.usd
   objprim=""
 else
-  scene=$(ls /home/keti/isaacsim/standalone_examples/play/MMS/testset/composed/*${OBJ}*_on_turntable.usd 2>/dev/null | head -1)
+  scene=$(ls "$(mms_testset_dir)"/composed/*${OBJ}*_on_turntable.usd 2>/dev/null | head -1)
   if [ -z "$scene" ]; then echo "✘ testset 에서 '$OBJ' 못 찾음"; exit 1; fi
   objprim=/World/ScanTarget/TestObject
 fi
@@ -41,4 +43,4 @@ ENVV=(MMS_SIM_PHASE_MODE=$PM MMS_SIM_P1_MODE=$MODE
 [ -n "$objprim" ] && ENVV+=(MMS_SIM_OBJECT_PRIM=$objprim)
 
 echo "[run] scene=$(basename $scene)  phase_mode=$PM  mode=$MODE  ΔH=+${DH}cm"
-env "${ENVV[@]}" /home/keti/miniconda3/envs/env_isaacsim/bin/python -u main_artec.py
+env "${ENVV[@]}" "$(mms_python)" -u main_artec.py

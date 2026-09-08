@@ -16,9 +16,11 @@ import glob
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "log", "testset_points")
-V2_USD = "/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable/v2.usd"
-COMPOSED_GLOB = ("/home/keti/isaacsim/standalone_examples/play/MMS/"
-                 "testset/composed/*_on_turntable.usd")
+V2_USD = asset("frame_xarm7_spider_turntable/v2.usd")
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from mms_paths import asset, testset_dir
+
+COMPOSED_GLOB = os.path.join(testset_dir(), "composed", "*_on_turntable.usd")
 
 ROBOT_PRIM = "/World/xarm7"
 EE_PRIM = "/World/xarm7/link7"

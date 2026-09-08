@@ -1,8 +1,34 @@
 # sim 커맨드 모음 (v3_scene)
 
-모든 명령은 리포 루트에서 실행:
+모든 명령은 **리포 루트**에서 실행:
 ```bash
-cd /home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/7_MMS_framework
+cd <MMS 리포>          # 예: .../A1_.../1_코드/MMS
+```
+
+## 자산(USD) 경로 — 자동 해석
+
+절대경로를 소스에 박지 않는다. `mms_paths.py`(python) / `scripts/sim/_paths.sh`(셸)이
+아래 순서로 **자산 루트(`2_3Dassets`)** 를 찾는다.
+
+| 순위 | 위치 |
+|---|---|
+| 1 | 환경변수 `MMS_ASSET_ROOT` |
+| 2 | `<repo>/../../2_데이터/2_3Dassets` (인수인계 폴더 배치) |
+| 3 | `<repo>/../2_3Dassets` (원본 개발 배치) |
+| 4 | `<repo>/2_3Dassets` |
+| 5 | 구 개발머신 절대경로 (하위호환) |
+
+확인:
+```bash
+python3 mms_paths.py                                    # 해석 결과 출력
+source scripts/sim/_paths.sh && mms_asset_root          # 셸 쪽
+```
+
+자산을 다른 곳에 두었다면:
+```bash
+export MMS_ASSET_ROOT=/경로/2_3Dassets
+export MMS_TESTSET_DIR=/경로/testset      # testset USD 트리 (기본 ~/isaacsim/standalone_examples/play/MMS/testset)
+export MMS_PYTHON=/경로/python            # Isaac 파이썬 (기본 ~/miniconda3/envs/env_isaacsim/bin/python)
 ```
 
 ## ⚠ 공통 규칙 2가지
@@ -22,7 +48,7 @@ cd /home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/7_MMS_framework
 ```bash
 ISAAC=~/miniconda3/envs/env_isaacsim/bin/python
 U2=~/miniconda3/envs/step2usd/bin/python
-ASSET=/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm7_spider_turntable_v2
+ASSET=$(source scripts/sim/_paths.sh && mms_asset_root)/frame_xarm7_spider_turntable_v2
 ```
 
 ---
@@ -33,7 +59,7 @@ ASSET=/home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_xarm
 CAD 가 바뀐 경우에만. ~47초.
 ```bash
 env -u PYTHONPATH $U2 scripts/sim/step2usd.py \
-    --step /home/keti/workspace/sync/2_Rapid_Digital_Twin/1_MMS/2_3Dassets/frame_v2/260811_frame.STEP \
+    --step "$(source scripts/sim/_paths.sh && mms_asset_root)/frame_v2/260811_frame.STEP" \
     --out $ASSET --name v3
 ```
 옵션: `--deflection 0.5`(mm) `--keep-fasteners` `--source-up y|z`
