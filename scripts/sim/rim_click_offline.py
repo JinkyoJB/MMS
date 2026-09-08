@@ -29,7 +29,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from utils.calibration.turntable_frame import fit_circle_3d, build_T_B_F0
-from utils.calibration.turntable_axis import axis_error
+from utils.calibration.turntable_frame import axis_error
 
 DEFAULT_NPZ = Path(__file__).resolve().parent / "log" / "rim_capture.npz"
 

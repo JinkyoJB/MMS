@@ -122,7 +122,8 @@ main()                                                  # main_artec.py:317
   - real: `python scripts/artec/turntable_frame_init.py` → rim 클릭 → yaml.
   - sim 검증: `standalone_examples/play/MMS/MMS_ext_calibration2.py`(rim 자동추출→fit→GT).
   - main_artec 은 **yaml 만 로드**(인라인 sphere 캘리브 제거됨). 코어=`turntable_frame.py`.
-- ⚠ 폐기 잔존(미사용): `turntable_axis.py`·`calib_fixture.py`·`system.py::calibrate_turntable_axis`(sphere).
+- ✅ 폐기 코드 제거 완료(2026-09): `turntable_axis.py`·`calib_3sphere_sim.py`·`calib_fixture.py`·
+  `system.py::calibrate_turntable_axis`(sphere). `axis_error` 만 `turntable_frame.py` 로 이관.
 
 ### 4.2 Phase 1 — 5면 streaming SLAM  (docs/2_phase1.md)
 턴테이블 360° 회전 + **로봇 고정** → 윗면+옆면4. real 은 Artec SLAM, sim 은 GT 누적.

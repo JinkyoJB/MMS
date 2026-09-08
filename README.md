@@ -282,7 +282,6 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 - `utils/calibration/rim_picker.py` — OpenCV 클릭 UI + Open3D 뷰 (센서무관)
 - `scripts/artec/turntable_frame_init.py` / `scripts/phoxi/turntable_frame_init.py` — 실물 rim 클릭 진입점
 - `standalone_examples/play/MMS/MMS_ext_calibration2.py` — sim 검증(rim 자동추출 → fit → GT 비교)
-- ~~`turntable_axis.py`, `calib_3sphere_sim.py`, `calib_fixture.py`~~ — 3구 폐기로 미사용(잔존)
 
 ### 남은 일
 - ✅ Isaac rim-클릭 어댑터 완료(`capture_organized`). real Artec 는 동일 계약(intensity,
@@ -672,13 +671,13 @@ Phase 1/2 모두 같은 **Spider ↔ Turntable 양방향 피드백** 위에서 �
 
 ```
 mms_artec/
-  system.py                      ArtecMMS (orchestrator + calibrate_turntable_axis)
+  system.py                      ArtecMMS (orchestrator + disc_surface_frame)
   backends/                      real/isaac 백엔드 팩토리
-    isaac/{isaac_world,isaac_xarm,isaac_turntable,isaac_scanner,calib_fixture}.py
+    isaac/{isaac_world,isaac_xarm,isaac_turntable,isaac_scanner}.py
   sensor/artec_client.py         real 스캐너 (+ capture_points_base)
   nbv/artec_*_scan_session.py    Artec 스캔 세션(streaming/multipass)
 utils/
-  calibration/{turntable_frame,turntable_axis,rim_picker,hand_eye_calibrator}.py
+  calibration/{turntable_frame,rim_picker,hand_eye_calibrator}.py
   collision/{geometry,robot_collision}.py          ★ 자세별 충돌 쿼리(real/sim 공용)
   control/{theta_planner,hardware_layer}.py
   nbv/{frontier,icp_strategy,manual_picker}.py     ★ sensor-agnostic NBV 코어

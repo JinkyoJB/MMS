@@ -5,7 +5,7 @@ rim(또는 구중심) 점들로 3D 원을 피팅 → 중심(원점)·법선(축)
 PhoXi·Artec 등 어느 센서든 base 프레임 3D 점만 주면 동일하게 쓴다.
 
 cv2/open3d 비의존 (numpy + (저장 시) scipy/yaml). UI 피커는 rim_picker.py 참고.
-회전축 자동추정(3구 회전)은 turntable_axis.py 참고.
+회전축은 rim 원 피팅으로 구한다(fit_circle_3d). 구 fixture 3구 방식은 폐기.
 """
 
 from __future__ import annotations
@@ -150,3 +150,24 @@ def save_turntable_frame_yaml(path, T_B_F0: np.ndarray, n_points: int,
     path.write_text(yaml.dump(data, default_flow_style=None, allow_unicode=True),
                     encoding="utf-8")
     print(f"[turntable_frame] 저장 완료: {path}")
+
+
+def axis_error(axis_point_est, axis_dir_est,
+               axis_point_gt, axis_dir_gt) -> Tuple[float, float]:
+    """추정 축 vs 기준 축 오차 (sim 검증용).
+
+    Returns
+    -------
+    (dir_err_deg, pos_err_m) :
+        dir_err_deg : 방향 각오차(도)
+        pos_err_m   : 기준축 통과점에서 추정축 라인까지의 수직거리(m)
+    """
+    def _norm(v):
+        v = np.asarray(v, float)
+        return v / np.linalg.norm(v)
+
+    d_e, d_g = _norm(axis_dir_est), _norm(axis_dir_gt)
+    dir_err = np.degrees(np.arccos(np.clip(abs(d_e @ d_g), -1.0, 1.0)))
+    p = np.asarray(axis_point_gt, float) - np.asarray(axis_point_est, float)
+    perp = p - (p @ d_e) * d_e
+    return float(dir_err), float(np.linalg.norm(perp))

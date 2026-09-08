@@ -32,7 +32,7 @@ from mms_artec.system import ArtecMMS, ArtecMMSConfig
 from mms_artec.sensor.artec_config import ArtecConfig
 from utils import PROJECT_ROOT
 from utils.calibration.turntable_frame import fit_circle_3d, build_T_B_F0
-from utils.calibration.turntable_axis import axis_error
+from utils.calibration.turntable_frame import axis_error
 
 from PIL import Image
 

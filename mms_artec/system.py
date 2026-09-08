@@ -195,65 +195,9 @@ class ArtecMMS:
         """
         return build_hardware(self.cfg)
 
-    # ── turntable 축 calibration (T_B_F0) — sim/real 공통 ───────────────
-
-    def calibrate_turntable_axis(
-        self, robot, turntable, *, sphere_radius, sphere_z_bands,
-        thetas_deg=None, turntable_vel_rad_s=np.pi / 6.0,
-        z_band=0.02, z_floor=None, return_clouds=False,
-    ) -> dict:
-        """
-        구 fixture 기반 턴테이블 회전축(=T_B_F0 축) calibration. **base 프레임** 축 반환.
-
-        sim/real 동일 경로:
-          θ 마다 → turntable 회전 → sensor.capture_points_base(robot, T_EC) [base 프레임]
-                 → z밴드로 구 분리 → known-R 구중심 피팅 → 축 추정.
-        ★ Artec first-frame 추적(SLAM) 미사용 — 카메라 위치는 EE FK + T_EC 로만.
-
-        선행조건: fixture(구)가 턴테이블에 부착돼 있고, 로봇이 fixture 를 보는 자세.
-
-        Parameters
-        ----------
-        sphere_radius : 구 반경 (m)
-        sphere_z_bands : 구들의 대략적 base-프레임 z 높이 리스트 (세그먼트용)
-        thetas_deg : 캡처 각도들 (기본 0..330 step 30)
-        z_band : z밴드 반폭 (m)
-        z_floor : 이 z 아래 점 제거 (디스크/바닥). 기본 min(z_bands)-0.05
-
-        Returns
-        -------
-        {"axis_point","axis_dir","n_obs","tracks"}  — axis_point/dir 은 base 프레임
-        """
-        from utils.calibration.turntable_axis import fit_sphere_center, estimate_axis
-        if self._T_EC is None:
-            raise RuntimeError("T_EC 미설정 — sensor_frames_yaml/T_EC_key 필요.")
-        if thetas_deg is None:
-            thetas_deg = list(range(0, 360, 30))
-        if z_floor is None:
-            z_floor = min(sphere_z_bands) - 0.05
-
-        tracks = [[] for _ in sphere_z_bands]
-        clouds = []                           # (deg, sphere_i, band_points) — return_clouds 시
-        for deg in thetas_deg:
-            turntable.move_abs(float(np.radians(deg)), float(turntable_vel_rad_s))
-            turntable.wait_motion_done()
-            pts = self.sensor.capture_points_base(robot, self._T_EC)
-            if len(pts) == 0:
-                continue
-            up = pts[pts[:, 2] > z_floor]
-            for i, zt in enumerate(sphere_z_bands):
-                band = up[np.abs(up[:, 2] - zt) < z_band]
-                if len(band) > 30:
-                    tracks[i].append(fit_sphere_center(band, sphere_radius))
-                    if return_clouds:
-                        clouds.append((int(deg), i, band))
-
-        axis_point, axis_dir = estimate_axis(tracks)
-        out = {"axis_point": axis_point, "axis_dir": axis_dir,
-               "n_obs": [len(t) for t in tracks], "tracks": tracks}
-        if return_clouds:
-            out["clouds"] = clouds
-        return out
+    # ── turntable 표면 프레임 (T_B_F0) ────────────────────────────────
+    # 축 추정은 rim 원 피팅으로 통일했다(utils/calibration/turntable_frame.py).
+    # 구 fixture 3구 방식은 실물 제작 비용 문제로 폐기 — 2026-09 코드 제거.
 
     def disc_surface_frame(self, disc_points_base, axis_point, axis_dir):
         """
@@ -269,7 +213,8 @@ class ArtecMMS:
         ----------
         disc_points_base : (N,3) disc 표면 점들 (로봇 base 프레임, m). 구/기둥 점은
                            미리 크롭(z<구높이)해서 표면만 줄 것.
-        axis_point, axis_dir : calibrate_turntable_axis 결과(base 프레임).
+        axis_point, axis_dir : rim 원 피팅 결과(base 프레임).
+                           utils/calibration/turntable_frame.py::fit_circle_3d
 
         Returns
         -------
