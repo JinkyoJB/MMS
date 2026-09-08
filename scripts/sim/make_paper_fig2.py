@@ -89,7 +89,7 @@ def main():
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 8,
                          "axes.labelsize": 8, "xtick.labelsize": 7.5,
                          "ytick.labelsize": 7.5, "legend.fontsize": 7})
-    fig, ax = plt.subplots(2, 1, figsize=(3.35, 3.6), dpi=300, sharex=True)
+    fig, ax = plt.subplots(2, 1, figsize=(3.35, 2.85), dpi=300, sharex=True)
     mk = {30.0: "o", 40.0: "s", 50.0: "^"}
     for el in ELS:
         ax[0].plot(PSI, area[el] / area[el].mean(), marker=mk[el], ms=2.6, lw=0.9,
@@ -99,7 +99,7 @@ def main():
                    color="0.25" if el == 30 else ("0.5" if el == 40 else "0.72"))
     ax[0].axhline(1.0, color="k", lw=0.5, ls=":")
     ax[0].set_ylabel("Normalized observed area")
-    ax[0].set_ylim(0.8, 1.2)
+    ax[0].set_ylim(0.82, 1.18)
     ax[0].legend(frameon=False, ncol=3, loc="upper center")
     ax[0].set_title("(a) observation condition", fontsize=8, pad=3)
     ax[1].axhline(vp.DEFAULT_MIN_SIGMA, color="k", ls="--", lw=1.0)

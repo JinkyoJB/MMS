@@ -6,20 +6,11 @@ import base64, glob, io, json, os, re
 from PIL import Image
 
 BASE_R, BASE_L = "scripts/sim/log/testset_sweep/render", "scripts/sim/log/testset_sweep"
-GATE_R, GATE_L = "scripts/sim/log/testset_gate/render", "scripts/sim/log/testset_gate"
-FIXED = {"0002_hand_drill", "0101_spray_can"}      # 두 수정의 효과를 본 물체
 VIEWS = ["정면", "측면", "윗면", "아랫면"]
 idx = {r["name"]: r for r in json.load(open(f"{BASE_R}/index.json"))}
-gidx = {r["name"]: r for r in json.load(open(f"{GATE_R}/index.json"))}
-
-V3_R = "scripts/sim/log/conv_val/spray_v3_render"
-V3_LOG = "/tmp/claude-1000/-home-keti-workspace-sync-2-Rapid-Digital-Twin-1-MMS-7-MMS/eaeda4e7-b4ad-470f-b6bd-e2d9a9a61435/scratchpad/spray_v3.log"          # 세장형 flip 통합실행 로그
-v3idx = {r["name"]: r for r in json.load(open(f"{V3_R}/index.json"))}
 
 def src(name):
-    if name == "0101_spray_can":
-        return (V3_R, None)
-    return (GATE_R, GATE_L) if name in FIXED else (BASE_R, BASE_L)
+    return (BASE_R, BASE_L)
 
 def jpg(p, w=430):
     im = Image.open(p).convert("RGB")
@@ -30,8 +21,8 @@ def jpg(p, w=430):
 rows = []
 for name in sorted(idx):
     R, LOGS = src(name)
-    r0src = v3idx if R == V3_R else (gidx if name in FIXED else idx)
-    t = open(V3_LOG if LOGS is None else f"{LOGS}/{name}.log", errors="ignore").read()
+    r0src = idx
+    t = open(f"{LOGS}/{name}.log", errors="ignore").read()
     m = re.search(r"r=(\d+)mm h=(\d+)mm", t)
     bands = re.search(r"P1 플랜: (\d+) bands", t)
     b = re.findall(r"boundary=(\d+)mm cov=[\d.]+ gaps=(\d+)", t)
@@ -46,10 +37,8 @@ for name in sorted(idx):
         p2=(int(b[-1][0]), int(b[-1][1])) if b else None,
         pts=int(pts.group(1)) if pts else 0,
         faces=r0["faces"], bbox=r0["bbox_mm"], failed=failed,
-        fixed=(name in FIXED),
+        fixed=False,
         flip="적용" if "flip 국소정합 적용" in t else ("hint 폴백" if "hint 그대로" in t else "—"),
-        before=(lambda tt: (int(x[0]) if (x:=re.findall(r"boundary=(\d+)mm", tt)) else None))(
-            open(f"{BASE_L}/{name}.log", errors="ignore").read()) if name in FIXED else None,
         imgs={v: jpg(f"{R}/{name}__{v}.png") for v in VIEWS
               if os.path.exists(f"{R}/{name}__{v}.png")}))
 
@@ -84,8 +73,7 @@ trs = ""
 for r in rows:
     p1 = (f'{r["p1"][0]}<span class="u">mm</span> <span class="g">/ {r["p1"][1]}</span>'
           if r["p1"] else "—")
-    tag = ('<span class="chip fix">수정 적용</span>' if r["fixed"] else '')
-    prev = (f'<span class="was">수정 전 중단</span>' if r["fixed"] else '')
+    tag = prev = ''
     trs += (f'<tr class="{"bad" if r["failed"] else ("fix" if r["fixed"] else "")}">'
             f'<th scope="row"><span class="nm">{r["label"]} {tag}</span>'
             f'<span class="dim">{r["h"]}×{r["r"]*2}mm'
@@ -99,15 +87,7 @@ for r in rows:
     ims = "".join(f'<figure><img src="{r["imgs"][v]}" alt="{r["label"]} {v}" loading="lazy">'
                   f'<figcaption>{v}</figcaption></figure>' for v in VIEWS if v in r["imgs"])
     if r["failed"]:
-        note = '<p class="note fail">밴드 3/3 도달 실패 → Phase 2·3 미실행. 윗부분이 비어 있다.</p>'
-    elif r["name"] == "0101_spray_can":
-        note = ('<p class="note fix">수정 전에는 밴드 3/3 자가충돌로 스캔이 중단되던 물체다. '
-                '충돌 게이트 수정으로 완주하게 된 뒤, 세장형(종횡비 3.0)으로 자동 감지되어 '
-                '90°(눕히기)+180° 두 번 뒤집었고 flip 마다 관측자세를 새로 계획했다. '
-                'GT 대조: completeness 87.2→91.6%, Chamfer 0.80→0.38mm, 높이 208.5mm(실제 207.5).</p>')
-    elif r["fixed"]:
-        note = ('<p class="note fix">수정 전에는 밴드 3/3 이 자가충돌로 거부돼 스캔 자체가 중단됐다. '
-                'az 대안을 시도하게 고친 뒤 세 밴드 모두 스캔됐고, 잘려 있던 윗부분이 복원됐다.</p>')
+        note = '<p class="note fail">밴드 도달 실패 — 해당 대역이 비어 있다.</p>'
     else:
         note = ""
     st = ('<span class="chip fail">중단</span>' if r["failed"]

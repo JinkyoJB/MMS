@@ -42,6 +42,7 @@ from utils.collision import collision_model as _colmodel
 from utils.control.joint_path_planner import plan_joint_path as _plan_path
 from utils.robot import view_pose as _vp
 from mms_artec.backends.isaac import isaac_debug_viz as _viz
+from mms_artec.backends.isaac.isaac_recorder import Recorder as _Recorder
 from mms_artec.utils.calibration import handeye_error as _he
 from utils.robot import xarm7_kinematics as kin
 from utils.control.theta_planner import DEFAULT_JOINT_WEIGHTS
@@ -73,6 +74,9 @@ WORK_FOCUS      = 0.25
 # **스텝 수가 곧 이동 시간**이다. 30→15 로 속도 2배(2026-08-19 요청).
 # 충돌 검사는 스텝 수와 무관하다(보수적 전진이 별도로 경로를 보증).
 DRIVE_STEPS     = int(_envf("MMS_SIM_DRIVE_STEPS", 15))
+# 녹화 시에는 이동 보간을 촘촘히 해 로봇이 연속으로 움직이는 것처럼 보이게 한다.
+# (스캔 결과에는 영향 없음 — 경유 자세만 잘게 나눌 뿐 시작·끝 자세는 동일)
+DRIVE_STEPS_REC = int(_envf("MMS_SIM_DRIVE_STEPS_REC", 60))
 # ★ 프레임 밀도를 **실물과 맞춘다**. 실물 streaming 은 30초/회전 × 스캐너 max_fps(≈8)
 #   ≈ 240프레임/회전이다. sim 은 36프레임이라 **20배 성겼고**, 그 결과
 #     · Poisson 표면이 조각나 gap 이 폭증하고(실측 20 → 418)
@@ -210,8 +214,12 @@ ENSURE_SPAN_DEG    = _envf("MMS_SIM_ENSURE_SPAN", 360.0)
 DRIFT_TRANS_M   = _envf("MMS_SIM_DRIFT_T", 0.030)
 DRIFT_ROT_DEG   = _envf("MMS_SIM_DRIFT_R", 15.0)
 FLIP_ASPECT     = _envf("MMS_SIM_FLIP_ASPECT", 2.0)      # 키/지름 이 값 이상=세장형
+FLIP_EL_MIN     = _envf("MMS_SIM_FLIP_EL_MIN", 30.0)     # flip 관측 고도각 하한
+FLIP_EL_MAX     = _envf("MMS_SIM_FLIP_EL_MAX", 70.0)     # 상한(고앙각은 자가충돌)
 CONV_NEW_EPS    = _envf("MMS_SIM_CONV_NEW_EPS", 0.005)   # 전역 백스톱 임계 (보수적:
 #   GT 검증에서 0.5%/3회는 손실 최대 0.27%p. 주 종료는 gap 단위 dry 회계가 맡는다)
+ICP_INFLATION_M = _envf("MMS_SIM_ICP_INFLATION", 0.005)  # 정합이 물체를 부풀리는 한계
+#   (실측 9종: 정상 −0.1~3.8mm / 회귀 8.5·10.0mm — 5mm 가 그 사이를 가른다)
 DRY_EPS         = _envf("MMS_SIM_DRY_EPS", 0.015)        # 패치 생산성 판정 (실측:
 #   비생산 패치 0.2~1.2%, 생산 패치 1.7~10.3% — 1.5% 가 그 사이를 가른다)
 CONV_VOX_M      = _envf("MMS_SIM_CONV_VOX", 0.004)       # 커버리지 판정 복셀 크기
@@ -396,6 +404,13 @@ class IsaacScanSession:
         # (180° 인데 126mm 창을 써서 원판 점이 섞였다).
         self._obj0 = dict(center=self.obj_center_w.copy(), radius=self.obj_radius,
                           zlo=self.obj_zlo_w, zhi=self.obj_zhi_w)
+        # 자료용 3인칭 녹화 (MMS_SIM_REC=1 일 때만). 턴테이블 회전 스텝에 훅을 건다.
+        self._rec = _Recorder(self.stage)
+        try:
+            from mms_artec.backends.isaac import isaac_turntable as _tt
+            _tt.set_recorder(self._rec if self._rec.ok else None)
+        except Exception:                                # noqa: BLE001
+            pass
         off = float(np.linalg.norm(self.obj_center_w[:2] - self.axis_w[:2]))   # 축 이탈(수평)
         print(f"[isaac_scan] 객체='{prim}' r={self.obj_radius*1000:.0f}mm h={self.obj_height*1000:.0f}mm "
               f"center_w={np.round(self.obj_center_w,3).tolist()} z=[{mn[2]:.3f},{mx[2]:.3f}]")
@@ -596,7 +611,8 @@ class IsaacScanSession:
                 self._pump()
                 res = icp_with_gates(src, tgt, T, max_correspondence_distance=corr,
                                      rmse_thresh=corr / 2.0, fitness_thresh=0.20,
-                                     drift_trans_m=drift, drift_rot_deg=drot)
+                                     drift_trans_m=drift, drift_rot_deg=drot,
+                                     max_inflation_m=ICP_INFLATION_M)
                 if ICP_SCALE_DEBUG:
                     print(f"[isaac_scan]   (icp/{tag}) corr={corr*1000:.0f}mm "
                           f"ok={res.ok} fitness={res.fitness:.3f} "
@@ -732,7 +748,8 @@ class IsaacScanSession:
             for corr in ICP_SCALES_M:       # coarse→fine
                 res = icp_with_gates(src, tgt, T, max_correspondence_distance=corr,
                                      rmse_thresh=corr / 2.0, fitness_thresh=0.20,
-                                     drift_trans_m=0.030, drift_rot_deg=10.0)
+                                     drift_trans_m=0.030, drift_rot_deg=10.0,
+                                     max_inflation_m=ICP_INFLATION_M)
                 T = res.T_refined
             if res is not None and res.ok:
                 pts = pts @ T[:3, :3].T + T[:3, 3]
@@ -782,7 +799,7 @@ class IsaacScanSession:
             [c.p_O for c in gaps], [c.L for c in gaps], eye, target_w,
             convention=_vp.CAM_USD, rolls_deg=VIEW_ROLLS_DEG)
 
-    def _drive(self, q, steps=DRIVE_STEPS) -> bool:
+    def _drive(self, q, steps=None) -> bool:
         """현재→q 이동. **막히면 우회 경로**를 계획해 따라간다. 반환=이동했는가.
 
         ★ 예전에는 무조건 직선 보간으로 갔다 — Phase 1·3 은 충돌 검사조차 없었고,
@@ -790,6 +807,9 @@ class IsaacScanSession:
           (실측: 안전 자세 12개 중 직선이 막힌 쌍이 6개, 전부 우회 성공).
           계획도 실패하면 **움직이지 않고 False** 를 돌려 상위가 그 패스를 건너뛰게 한다.
         """
+        if steps is None:
+            steps = (DRIVE_STEPS_REC if getattr(self, "_rec", None) is not None
+                     and self._rec.ok else DRIVE_STEPS)
         q1 = np.asarray(q, float)
         q0 = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
         way = [q0, q1]
@@ -815,7 +835,11 @@ class IsaacScanSession:
                 qk = a + (k / n) * (b - a)
                 self.robot.arm.set_servo_angle(angle=qk.tolist(), is_radian=True, wait=True)
                 self.world.step(1, render=True)
+                if getattr(self, "_rec", None) is not None:
+                    self._rec.tick()             # 이동 중에도 프레임 적립
         self.world.step(4, render=True)             # 도착 후 정착
+        if getattr(self, "_rec", None) is not None:
+            self._rec.tick()
         return True
 
     def _scan_pass(self, q, n_theta, label="", phase=1):
@@ -830,6 +854,8 @@ class IsaacScanSession:
                 return False
         if label:
             print(f"[isaac_scan] === scan pass: {label} (전회전 {n_theta}프레임) ===")
+        if getattr(self, "_rec", None) is not None:
+            self._rec.begin(label)
         before = sum(len(a) for a in self.accum)
         thetas = np.linspace(0.0, 2*np.pi, n_theta, endpoint=False)
         pass_pts = []                       # 이 패스만 따로 모은다(정합 단위)
@@ -893,6 +919,8 @@ class IsaacScanSession:
         if label:
             print(f"[isaac_scan] === patch: {label} "
                   f"(θ={math.degrees(theta_c):.0f}° ±{math.degrees(span)/2:.0f}°, {n}프레임) ===")
+        if getattr(self, "_rec", None) is not None:
+            self._rec.begin(label)
         import time as _t
         for i, th in enumerate(np.linspace(theta_c - span/2, theta_c + span/2, n)):
             _tm = _t.time()
@@ -1340,6 +1368,88 @@ class IsaacScanSession:
         """sim 도 Phase 3 지원 — 물체를 USD 에서 회전시킨다(real=사람 손회전)."""
         return bool(self._flip_angles()) and self.stage.GetPrimAtPath(self._obj_prim).IsValid()
 
+    @staticmethod
+    def _flip_view_els(ang_deg: float):
+        """flip 각에 대한 관측 고도각 **후보 사다리** — 예측·실행이 같이 쓴다.
+
+        원래 바닥면 법선 −ẑ 를 flip 회전으로 돌린 방향을 정면으로 보는 el 에서
+        시작해 10° 씩 내려간다. 필요 최소치(90 − 입사각예산)까지 내려가고 마지막에
+        VIEW_EL_DEG 를 폴백으로 둔다.
+
+        ★ 예측(_can_view_flipped_bottom)과 실행(next_flip)이 **다른 목록**을 쓰면
+          "도달 가능하다고 판정해 놓고 실제로는 폴백" 이 된다(실측 2026-08-20:
+          예측 [70,60,50,40] 은 60° 성공, 실행은 ±15° 가 전부 70° 로 클램프돼
+          [70,30] 만 시도 → 30° 추락 → 바닥 grazing). 한 함수로 묶어 방지한다.
+        """
+        from utils.nbv.flip_policy import el_needed_for_face
+        R = _axis_rot(FLIP_AXIS, math.radians(float(ang_deg)))
+        n = R @ np.array([0.0, 0.0, -1.0])
+        el_face = math.degrees(math.asin(float(np.clip(n[2], -1.0, 1.0))))
+        el_min = (el_needed_for_face(MAX_INCIDENCE_DEG) if el_face > 45.0
+                  else FLIP_EL_MIN)
+        el_min = float(np.clip(el_min, FLIP_EL_MIN, FLIP_EL_MAX))
+        start = float(np.clip(el_face, FLIP_EL_MIN, FLIP_EL_MAX))
+        out, e = [], start
+        while e >= el_min - 1e-6:
+            out.append(round(e, 1))
+            e -= 10.0
+        if all(abs(VIEW_EL_DEG - x) > 1e-6 for x in out):
+            out.append(float(VIEW_EL_DEG))              # 마지막 폴백
+        return out, el_face, el_min
+
+    def _predict_flip_geom(self, ang_deg: float):
+        """flip 후 물체의 (중심, 반경, z범위) 예측 — next_flip 의 배치 수식과 동일.
+
+        원본 AABB 를 회전시키고 원판 위에 앉힌다. 물체가 테이블에 놓인다는 물리
+        제약에서 나오므로 실물에서도 스캔 bbox 로 같은 계산이 가능하다.
+        """
+        o0 = getattr(self, "_obj0", None)
+        if o0 is None:
+            return None
+        R = _axis_rot(FLIP_AXIS, math.radians(float(ang_deg)))
+        c = o0["center"]
+        lo = np.array([c[0] - o0["radius"], c[1] - o0["radius"], o0["zlo"]])
+        hi = np.array([c[0] + o0["radius"], c[1] + o0["radius"], o0["zhi"]])
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0])
+                            for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        rc = (corners - c) @ R.T + c
+        rc = rc + np.array([0.0, 0.0, float(self.axis_w[2]) - float(rc[:, 2].min())])
+        radius = float(max(rc[:, 0].max() - rc[:, 0].min(),
+                           rc[:, 1].max() - rc[:, 1].min()) / 2.0)
+        zlo, zhi = float(rc[:, 2].min()), float(rc[:, 2].max())
+        return np.array([c[0], c[1], (zlo + zhi) / 2.0]), radius, (zlo, zhi)
+
+    def _can_view_flipped_bottom(self) -> bool:
+        """180° flip 후 **바닥면을 입사각 예산 안에서** 볼 자세에 도달하는가.
+
+        이것이 90° flip 추가 여부의 진짜 기준이다(종횡비는 대리 지표일 뿐).
+        바닥 법선은 +ẑ 이므로 el ≥ 90 − MAX_INCIDENCE 가 필요하고, 물체가 높으면
+        그 고앙각이 자가충돌·도달불가로 걸러져 낮은 el 로 폴백 → grazing 소실.
+        """
+        g = self._predict_flip_geom(180.0)
+        if g is None:
+            print("[isaac_scan] flip 판정: 형상 예측 불가(_obj0 없음) — 180° 로 진행")
+            return True
+        center, radius, _z = g
+        els, _elf, el_min = self._flip_view_els(180.0)
+        els = [e for e in els if e >= el_min - 1e-6]     # 폴백(저앙각) 제외하고 판정
+        seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        standoff = WORK_FOCUS + radius
+        tgt = np.array([self.axis_w[0], self.axis_w[1], center[2]])
+        for eld in els:
+            for azd in VIEW_AZIS_DEG:
+                q, _ = self._view_q(tgt, eld, azd, standoff, seed)
+                if q is None:
+                    continue
+                if self._cm is not None and not self._cm.is_pose_safe(q)[0]:
+                    continue
+                print(f"[isaac_scan] flip 판정: 180° 후 바닥 관측 el={eld:.0f}° "
+                      f"az={azd:.0f}° 도달 가능 (필요 el≥{el_min:.0f}°) — 180° 만")
+                return True
+        print(f"[isaac_scan] flip 판정: 180° 후 바닥 관측 el≥{el_min:.0f}° "
+              f"**도달 불가** (물체 상단 z={_z[1]:.3f}m) — 90° 눕히기로 보완")
+        return False
+
     def _flip_angles(self):
         """물체 종횡비로 flip 각을 정한다. env 명시가 항상 우선.
 
@@ -1354,17 +1464,20 @@ class IsaacScanSession:
         if os.environ.get("MMS_SIM_FLIP_ANGLES"):
             self._flip_angles_c = FLIP_ANGLES_DEG          # 명시값 그대로
             return self._flip_angles_c
-        o0 = getattr(self, "_obj0", None)
-        if o0 is None:
-            return FLIP_ANGLES_DEG                          # 아직 미측정 — 캐시 안 함
-        # 정책은 공용 flip_policy (real 은 같은 규칙으로 사람에게 안내한다)
-        from utils.nbv.flip_policy import flip_angles_for
-        angles, aspect = flip_angles_for(o0["zhi"] - o0["zlo"],
-                                         2.0 * o0["radius"], FLIP_ASPECT)
+        # ★ 종횡비는 **스캔한 점군**에서 잰다. USD AABB(정답)를 쓰면 실물이 못 하는
+        #   판단을 sim 만 하게 되어 검증 전제가 깨진다. real 은 master 메시 정점으로
+        #   같은 함수를 부른다(artec_multipass_scan_session.is_converged).
+        from utils.nbv.flip_policy import dims_from_points, flip_angles_for
+        hd = dims_from_points(np.vstack(self.accum),
+                              axis_xy=self.axis_w[:2]) if self.accum else None
+        if hd is None:
+            return FLIP_ANGLES_DEG                          # 아직 스캔 전 — 캐시 안 함
+        angles, aspect = flip_angles_for(hd[0], hd[1], FLIP_ASPECT,
+                                         can_view_bottom=self._can_view_flipped_bottom)
         self._flip_angles_c = angles if len(angles) > 1 else FLIP_ANGLES_DEG
         if len(angles) > 1:
-            print(f"[isaac_scan] 세장형(종횡비 {aspect:.1f}≥{FLIP_ASPECT:g}) — "
-                  f"flip 90° 추가 (90→180 순)")
+            print(f"[isaac_scan] flip 90° 추가 (90→180 순) — 스캔 측정 "
+                  f"h={hd[0]*1000:.0f}mm d={hd[1]*1000:.0f}mm 종횡비 {aspect:.2f}")
         return self._flip_angles_c
 
     def next_flip(self) -> bool:
@@ -1423,21 +1536,33 @@ class IsaacScanSession:
         # spray_can 90°→180°): home 카메라 가용 z 대역이 0.67~0.74m 라, 다시 세운
         # 키 207mm 물체는 옆면이 grazing(입사각 필터 전멸) + 꼭대기는 조준 밖
         # → 553점. 뒤집힌 물체의 새 중심/반경으로 측면 자세를 계획해 이동한다.
+        # ★ 고도각은 **새로 드러난 면의 법선**에서 정한다. 원래 바닥면 법선 −ẑ 를
+        #   flip 회전 R 로 돌린 것이 n_new 이고, 그 방향을 정면으로 보는 el 이
+        #   asin(n_new_z) 다. VIEW_EL_DEG(30°) 를 그대로 쓰면 안 된다 —
+        #   180° flip 후 바닥은 +ẑ 를 향하므로 el 30° 에서 입사각이 60° 가 되어
+        #   MAX_INCIDENCE_DEG(50°) 필터에 **전량 걸린다**. 실측(2026-08-19 mug):
+        #   굽 링(법선 수평)은 남고 오목한 바닥 중앙만 100% 소실 → completeness
+        #   60.8→53.2%. 반대로 90° flip 은 끝면이 수평을 향하므로 낮은 el 이 맞다.
         try:
             seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
             standoff = WORK_FOCUS + self.obj_radius
             tgt = np.array([self.axis_w[0], self.axis_w[1], self.obj_center_w[2]])
+            el_cands, el_face, _elmin = self._flip_view_els(ang)
             moved = False
-            for azd in VIEW_AZIS_DEG:
-                q3, _ = self._view_q(tgt, VIEW_EL_DEG, azd, standoff, seed)
-                if q3 is not None and self._cm is not None:
-                    ok3, _why3 = self._cm.is_pose_safe(q3)
-                    if not ok3:
-                        q3 = None
-                if q3 is not None and self._drive(q3):
-                    print(f"[isaac_scan]   flip 관측자세 이동: az={azd:.0f}° "
-                          f"el={VIEW_EL_DEG:.0f}° standoff={standoff*1000:.0f}mm")
-                    moved = True
+            for eld in el_cands:                            # 도달·충돌로 걸러 첫 성공
+                for azd in VIEW_AZIS_DEG:
+                    q3, _ = self._view_q(tgt, eld, azd, standoff, seed)
+                    if q3 is not None and self._cm is not None:
+                        ok3, _why3 = self._cm.is_pose_safe(q3)
+                        if not ok3:
+                            q3 = None
+                    if q3 is not None and self._drive(q3):
+                        print(f"[isaac_scan]   flip 관측자세 이동: az={azd:.0f}° "
+                              f"el={eld:.0f}° (새 면 법선 el={el_face:+.0f}°) "
+                              f"standoff={standoff*1000:.0f}mm")
+                        moved = True
+                        break
+                if moved:
                     break
             if not moved:
                 print("[isaac_scan]   ⚠ flip 관측자세 못 찾음 — 현재 자세로 캡처")
@@ -1455,6 +1580,8 @@ class IsaacScanSession:
         return True
 
     def finalize(self) -> IsaacScanResult:
+        if getattr(self, "_rec", None) is not None:
+            self._rec.finish()
         self.profile_report()
         pcd, pts = self._merged_pcd()
         mesh = None

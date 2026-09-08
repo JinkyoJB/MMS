@@ -124,14 +124,40 @@ MMS_SIM_USD=<usd>        # 씬 override
 MMS_SIM_OBJECT_PRIM=<prim>
 ```
 
-### testset 순회
+### testset 순회 (v3)
 ```bash
-./scripts/sim/run_e2e_gui.sh mug          # GUI, Phase1
-./scripts/sim/run_e2e_gui.sh mug 2        # Phase1 → 2
-./scripts/sim/e2e_sweep.sh                # 9종 headless 순회
+# 물체별 v3 씬 생성 (1회) — step2usd 환경
+env -u PYTHONPATH $U2 scripts/sim/build_scene_v3.py --dir $ASSET \
+    --out v3_ts_<이름>.usd --object ~/isaacsim/standalone_examples/play/MMS/testset/<이름>.usd
+
+# 9종 전체 Phase 1→2→3 스윕 (물체당 ~5분, summary.tsv 생성)
+scripts/sim/testset_sweep.sh              # 전체
+scripts/sim/testset_sweep.sh 0146_mug     # 특정 물체만
 ```
-> ⚠ 이 스크립트들은 아직 **v2 경로 기준**이다(testset composed 씬). v3 로는 `main_artec.py`
-> 직접 실행을 쓸 것.
+> 구 `e2e_sweep.sh`/`composed/*.usd` 는 **v2 레이아웃**이라 턴테이블 prim 을 못 찾고
+> 30초 만에 빈 결과로 끝난다(실측 2026-08-19). v3_ts_* 씬을 쓸 것.
+
+### GT 평가·렌더 (스윕 후)
+```bash
+env -u PYTHONPATH $U2 scripts/sim/extract_gt_mesh.py --all       # 씬→정답 표면 (1회)
+python scripts/sim/eval_vs_gt.py --scan <obj> --gt scripts/sim/log/gt/<이름>.npz
+python scripts/sim/render_scan_results.py --logs scripts/sim/log/testset_sweep
+python scripts/sim/build_results_page.py   # docs/testset_results.md 의 웹판 HTML
+```
+
+### 진단·튜닝 env (isaac_scan_session)
+| env | 기본 | 용도 |
+|---|---|---|
+| `MMS_SIM_PROFILE_EVERY` | 20 | N프레임마다 단계별 소요시간 (0=끔) |
+| `MMS_SIM_ICP_DEBUG` | 0 | ICP 스케일별 fitness/drift 출력 |
+| `MMS_SIM_STAGE_DUMP` | — | Phase2 반복마다 메시+누적점군 덤프 dir |
+| `MMS_SIM_CONV_NEW_EPS` / `_N` | 0.005 / 3 | 전역 수렴 백스톱 (신규복셀 비율/연속횟수) |
+| `MMS_SIM_DRY_EPS` | 0.015 | gap 패치 생산성 판정 (dry 회계) |
+| `MMS_SIM_FLIP_ASPECT` | 2.0 | 세장형(90° flip 추가) 종횡비 임계 |
+| `MMS_SIM_FLIP_EL_MIN` / `_MAX` | 30 / 70 | flip 관측 고도각 하한·상한(°) |
+| `MMS_SIM_FLIP_ANGLES` | 자동 | flip 각 명시 (설정 시 정책 무시) |
+| `MMS_SIM_ICP_INFLATION` | 0.005 | 정합이 물체를 부풀리는 한계 m (평행이동 오류 차단) |
+| `MMS_REAL_INFLATION_GATE` | 1 | real 팽창 게이트 (0=끔, 실기 검증 전) |
 
 ---
 
@@ -151,5 +177,6 @@ MMS_SIM_OBJECT_PRIM=<prim>
 ## 관련 문서
 
 - `docs/v3_sim_migration.md` — v2→v3 이관 현황, 남은 blocker
+- `docs/testset_results.md` — 9종 스윕 결과(GT 지표·결함 7건·렌더)
 - `$ASSET/v3_scene_IK.md` — 드래그 IK 타깃 방법론(다른 로봇 재사용용)
 - `docs/main_flow.md` — 전체 파이프라인

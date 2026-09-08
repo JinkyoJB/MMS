@@ -20,7 +20,17 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "8_paper",
 MAX_TRI = 600000          # 렌더 속도용 상한
 # 물체별 Z축 방위 보정(deg) — USD 로컬 자세가 턴테이블 위 자세와 달라서
 # 스캔 결과 렌더와 같은 면이 보이도록 맞춘다.
-AZ = {"alarm_clock": 90.0}
+# 축 문자 + 각도(deg) 목록을 순서대로 적용한다.
+ROT = {"alarm_clock": [("z", 90.0)], "protein_drink": [("y", -90.0)]}
+
+
+def _rot(axis, deg):
+    t = np.radians(deg); c, s = np.cos(t), np.sin(t)
+    if axis == "x":
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+    if axis == "y":
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
 
 def load_mesh(path):
@@ -46,13 +56,11 @@ def load_mesh(path):
     return np.vstack(V), np.asarray(F, dtype=np.int64)
 
 
-def render(V, F, view, ax, az_deg=0.0):
+def render(V, F, view, ax, rots=()):
     C = V.mean(0)
     P = V - C
-    if az_deg:
-        t = np.radians(az_deg)
-        R = np.array([[np.cos(t), -np.sin(t), 0], [np.sin(t), np.cos(t), 0], [0, 0, 1]])
-        P = (R @ P.T).T
+    for axis, deg in rots:
+        P = (_rot(axis, deg) @ P.T).T
     if view == "front":                      # +Y 에서 -Y 방향으로 본다, Z 위
         u, v, w = P[:, 0], P[:, 2], -P[:, 1]
     else:                                    # bottom: 아래에서 위로
@@ -75,7 +83,9 @@ def render(V, F, view, ax, az_deg=0.0):
                         edgecolors="none", antialiaseds=False)
     ax.add_collection(pc)
     r = max(float(np.ptp(u)), float(np.ptp(v))) * 0.62
-    ax.set_xlim(u.mean() - r, u.mean() + r); ax.set_ylim(v.mean() - r, v.mean() + r)
+    cu = (float(u.min()) + float(u.max())) / 2.0   # 정점 평균은 조밀한 부위로
+    cv = (float(v.min()) + float(v.max())) / 2.0   # 쏠린다 — 경계상자 중심 사용
+    ax.set_xlim(cu - r, cu + r); ax.set_ylim(cv - r, cv + r)
     ax.set_aspect("equal"); ax.axis("off")
     ax.set_facecolor("#EAEAEA")
 
@@ -92,7 +102,7 @@ def main():
         for view in ("front", "bottom"):
             fig, ax = plt.subplots(figsize=(2.2, 2.2), dpi=200)
             fig.patch.set_facecolor("#EAEAEA")
-            render(V, F, view, ax, AZ.get(short, 0.0))
+            render(V, F, view, ax, ROT.get(short, ()))
             fig.subplots_adjust(0, 0, 1, 1)
             out = os.path.join(os.path.abspath(OUT), f"{short}_{view}.png")
             fig.savefig(out, facecolor="#EAEAEA", pad_inches=0)

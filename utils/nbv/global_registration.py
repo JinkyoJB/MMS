@@ -123,7 +123,7 @@ def _rot_angle_deg(A, B):
 
 def register_consensus(src_pts, ref_pts, *, voxel=FEATURE_VOXEL_M,
                        agree_rot_deg=5.0, agree_trans_m=0.005,
-                       bbox_tol_m=0.012, log=None):
+                       bbox_tol_m=0.012, inflation_tol_m=0.005, log=None):
     """(T, info) — **fitness 를 믿지 않는** 전역 정합.
 
     왜 fitness 가 게이트가 못 되나 (실측)
@@ -179,6 +179,16 @@ def register_consensus(src_pts, ref_pts, *, voxel=FEATURE_VOXEL_M,
     info["bbox_diff_mm"] = (d_bbox * 1000.0).round(1).tolist()
     if float(d_bbox.max()) > bbox_tol_m:
         info["reason"] = f"형상 불일치 bbox Δ={d_bbox.max()*1000:.1f}mm"
+        return None, info
+    # ★ 3. **위치** 일치 — 위 검사는 bbox '크기'만 본다. 대칭축 방향 평행이동은
+    #    크기를 바꾸지 않아 통과해 버린다(실측: protein_drink 가 긴 축으로 10mm
+    #    밀린 채 합의·형상 게이트를 모두 통과 → F@1mm 75.5→56.5% 회귀).
+    from utils.nbv.icp_strategy import union_inflation_m
+    infl = union_inflation_m(moved, Rf)
+    info["inflation_mm"] = round(infl * 1000.0, 1)
+    if infl > inflation_tol_m:
+        info["reason"] = (f"정합 후 물체가 {infl*1000:.1f}mm 커짐 "
+                          f"(한계 {inflation_tol_m*1000:.0f}mm — 평행이동 오류)")
         return None, info
     info["method"] = "fgr" if fa >= fb else "fpfh_ransac"
     info["fitness"] = max(fa, fb)

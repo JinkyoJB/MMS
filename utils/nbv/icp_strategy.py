@@ -107,6 +107,28 @@ def _pick_roll_match_up(
 # ICP triple gate (§6.3)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def union_inflation_m(src_moved: np.ndarray, ref: np.ndarray) -> float:
+    """정합 후 **합집합 bbox 가 기준보다 얼마나 커지는가** (축별 최대, m).
+
+    같은 물체의 다른 관측이므로 올바로 정합되면 0 에 가깝다. 새로 붙는 면(바닥
+    등)은 이미 master 가 본 실루엣 **안쪽**을 채우므로 bbox 를 넓히지 않는다.
+
+    왜 필요한가 — bbox **크기**만 비교하면 대칭축 방향 평행이동을 못 잡는다
+    (크기는 그대로다). 실측(2026-08-19 9종 스윕):
+
+        정상 7종      팽창 −0.1 ~ 3.8mm   F@1mm 67~99%
+        protein_drink 팽창 10.0mm         F@1mm 56.5%  (긴 축으로 10mm 밀림)
+        laundry       팽창  8.5mm         F@1mm 45.1%
+
+    두 회귀 모두 기존 게이트(방법 간 합의·bbox 크기·drift)를 통과했다.
+    """
+    src_moved = np.asarray(src_moved, float)
+    ref = np.asarray(ref, float)
+    lo = np.minimum(src_moved.min(0), ref.min(0))
+    hi = np.maximum(src_moved.max(0), ref.max(0))
+    return float(((hi - lo) - (ref.max(0) - ref.min(0))).max())
+
+
 @dataclass
 class IcpResult:
     ok: bool
@@ -128,6 +150,7 @@ def icp_with_gates(
     fitness_thresh: float = 0.3,
     drift_trans_m: float = 0.020,
     drift_rot_deg: float = 10.0,
+    max_inflation_m: Optional[float] = None,
 ) -> IcpResult:
     """
     Point-to-plane ICP + triple gate (RMSE / fitness / drift).
@@ -174,5 +197,14 @@ def icp_with_gates(
                          f"drift t={dt*1000:.1f}mm / r={dr_deg:.1f}° "
                          f"(limit {drift_trans_m*1000:.0f}mm / {drift_rot_deg:.1f}°)",
                          T_ref, rmse, fitness, dt, dr_deg)
+    if max_inflation_m is not None:
+        S = np.asarray(source_pcd.points, float)
+        infl = union_inflation_m(S @ T_ref[:3, :3].T + T_ref[:3, 3],
+                                 np.asarray(target_pcd.points, float))
+        if infl > max_inflation_m:
+            return IcpResult(False,
+                             f"정합 후 물체가 {infl*1000:.1f}mm 커짐 "
+                             f"(한계 {max_inflation_m*1000:.0f}mm — 평행이동 오류)",
+                             T_ref, rmse, fitness, dt, dr_deg)
 
     return IcpResult(True, "ok", T_ref, rmse, fitness, dt, dr_deg)

@@ -2151,9 +2151,10 @@ class ArtecMultiPassScanSession:
         if os.environ.get("MMS_REAL_DRY_GAP", "1") == "1":
             try:
                 v = np.asarray(mesh.vertices, float)
-                # flip 정책 안내용 치수 (키, 지름) — next_flip 프롬프트가 쓴다
-                ext = v.max(0) - v.min(0)
-                self._obj_dims = (float(ext[2]), float(max(ext[0], ext[1])))
+                # flip 정책 안내용 치수 — sim 과 **같은 공용 함수**로 잰다.
+                # AABB 폭을 쓰면 손잡이 때문에 지름이 부풀어 종횡비가 낮게 나온다.
+                from utils.nbv.flip_policy import dims_from_points
+                self._obj_dims = dims_from_points(v)
                 k = np.floor(v / 0.004).astype(np.int64)
                 cur = set(map(tuple, np.unique(k, axis=0)))
                 seen = getattr(self, "_conv_vox", None)
@@ -2267,6 +2268,26 @@ class ArtecMultiPassScanSession:
         if fitness <= 0.0 or not np.all(np.isfinite(T_measured_B_mm)):
             print(f"  [icp_refine] fitness=0 — init 그대로")
             return T_pre_init, fitness, rmse_mm
+
+        # ★ 팽창 게이트 — 정합이 물체를 부풀리면 기각하고 init(hint) 로 되돌린다.
+        #   기존에는 refine 결과를 **무조건** 적용했다(fitness·rmse 는 로그만).
+        #   sim 실측(2026-08-19 9종): 대칭축 방향 평행이동 오류는 fitness 가 높고
+        #   bbox '크기'·drift 검사도 통과하지만 합집합 bbox 를 8.5~10mm 부풀렸고,
+        #   GT F-score 가 각각 52.0→45.1%, 75.5→56.5% 로 무너졌다. 게이트 적용 후
+        #   58.9% / 68.9% 로 회복. B 프레임 mm 단위에서 잰다.
+        if os.environ.get("MMS_REAL_INFLATION_GATE", "1") == "1":
+            try:
+                from utils.nbv.icp_strategy import union_inflation_m
+                lim_mm = float(os.environ.get("MMS_REAL_INFLATION_MM", "5"))
+                S_pts = np.asarray(new_pcd.points, float)
+                moved = S_pts @ T_measured_B_mm[:3, :3].T + T_measured_B_mm[:3, 3]
+                infl_mm = union_inflation_m(moved, np.asarray(master_pcd.points, float))
+                if infl_mm > lim_mm:
+                    print(f"  [icp_refine] ⚠ 정합이 물체를 {infl_mm:.1f}mm 부풀림 "
+                          f"(한계 {lim_mm:.0f}mm — 평행이동 오류) → hint 그대로")
+                    return T_pre_init, fitness, rmse_mm
+            except Exception as e:                       # noqa: BLE001
+                print(f"  [icp_refine] ⚠ 팽창 검사 실패({e}) — 건너뜀")
 
         # B → W: T_pre_W = T_BC · T_pre_B · T_CB (init 식의 역)
         T_measured_B_m = T_measured_B_mm.copy()

@@ -353,3 +353,65 @@ for i in range(N):              # N=8067
   `phase1_viewpoint.estimate_outward_normals` 는 open3d C++ KD-tree 라 문제없다.
 - 최적화 전 **동치 검증**을 먼저 쓴다. 필터/판정 함수는 최종 불리언 마스크까지 비교.
 - 병목 추적이 끝나도 `_tick` 은 남겨 둔다. `MMS_SIM_PROFILE_EVERY=0` 으로 끈다.
+
+---
+
+## 11. 수렴 지표 — boundary 를 반대로 읽고 있었다 (2026-08-19)
+
+### 11.1 발견
+
+Phase 2 가 hand_drill 경계를 519→800mm 로 "악화"시키는 듯했다. 단계별 메시를
+덤프해 눈으로 보니 반대였다 — 분리돼 떠 있던 파편 3개가 배터리부로 **연결·완성**
+되고 있었다. 씬의 정답(GT) 표면과 대조하니 확정:
+
+| | boundary | completeness@1mm |
+|---|---|---|
+| hand_drill | 519 → 800 ("악화") | **37.9 → 52.7%** (개선) |
+| mug | 533 → 586 ("악화") | **33.1 → 37.7%** (개선) |
+
+**boundary 는 커버리지가 넓어질 때도 오른다** — 새로 붙은 표면의 테두리가 그대로
+경계로 잡힌다. completeness 와 상관은 r=+0.96 으로 높지만 **부호 해석이 반대**였다.
+"머그에서 Phase 2 가 악화시킨다"는 이전 결론은 전부 이 오독이었다.
+
+### 11.2 두 층 구조
+
+**GT 검증층** (sim 전용, 런타임 불개입): `scripts/sim/extract_gt_mesh.py` 로 씬에서
+정답 표면을 뽑고 `eval_vs_gt.py` 로 표준 지표(completeness/accuracy/F-score/Chamfer)
+계산. **런타임 지표가 맞는지 검증·보정하는 용도** — 이 층이 없어서 boundary 오독을
+지금까지 몰랐다. 결과 총람: `docs/testset_results.md`.
+
+**런타임 판단층** (GT 없음, 실물 동일): 수렴은 **누적 원시 점군의 신규 점유 복셀**
+(정보이득, NBV 문헌 표준)로 판정한다. 메시에서 재면 Poisson 흔들림에 오염된다
+(실측 r=+0.43 vs 원시점군 r=+0.93).
+
+### 11.3 종료 구조 — 전역 정지가 아니라 gap 회계
+
+GT 검증에서 NBV 개선은 **간헐적**임이 드러났다(작은 gap 패치가 조용한 뒤 큰 gap
+패치가 +3.3%p). "연속 N 회 조용하면 종료"류 전역 규칙은 손실 없는 설정이 절약도
+0 이었다 — 전역 규칙으로는 벌 게 없다.
+
+→ **gap 단위 dry 회계** (`nbv_planner.report_patch`): 비생산 패치의 겨냥점 주변
+(40mm)만 후보에서 제외 → 계획기가 후보를 소진하면 **자연 종료**. 판단이 틀려도
+영역 하나를 잃을 뿐 스캔이 일찍 끝나지 않는다. 전역 백스톱(0.5%/3회, 실측 최대손실
+0.27%p)은 병리 상황 대비로만 남겼다. 실효: spray_can 은 P1 이 충분하자 8패치 대신
+2패치 만에 종료.
+
+패치 생산성 임계 `DRY_EPS=1.5%` 는 실측 분포(비생산 0.2~1.2% / 생산 1.7~10.3%)의
+사이값. **물체 2종으로 맞춘 값** — `validate_convergence.py` 로 대상을 넓혀 재검할 것.
+같은 실행 조건의 completeness 실행 간 편차가 ~5%p 있으므로 그보다 작은 차이로
+임계를 다투지 말 것.
+
+기존 `p2.is_converged(cov, 0.012, 0.92)` 는 경계 12mm 미만을 요구하는데 실측값이
+130~900mm 라 **한 번도 발동한 적이 없다**(死조건, real 도 동일).
+
+### 11.4 도구
+
+```bash
+# GT 추출 (9종 일괄) — step2usd 환경
+env -u PYTHONPATH ~/miniconda3/envs/step2usd/bin/python scripts/sim/extract_gt_mesh.py --all
+# 단일/단계별 평가
+python scripts/sim/eval_vs_gt.py --scan <obj> --gt scripts/sim/log/gt/<name>.npz
+python scripts/sim/eval_vs_gt.py --stages <덤프dir> --gt ...
+# 수렴 임계 검증 (MMS_SIM_STAGE_DUMP 실행 산출물 필요)
+python scripts/sim/validate_convergence.py --dirs scripts/sim/log/conv_val/*
+```

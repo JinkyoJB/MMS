@@ -27,7 +27,7 @@ if pgrep -f "python -u main_artec" > /dev/null; then
 fi
 
 SUM="$OUT/summary.tsv"
-printf "물체\t종료\tP1_boundary\tP1_gaps\tP2_boundary\tP2_gaps\tflip\t누적점\t초\n" > "$SUM"
+printf "물체\t종료\t밴드\tP1_bnd\tP1_gap\t패치\t수렴\tP2_bnd\tP2_gap\tflip각\tflip정합\t누적점\t초\n" > "$SUM"
 
 for usd in "${LIST[@]}"; do
   name=$(basename "$usd" .usd); name=${name#v3_ts_}
@@ -46,8 +46,17 @@ for usd in "${LIST[@]}"; do
   flip=$(grep -a "flip 정합 채택\|flip 국소정합 적용" "$OUT/$name.log" | head -1 | sed 's/.*] *//' | cut -c1-28)
   [ -z "$flip" ] && flip=$(grep -aq "hint 그대로" "$OUT/$name.log" && echo "hint폴백" || echo "-")
   pts=$(grep -a "완료 — 누적" "$OUT/$name.log" | tail -1 | sed -E 's/.*누적 ([0-9]+)점.*/\1/')
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-    "$name" "$code" "${p1% *}" "${p1#* }" "${p2% *}" "${p2#* }" "$flip" "${pts:--}" "$dt" >> "$SUM"
+  # 새 신호들 — 밴드 수 / NBV 패치 수 / 종료 사유 / 적용된 flip 각
+  bands=$(grep -a "P1 플랜:" "$OUT/$name.log" | head -1 | sed -E 's/.*플랜: ([0-9]+) bands.*/\1/;t;s/.*플랜: single.*/1/')
+  npatch=$(grep -ac "=== patch: Phase 2 NBV" "$OUT/$name.log")
+  if grep -aq "수렴 — 새로 보이는 곳이 없다" "$OUT/$name.log"; then conv="조기(복셀)"
+  elif grep -aq "gap 겨냥 실패" "$OUT/$name.log"; then conv="후보소진"
+  else conv="상한"; fi
+  fang=$(grep -a "Phase 3: 물체" "$OUT/$name.log" | sed -E 's/.*축 ([0-9]+)°.*/\1/' | paste -sd+ -)
+  [ -z "$fang" ] && fang="-"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$name" "$code" "${bands:-1}" "${p1% *}" "${p1#* }" "$npatch" "$conv" \
+    "${p2% *}" "${p2#* }" "$fang" "$flip" "${pts:--}" "$dt" >> "$SUM"
   [ "${#B[@]}" -eq 0 ] && echo "  !! boundary 지표 없음 — 스캔이 돌지 않았다. 로그 확인: $OUT/$name.log"
   echo "=== $name 종료(code=$code, ${dt}s)  P1=$p1  P2=$p2"
 done

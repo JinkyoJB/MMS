@@ -29,6 +29,17 @@ from mms_artec.backends.isaac.isaac_world import DISC_PRIM, OBJECT_PRIM
 _STEP_DEG = 3.0            # move_abs/연속 회전 1 step 당 각도(보간 → 부드러운 렌더)
 
 
+def _rec_tick():
+    """녹화 훅 — 회전 스텝마다 프레임 적립. 녹화가 꺼져 있으면 아무 것도 안 한다."""
+    r = globals().get("_RECORDER")
+    if r is not None:
+        r.tick()
+
+
+def set_recorder(rec):
+    globals()["_RECORDER"] = rec
+
+
 class IsaacTurntable:
     """Turntable 호환 백엔드 (Isaac Sim, kinematic 회전 방식). θ 단위 rad."""
 
@@ -177,6 +188,7 @@ class IsaacTurntable:
             cur = start + (end - start) * (i / n)
             self._co_rotate(cur)
             self._world.step(render=True)
+            _rec_tick()
         self._theta = end
         self._target = end
         return True
@@ -198,6 +210,7 @@ class IsaacTurntable:
         self._theta += self._vel * dt
         self._co_rotate(self._theta)
         self._world.step(render=True)
+        _rec_tick()
 
     def wait_motion_done(self, *args, **kwargs):
         # move_abs 가 내부에서 step 까지 수행하므로 추가 동작 불필요.

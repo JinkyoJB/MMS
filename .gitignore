@@ -233,3 +233,6 @@ scripts/sim/log/conv_val/
 scripts/sim/log/stage_dump/
 scripts/sim/log/gt/
 scripts/sim/log/testset_points/
+
+# 렌더 녹화 원본 (대용량, 재생성 가능)
+scripts/sim/log/rec/

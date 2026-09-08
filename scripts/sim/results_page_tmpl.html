@@ -120,15 +120,16 @@ footer{color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padd
     <h1>테스트셋 9종 일반성 검증</h1>
     <p class="lede">머그 하나로 튜닝한 스캔 파이프라인이 다른 물체에도 통하는지 확인했다.
       물체마다 Phase 1(측면 전회전) → Phase 2(부족면 NBV) → Phase 3(뒤집어 바닥면)을 끝까지 돌리고,
-      결과 메시를 네 방향에서 렌더했다. 스윕은 코드 결함 넷을 드러냈다 — 둘은 스캔을 중단시키는
-      버그였고, 하나는 품질 지표를 반대로 읽게 하는 해석 오류, 하나는 키 큰 물체의 flip 전략이었다.
-      모두 수정한 뒤 아홉 종이 완주하며, 정답(GT) 대조 표준 지표로 개선을 확인했다.</p>
+      정답(GT) 표면과 대조해 평가했다. 스윕은 코드 결함 일곱을 드러냈다 — 둘은 스캔을 중단시키는
+      버그, 하나는 품질 지표를 반대로 읽게 하는 해석 오류, 하나는 키 큰 물체의 flip 전략,
+      하나는 정합 게이트가 평행이동 오류를 통과시키는 구멍, 둘은 flip 관측 고도각에 얽힌 것이었다.
+      아래 수치는 일곱 수정을 모두 적용한 상태에서 아홉 종을 한 번에 돌린 결과다.</p>
   </header>
 
   <div class="stats">
     <div class="stat"><b>9/9</b><span>끝까지 완주 (수정 후)</span></div>
-    <div class="stat"><b>{{NIMP}}/9</b><span>Phase 2 가 경계를 줄임</span></div>
-    <div class="stat"><b>4</b><span>스윕이 드러낸 결함 (수정 완료)</span></div>
+    <div class="stat"><b>81.7%</b><span>평균 F-score@1mm (GT 대조)</span></div>
+    <div class="stat"><b>7</b><span>스윕이 드러낸 결함 (수정 완료)</span></div>
   </div>
 
   <section>
@@ -160,14 +161,46 @@ footer{color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padd
           <span>mug compl 33.1 → <b>37.7%</b></span><span>불필요 패치 <b>조기 종료</b> 확보</span></div>
       </div>
       <div class="fix-row">
-        <h3>키 큰 물체는 180° 만으론 끝면이 남는다 <code>flip_policy.py 신설</code></h3>
-        <p>세장형(키/지름 ≥ 2)은 윗면이 측면 카메라에 grazing 이고 고앙각 자세는 자가충돌이라, 90°(눕히기)
-          flip 을 자동 추가했다 — 눕히면 양 끝면이 측면을 향해 쉽게 잡히고, 실루엣이 비대칭이라 flip
-          정합(ICP)도 처음으로 성공한다. 아울러 flip 후 home 자세 캡처가 낮은 물체에서만 성립하던 문제를
-          찾아, 뒤집힌 물체의 새 치수로 관측자세를 계획해 이동하게 했다(553점 → 315,850점).
-          같은 규칙이 real 에서는 사람에게 "눕혀 주세요" 안내로 나간다.</p>
-        <div class="ba"><span>spray can compl 87.2 → <b>91.6%</b></span>
-          <span>Chamfer 0.80 → <b>0.38mm</b></span><span>F@2mm 94.1 → <b>97.6%</b></span></div>
+        <h3>정합 게이트가 평행이동 오류를 통과시켰다 <code>icp_strategy.union_inflation_m</code></h3>
+        <p>기존 게이트 세 겹(방법 간 합의·bbox 크기·drift)은 모두 <strong>회전 오류에만 민감</strong>했다.
+          대칭축을 따라 밀린 정합은 bbox <em>크기</em>를 바꾸지 않고, 원리가 다른 두 전역정합 방법도
+          같은 오답에 합의한다. 정합 후 <strong>합집합 bbox 가 얼마나 커지는가</strong>를 재는 검사
+          하나가 이를 정확히 가른다 — 정상 −0.1~3.8mm 대 회귀 8.5·10.0mm 로 분리가 깨끗했다.
+          sim·real 양쪽 경로에 걸었다(real 은 게이트가 아예 없어 refine 결과를 무조건 적용하고 있었다).</p>
+        <div class="ba"><span>laundry 45.1 → <b>58.5%</b></span><span>protein drink 56.5 → <b>68.9%</b></span>
+          <span>오탐 <b>0건</b> (정상 7종 그대로 통과)</span></div>
+      </div>
+      <div class="fix-row">
+        <h3>flip 관측 고도각을 새로 드러난 면에서 정한다 <code>flip_policy.py 신설</code></h3>
+        <p>뒤집으면 <strong>어느 면이 새로 보이는지</strong>가 달라지므로 관측 고도각도 달라야 한다.
+          원래 바닥면 법선 −ẑ 를 flip 회전으로 돌린 방향을 정면으로 보는 el 을 쓴다. 측면뷰 30° 를
+          고정으로 쓰면 180° flip 후 바닥면 입사각이 60° 가 되어 입사각 필터(50°)에
+          <strong>전량 걸린다</strong> — 굽 링(법선 수평)만 남고 오목한 바닥 중앙이 100% 소실됐다.</p>
+        <div class="ba"><span>mug 바닥 중앙 미취득 100% → <b>0%</b></span>
+          <span>입사각 통과 50 → <b>68%</b></span></div>
+      </div>
+      <div class="fix-row">
+        <h3>후보 고도각이 <code>[70°, 30°]</code> 로 끊겨 있었다 <code>_flip_view_els</code></h3>
+        <p>고도각 판정을 넣고도 실행부는 <code>el_face ± 15°</code> 를 쓰는 바람에 90·75·105° 가 전부
+          70° 로 클램프·중복제거되어 <strong>후보가 [70°, 30°] 둘뿐</strong>이었다. 70° 가 실패하면
+          곧장 30° 로 추락해 바닥이 grazing 이 됐다 — <strong>60° 는 시도조차 하지 않았는데,
+          실제로는 거의 모든 물체에서 60° 가 도달 가능했다.</strong> 예측과 실행이 서로 다른 목록을
+          쓰던 것이 원인이라 <strong>사다리를 공용 함수 하나로 통일</strong>했다(법선에서 시작해
+          10° 씩 필요 최소치까지 하강). 이제 아홉 종 모두 예측 el 과 실행 el 이 일치한다.</p>
+        <div class="ba"><span>hand drill 57.7 → <b>64.5%</b></span>
+          <span>laundry 58.5 → <b>64.4%</b></span><span>최저 57.7 → <b>64.4%</b></span>
+          <span>평균 Chamfer 0.92 → <b>0.77mm</b></span></div>
+      </div>
+      <div class="fix-row">
+        <h3>90° 눕히기 — 도달 한계는 실재하지 않았다 <code>설계 재해석</code></h3>
+        <p>90° flip 은 "키 큰 물체는 180° 뒤집어도 바닥을 내려다볼 수 없다"는 도달 한계를 우회하려
+          도입했다. 그런데 사다리를 고치자 <strong>293mm 짜리 세제까지 el 60° 로 바닥을 본다</strong> —
+          한계로 보이던 것은 후보 목록이 60° 를 건너뛴 탓이었다. 판정을 종횡비가 아니라
+          <strong>실제 도달성</strong>으로 바꾼 덕에 드러난 사실이다. 결과적으로 이번 아홉 종은
+          모두 180° 하나로 충분했고, 90° 는 정말 도달 불가한 형상에 대비한 안전판으로 남는다.</p>
+        <div class="ba"><span>판정 기준: 종횡비 → <b>도달성</b></span>
+          <span>필요 el = 90° − 입사각예산 = <b>40°</b></span>
+          <span>9종 예측·실행 <b>전부 일치</b></span></div>
       </div>
     </div>
   </section>
@@ -185,9 +218,11 @@ footer{color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padd
       <p>씬에 심은 물체의 정답(GT) 표면과 최종 메시를 직접 대조한 값이다 — 3D 재구성 벤치마크의
         표준 지표(<strong>완전성</strong>=GT 중 1mm 안에 잡힌 비율, <strong>정확도</strong>=재구성 중
         GT 1mm 안인 비율, <strong>F-score</strong>=둘의 조화평균, <strong>Chamfer</strong>=양방향
-        평균거리). 단순 회전체(drug bottle·povidone)는 99%에 닿고, 세장형 flip을 받은
-        spray can 이 93.8%로 그 다음이다. 복잡 형상(hand drill)과 최대 크기(laundry detergent)가
-        50%대로 남은 개선 표적이다.</p>
+        평균거리). 평균 F@1mm <strong>80.2%</strong>, 최저 58.5%, 평균 Chamfer 0.93mm.
+        세장형 flip 을 받은 세 물체(povidone·spray can·mustard)가 모두 93% 이상이고,
+        오목한 내부를 가진 mug 는 완전성 53%(안벽 미취득)인 반면 정확도는 90% — 얻은 것은
+        정확하되 못 얻은 영역이 남았다는 뜻이다. 남은 표적은 자가폐색이 심한 hand drill 과
+        최대 크기(293mm)라 정합 오차의 변위가 가장 큰 laundry detergent 다.</p>
     </div>
   </section>
 
