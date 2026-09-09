@@ -82,27 +82,26 @@ sim 은 점군까지만.
 
 ## 3. real 실행 경로 — `main_artec.py` 단계별
 
-`BACKEND = "real"` (line 21). 실행: Windows + xArm/Artec/Ezi-SERVO 연결 후 `python main_artec.py`.
+`BACKEND = "real"` 로 바꾸고 실행한다(Windows + xArm/Artec/Ezi-SERVO 연결).
 
 ```
-main()                                                  # main_artec.py:317
- └ with ArtecMMS(CFG) as mms:                           # system.py:95  (build_sensor=scanner 생성)
-     ├ robot, turntable = mms.create_hardware()         # system.py:146 → build_hardware (factory)
+main()
+ └ with ArtecMMS(CFG) as mms:                    # build_sensor = scanner 생성
+     ├ robot, turntable = mms.create_hardware()  # build_hardware (factory)
      │  (T_B_F0 = turntable_frame.yaml 자동 로드; 재보정은 rim-click 별도 스크립트 — §4.1)
-     └ result = mms.artec_process(robot, turntable, PROCESS_SETTINGS)   # system.py:411
-          ├ [scan] real+multipass → ArtecMultiPassScanSession.run()     # system.py:436-459
+     └ result = mms.artec_process(robot, turntable, PROCESS_SETTINGS)
+          ├ [scan] real+multipass → ArtecMultiPassScanSession.run()
           │         = phase_mode 순차 누적: Phase 1(streaming) → 2(NBV) → 3(flip 바닥면)
-          ├ GlobalRegistration (hints_applied 면 skip)                  # system.py:512
-          ├ OutliersRemoval / SmallObjectsFilter                        # system.py:517
-          ├ PoissonFusion                                               # system.py:525
-          ├ Texturize                                                   # system.py:533
-          └ Export .obj/.sproj                                          # system.py:537
+          ├ GlobalRegistration (hints_applied 면 skip)
+          ├ OutliersRemoval / SmallObjectsFilter
+          ├ PoissonFusion → Texturize → Export .obj/.sproj
 ```
 
-**설정은 `main_artec.py` 상단에서** (CFG, STREAM_SETTINGS, MULTIPASS_SETTINGS, PROCESS_SETTINGS).
-- 하드웨어 IP: `ROBOT_IP/TURNTABLE_IP` (line 53-55).
-- hand-eye: `T_EC_key="T_EC_artec"`, `sensor_frames.yaml` (line 69-70).
-- 턴테이블 축: `config/calibration/turntable_frame.yaml` (line 68).
+**설정은 `main_artec.py` 상단에** 모여 있다 — `CFG`, `STREAM_SETTINGS`,
+`MULTIPASS_SETTINGS`, `PROCESS_SETTINGS`, 그리고 `ROBOT_IP` / `TURNTABLE_IP`.
+hand-eye 는 `T_EC_key="T_EC_artec"`(`config/sensor_frames.yaml`), 턴테이블 축은
+`config/calibration/turntable_frame.yaml` 이다. 조정 가능한 값의 전체 목록은
+각 단계 문서의 §1 을 본다(`7_real_commands.md` §6 이 위치를 안내한다).
 
 ---
 
@@ -137,11 +136,15 @@ main()                                                  # main_artec.py:317
 **5면 중 부족 영역**을 **로봇이 움직이며** NBV 로 보강. (바닥면은 Phase 2 아님 → §4.4 Phase 3.)
 `phase_mode=2` 로 활성.
 
-- 본체: `artec_multipass_scan_session.py` 의 `_phase2_nbv_loop` → `_build_master_mesh_B`
-  (pcd→Poisson) → **`_plan_nbv_pose`**(공용 `phase2_nbv.plan_nbv_elevation_pose` — 관측
-  elevation 자세, 해석 IK + swept 충돌 + 관절이동 최소) → `_capture_nbv_pose`(**로봇 NBV 자세
-  이동 → streaming 전회전 → T_pre/relocalization 병합**). (`_rank_nbv_candidates` per-gap 정면
-  방식은 캡처통일로 대체됨.)
+- 본체: `artec_multipass_scan_session.py` 의 `_build_master_mesh_B`(pcd→Poisson) →
+  **`_plan_nbv_pose`** → `_capture_nbv_pose`(로봇 NBV 자세 이동 → streaming 전회전 →
+  camera-motion `T_pre` 병합). 수렴 루프 자체는 공용 `scan_phase_controller` 가 소유한다.
+- 자세 선정은 `utils/nbv/nbv_planner.NbvPlanner` 를 거친다. **축-고도각**
+  (`plan_nbv_elevation_pose`)은 real·sim 공용이지만 **gap 직접 겨냥(`plan_frontier`)은
+  sim 만 호출**한다 — real 은 손잡이·내벽 같은 국소 결손을 겨냥하지 못한다
+  (`3_phase2.md` T6).
+- ⚠ `_rank_nbv_candidates` 와 `nbv_pose_from_candidate` 는 per-gap 정면 방식의 잔재로
+  **어디서도 호출되지 않는다**(2026-06-30 캡처 통일 때 대체). 현행으로 오해하지 말 것.
 - 충돌: `_build_collision_world`(턴테이블 calib) + **keep-out 원기둥**(`add_cylinder`) +
   `swept_pose_collision`(공용 `robot_collision`). ★ **스캐너 자가충돌 자동 포함**(공용
   `pose_collision(scanner_self=True)`, 캡슐반경 0.095) — 벌크 스파이더가 베이스 링크(link2 등)에
@@ -217,18 +220,19 @@ GlobalReg → Cleaning → PoissonFusion → Texturize → Export(.obj/.sproj). 
 
 | 항목 | 상태 | 조치 |
 |---|---|---|
-| `phase_mode=2` | 코드 있음, **main_artec 미설정**(기본 flip) | MULTIPASS_SETTINGS 에 추가해야 NBV 동작 |
-| 스캐너 자가충돌 | ✅ **해결**(공용 `pose_collision(scanner_self=True)`, 반경 0.095) | real 실측 스파이더 반경으로 `DEFAULT_LINK_RADII[6]` 미세조정 |
+| `phase_mode` | `main_artec.py` 기본 **3**(=1→2→3 누적) | 첫 실물은 1 로 낮춰 5면부터 확인 |
+| 충돌 게이트 | ✅ `utils/collision/collision_model.py` 단일 게이트(메시 SDF, 자가+환경+특이점). 캡슐 경로는 Phase 2 후보 1차 필터로만 남음 | 셀을 개조하면 `export_env_mesh.py` 로 캐시 재생성 (`4_collision.md` §1) |
 | 캡처 모달리티 통일 | ✅ sim `_scan_pass`=real 전회전 대응 | — (real `_capture_nbv_pose`=streaming 전회전 그대로) |
-| NBV 자세선택 공용추출 | ✅ **해결**(공용 `phase2_nbv.plan_nbv_elevation_pose`, real·sim 둘 다 호출. backend 는 look-at 규약(USD/OpenCV)·프레임만 주입) | real 실기에서 elevation 선택 동작 확인 |
+| NBV 자세선택 | 축-고도각(`plan_nbv_elevation_pose`)은 real·sim 공용. **gap 직접 겨냥(`plan_frontier`)은 sim 만 호출** | real 에 배선하면 손잡이·내벽 결손을 겨냥할 수 있다 (`3_phase2.md` T6) |
 | NBV 캡처 = 짧은 스윕 | v1=풀회전 | `streaming_settings` 회전각 override(시간단축용) |
-| Artec relocalization R1/R2 | 미배선(R3 fallback) | 실기 검증 후 배선(docs/3 §6.5) |
+| Artec relocalization R1/R2 | 미배선(R3 fallback) | 실기 검증 후 배선 (`3_phase2.md` T5) |
 | `set_servo_angle` speed 단위 | sim 가정 | real 에서 deg/s 확인 |
 | 충돌 world 치수 | 기본값 | 셀 실측으로 `nbv_turntable_*`/keep-out 보정 |
 | 큰/높은 객체 윗면 | el≈90° 도달불가(스캐너-link2) | **z 수축** 또는 Phase 3 류 별도 처리 |
 | open3d (phase2_nbv) | ✅ 양쪽 설치됨 | `mms-env` 0.19 / `env_isaacsim` 0.19 확인(2026-08-12). Phase2 NBV mesh/gap 용 |
 | opencv 버전 | ⚠ **`<5` 고정 필요** | OpenCV 5.x 는 `cv2.calibrateHandEye` 가 python 바인딩에 없어 hand-eye 가 깨진다(상수만 남아 import 는 통과 → 발견이 늦다). `requirements.txt` 에 `opencv-python>=4.9,<5` 명시 |
 | 후처리 hints/GlobalReg skip | flip 경로용 | NBV 경로의 병합 규칙 점검 |
+| Phase 1 시작 자세 선정 | ✅ real 도 sim 과 같은 공용 플래너(2026-09-09) | 실물 미검증 — `2_phase1.md` T7 의 3가지 확인 |
 
 > 이 표가 곧 "Phase 2 NBV 를 real 에서 켜기 전 할 일" 목록이다. Phase 1·calibration·flip 은
 > 기존 검증 경로라 Spider 도착 즉시 테스트 가능.
