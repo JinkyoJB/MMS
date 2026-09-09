@@ -331,6 +331,14 @@ cd <MMS repo>
 ./scripts/sim/run_e2e_gui.sh mug 2 planner 10       # 베이스 +10cm, Phase 1→2
 ```
 
+![sim Phase 1 실행 화면](figures/phase1/sim_run_spray_can.png)
+
+왼쪽은 Isaac Sim 뷰포트, 오른쪽은 Phase 1 이 끝난 뒤 뜨는 결과 뷰어
+(`utils/viz.py::show_composite_mesh`)다. 결과 뷰어의 파란 원판은 턴테이블 상면을
+표시한 기준 도형이고 그 위 작은 축이 원점이다. 재구성된 물체가 **단색 빨강**인 것은
+composite mesh 를 `paint_uniform_color` 로 칠하기 때문이며, 스캔 색이 아니다.
+텍스처가 있는 export OBJ 가 있으면 그쪽을 먼저 텍스처 그대로 띄운다.
+
 인자는 `[물체] [phase_mode] [planner|legacy] [ΔH cm]` 순이다. `phase_mode` 는 누적
 실행이라 `1` = 5면, `2` = +NBV 보강, `3` = +바닥면 flip 을 뜻한다. `ΔH > 0` 이면
 `hibase/*_dh<cm>.usd` 오버레이 씬을 한 번 생성해 캐시하며 원본 씬은 건드리지 않는다.
