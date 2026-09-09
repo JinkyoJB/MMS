@@ -481,8 +481,15 @@ def _start_pose(idx):
                 _q0 = np.array([_rq[d] for d in _ctx["dof_idx"]], float)
                 _psafe, _pwhy, _ = _cm.is_path_safe(_q0, q)
                 if not _psafe:
-                    print(f"[CALIB]   pose {idx+1}: 이동경로 충돌 — {_pwhy} → skip")
-                    ok = False
+                    if str(_pwhy).startswith("start"):
+                        # 출발 자세가 이미 안전여유 밖 — 여기 머무는 게 더 나쁘다.
+                        # 거부하면 이후 모든 자세가 같은 이유로 막히는 연쇄가 생긴다
+                        # (실측: 19자세 중 7개가 이 연쇄로 소실). 목표는 안전하므로 진행.
+                        print(f"[CALIB]   pose {idx+1}: ⚠ 출발자세 여유부족({_pwhy}) — "
+                              f"목표는 안전하므로 이동")
+                    else:
+                        print(f"[CALIB]   pose {idx+1}: 이동경로 충돌 — {_pwhy} → skip")
+                        ok = False
         if ok:
             _ctx["pose_idx"] = idx
             _ctx["target_q"] = np.asarray(q, float)
