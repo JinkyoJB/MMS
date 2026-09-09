@@ -160,21 +160,53 @@ sim_harness/MMS_ext_calibration.py
 
 ## 7. 실행
 
-**sim (Isaac):** VSCode Isaac 확장 코드러너 또는 Script Editor 로
-`sim_harness/MMS_ext_calibration.py` 실행. 로그:
-`tail -f standalone_examples/play/MMS/captures_calib/calib_log.txt`.
+### sim — hand-eye 파이프라인 검증
 
-**real:**
+ChArUco 보드를 USD 평면으로 실제 렌더 → 검출 → solvePnP → `calibrateHandEye` →
+USD 에서 읽은 **GT 와 비교**한다. 실물 없이 파이프라인 자체를 확인하는 용도.
+
+```bash
+# 1) 리포 위치를 알려준다 (Isaac 트리로 복사해 돌리므로 필요)
+export MMS_ROOT=/home/keti/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성/1_코드/MMS
+
+# 2) 하니스를 Isaac 트리에 링크 (최초 1회)
+DST=~/isaacsim/standalone_examples/play/MMS && mkdir -p "$DST"
+ln -sf "$MMS_ROOT"/sim_harness/MMS_ext*.py "$DST"/
+
+# 3) 실행
+env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration.py"
+
+# 4) 로그 (다른 터미널)
+tail -f "$DST/captures_calib/calib_log.txt"
 ```
-python scripts/artec/make_charuco.py        # 보드 인쇄
-python scripts/artec/intrinsic_calib.py     # K 측정 (1회)
-python scripts/artec/hand_eye_calib.py      # 자세 순회 → T_EC → hand_eye_artec.yaml
-# → config/sensor_frames.yaml 의 T_EC_artec 에 반영
+
+> 리포 안에서 바로 돌려도 된다(경로 자동 탐색). 다만 Isaac 의 예제 로더를 쓰려면
+> 위처럼 트리에 두는 편이 확실하다.
+>
+> 산출물 위치를 바꾸려면 `export MMS_HARNESS_OUT=/원하는/경로`.
+
+**결과 확인** — 로그 끝에 GT 대비 `t_err` / `r_err` 이 찍힌다. §6 참고.
+
+### real — 실제 캘리브레이션
+
+```bash
+conda activate mms-env
+cd "$MMS_ROOT"
+
+env -u PYTHONPATH python scripts/artec/make_charuco.py     # 보드 PNG → 실척 인쇄 (최초 1회)
+env -u PYTHONPATH python scripts/artec/intrinsic_calib.py  # 카메라 K 측정 (최초 1회)
+env -u PYTHONPATH python scripts/artec/hand_eye_calib.py   # 자세 순회 → hand_eye_artec.yaml
+
+# 기록된 자세로 재실행할 때
+env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
+    --poses config/calibration/artec_calibration_poses.yaml
 ```
 
-> 실물 결과(2026-04-29): PARK, **t_err 3.55mm / r_err 1.30°** (main_flow §1.0).
+→ 결과를 `config/sensor_frames.yaml` 의 `T_EC_artec` 에 반영한다.
 
----
+> 자세 15~25개, 자세 간 회전 **≥30°** 를 확보할 것.
+> 실물 결과(2026-04-29): PARK, **t_err 3.55mm / r_err 1.30°**
+
 ---
 
 # 〔Part 2〕 Turntable — `T_B_F0`
@@ -266,8 +298,23 @@ sim 검증:
   `fit_circle_3d`/`_RimPicker` 를 들고 있음(PhoXi 는 공유 코어 사용). Artec 도 공유 코어로 통일 권장.
 - ⚠ **turntable_frame.yaml stale 의심** — 2026-04-23(Artec pivot 이전). 정밀도 의심 시 재캘리브 1순위.
 
-**sim:** `sim_harness/MMS_ext_calibration2.py` (Isaac 확장/Script Editor).
-**real:** `python scripts/artec/turntable_frame_init.py` → rim 클릭 → `config/calibration/turntable_frame.yaml`.
+### 실행
+
+```bash
+# ── sim — rim 자동추출 → 원 피팅 → GT 비교 ──
+export MMS_ROOT=/home/keti/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성/1_코드/MMS
+DST=~/isaacsim/standalone_examples/play/MMS
+env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration2.py"
+tail -f "$DST/captures_turntable/calib_log.txt"
+
+# ── real — rim 위 점을 클릭해서 원 피팅 ──
+conda activate mms-env && cd "$MMS_ROOT"
+env -u PYTHONPATH python scripts/artec/turntable_frame_init.py
+# → config/calibration/turntable_frame.yaml
+```
+
+> rim 이 한 화면에 다 안 들어오면 보이는 호(arc)에서 클릭한다. 3점이면 풀리지만
+> 호가 짧으면 조건수가 나빠진다.
 
 > 상태: rim 방법 ✅ (Isaac+PhoXi 검증 0.015°/0.7mm). 구 어레이 방법은 폐기(rim 으로 대체).
 

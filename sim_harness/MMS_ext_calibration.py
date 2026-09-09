@@ -9,7 +9,7 @@ cv2.calibrateHandEye)** 이 진짜로 동작하는지를, ground-truth 를 아�
 
 이 스크립트가 하는 일
 ---------------------
-0. 마블(`Solid_Marble`) 비활성 + **ChArUco 보드를 얇은 박스 rigid body 로** 턴테이블
+0. 스캔 대상(`MMS_SIM_OBJECT_PRIM`, 기본 /World/ScanTarget/TestObject) 비활성 + **ChArUco 보드를 얇은 박스 rigid body 로** 턴테이블
    위에서 **중력 낙하·안착**. 상단면에 ChArUco 텍스처.
 1. **진짜 보드를 카메라가 렌더링**한 픽셀에서 cv2.aruco 검출 (점/포즈 주입 X).
 2. 로봇을 artec home 에서 출발해 보드 위 **반구의 N 자세**로 이동(관절공간 구동).
@@ -112,10 +112,10 @@ except Exception as _e:
 
 
 # ── 상수 ───────────────────────────────────────────────────────────────────────
-USD_PATH     = _asset("frame_xarm7_spider_turntable/v2.usd")
+USD_PATH     = _asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
 ROBOT_PRIM   = "/World/xarm7"
 JOINTS_SCOPE = "/World/xarm7/joints"
-CAMERA_PRIM  = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
+CAMERA_PRIM  = "/World/xarm7/link7/tool/spider/Camera"
 EE_LINK_NAME = "link7"
 EE_LINK_PATH = f"{ROBOT_PRIM}/{EE_LINK_NAME}"
 
@@ -147,10 +147,12 @@ CH_IMG_PX        = (1000, 600)
 BOARD_PRIM_PATH  = "/World/CharucoBoard"
 
 # ── 보드 낙하/안착 (턴테이블 top=z 0.713, XY중심 (0.325,-0.022), 0.15×0.15m) ───
-BOARD_DROP_XY      = (0.330, -0.020)
-BOARD_DROP_Z       = 0.730
+# v3 기준: 턴테이블 축 (0.365, 0), disc 상면 Z=0.665 (docs/hw_layout.md §2)
+# 보드를 축 위에서 낙하시켜 disc 표면에 안착시킨다.
+BOARD_DROP_XY      = (0.365, 0.0)
+BOARD_DROP_Z       = 0.730          # 상면 +65mm 에서 낙하
 BOARD_SETTLE_STEPS = 150
-MARBLE_PRIM_PATH   = "/World/ScanTarget/Solid_Marble"
+MARBLE_PRIM_PATH   = os.environ.get("MMS_SIM_OBJECT_PRIM", "/World/ScanTarget/TestObject")
 
 # ── 캘리브 자세: 안착 보드 위 반구에서 내려다보기 ─────────────────────────────
 CALIB_DISTANCE_M   = 0.25

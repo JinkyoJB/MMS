@@ -75,14 +75,14 @@ except Exception:
 
 
 # ── 상수 ───────────────────────────────────────────────────────────────────────
-USD_PATH     = _asset("frame_xarm7_spider_turntable/v2.usd")
+USD_PATH     = _asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
 ROBOT_PRIM   = "/World/xarm7"
 JOINTS_SCOPE = "/World/xarm7/joints"
-CAMERA_PRIM  = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
+CAMERA_PRIM  = "/World/xarm7/link7/tool/spider/Camera"
 SCANNER_PRIM = "/World/xarm7/link7/Artec_Space_Spider_mm"     # 자가충돌용 실 mesh
 LINK7_PRIM   = "/World/xarm7/link7"
-MARBLE_PRIM_PATH = "/World/ScanTarget/Solid_Marble"
-TURNTABLE_MESH = "/World/ScanTarget/turntable_demo/turntable/turntable"
+MARBLE_PRIM_PATH = os.environ.get("MMS_SIM_OBJECT_PRIM", "/World/ScanTarget/TestObject")
+TURNTABLE_MESH = "/World/frame/turntable_disc"
 OBJ_PATH     = "/World/Phase2Object"
 
 INITIAL_JOINT_POS = {f"joint{i}": 0.0 for i in range(1, 8)}

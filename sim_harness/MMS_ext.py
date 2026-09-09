@@ -1,6 +1,6 @@
 """
 MMS Extension Script - Isaac Sim 5.1.0 (VSCode Extension / Script Editor 버전)
-USD: 자산 루트의 frame_xarm7_spider_turntable/v2.usd (mms_paths 가 해석)
+USD: 자산 루트의 frame_xarm7_spider_turntable_v2/v3_scene.usd (mms_paths 가 해석)
 
 ⚠️ 이 파일은 standalone(python.sh)이 아니라 **이미 실행 중인 Isaac Sim** 안에서
    돌리는 버전이다. 다음 둘 중 하나로 실행한다:
@@ -31,7 +31,7 @@ from isaacsim.sensors.camera import Camera
 from pxr import Usd, UsdGeom, Sdf, Gf
 
 # ── 2. 상수 ───────────────────────────────────────────────────────────────────
-USD_PATH     = _asset("frame_xarm7_spider_turntable/v2.usd")
+USD_PATH     = _asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
 ROBOT_PRIM   = "/World/xarm7"
 JOINTS_SCOPE = "/World/xarm7/joints"
 
@@ -48,9 +48,9 @@ INITIAL_JOINT_POS = {
 
 # ── 스캐너 카메라 (Artec Space Spider 모사) ──────────────────────────────────
 # 카메라 prim 경로 (xarm7 EE의 스캐너 하위)
-CAMERA_PRIM = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
+CAMERA_PRIM = "/World/xarm7/link7/tool/spider/Camera"
 # 스캔 대상물 (정렬 확인용)
-TARGET_PRIM = "/World/ScanTarget/Solid_Marble"
+TARGET_PRIM = os.environ.get("MMS_SIM_OBJECT_PRIM", "/World/ScanTarget/TestObject")
 
 # Artec Space Spider 실제 스펙 기반 광학값
 #   - 작동거리 0.2~0.3 m, 작동거리 중앙(≈0.25 m)에서 선형 FOV ≈ 135×105 mm

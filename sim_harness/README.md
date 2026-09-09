@@ -49,22 +49,24 @@ env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration.py"
 
 ---
 
-## ⚠ 이 하니스들은 **v2(옛) 씬 기준**이다
+## 씬 버전 — v3 기준으로 갱신 완료 (2026-09)
 
-작성 시점이 2026-06 이고, 씬은 2026-08 에 **v3 로 바뀌었다**(`docs/v3_sim_migration.md`).
-그대로 돌리면 prim 을 못 찾고 조용히 실패한다.
+작성 시점은 2026-06(v2 씬)이었으나, 08 월 v3 전환(`docs/v3_sim_migration.md`)에 맞춰
+상수를 갱신했다.
 
-| | 하니스(v2) | 현재(v3) |
+| | 기존(v2) | 현재(v3) |
 |---|---|---|
 | 씬 | `frame_xarm7_spider_turntable/v2.usd` | `frame_xarm7_spider_turntable_v2/v3_scene.usd` |
-| 카메라 prim | `/World/xarm7/link7/Artec_Space_Spider_mm/Camera` | `/World/xarm7/link7/tool/spider/Camera` |
-| 로봇 base | `(0.538, 0, 1.407)` | `(0.365, 0, 1.500)` |
+| 카메라 prim | `.../link7/Artec_Space_Spider_mm/Camera` | `.../link7/tool/spider/Camera` |
+| 턴테이블 prim | `/World/ScanTarget/turntable_demo/...` | `/World/frame/turntable_disc` |
+| 스캔 대상 | `/World/ScanTarget/Solid_Marble` | `MMS_SIM_OBJECT_PRIM` (기본 `/World/ScanTarget/TestObject`) |
+| 보드 낙하 위치 | `(0.330, −0.020)` | `(0.365, 0.0)` — v3 턴테이블 축 |
 
-**되살리려면** 각 파일 상단 상수(`USD_PATH`·`CAMERA_PRIM`·`ROBOT_PRIM` 등)를 v3 기준으로
-맞춰야 한다. 현재 값은 `mms_artec/backends/isaac/isaac_world.py` 를 참고한다.
-
-> 경로 하드코딩은 이미 제거했으므로(위 환경변수), 남은 작업은 **prim 경로와 씬 파일**
-> 갱신이다. 검증 로직 자체는 그대로 쓸 수 있다.
+> prim 경로는 `v3_scene.usd` 를 `pxr` 로 조회해 확인했다. 정본은
+> `mms_artec/backends/isaac/isaac_world.py`.
+>
+> ⚠ **실행 검증은 아직 못 했다** — 상수만 맞춘 상태다. 첫 실행 시 prim 오류가 나면
+> `isaac_world.py` 와 대조할 것.
 
 ## ★ 설계 원칙 — sim 에 중복 구현하지 않는다
 
