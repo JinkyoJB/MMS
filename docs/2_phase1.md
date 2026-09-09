@@ -6,7 +6,7 @@
 > 앞 단계는 `1_calibration.md`, 부족면 보강은 `3_phase2.md` 를 본다.
 >
 > **결과가 이상하면 맨 뒤 〔부록〕 Troubleshooting 을 먼저 본다.** 규약·함정·알려진
-> 미해결 문제를 T1~T8 로 모아두었다.
+> 미해결 문제를 T1~T9 로 모아두었다.
 
 ---
 
@@ -21,15 +21,15 @@
                          360° 도는 동안 옆면이 차례로 스캐너 앞을 통과
 ```
 
-로봇이 고르는 자유도는 사실상 **고도각 φ 하나**이고, 물체가 키가 커서 한 자세로 높이를
-다 못 덮을 때만 z 방향으로 **밴드**를 나눠 여러 바퀴를 돈다. 전자는 §3, 후자는 §4 에서
-다룬다.
+로봇이 고르는 자유도는 사실상 **고도각 φ 하나**다. 그 φ 를 어떻게 고르는지는 §3 에서
+다루고, 물체가 키가 커서 한 자세로 높이를 다 못 덮으면 z 방향으로 **밴드**를 나눠 여러
+바퀴를 도는데 그건 §4 에서 다룬다.
 
 ---
 
-## 2. 적용된 로직 — 연속 회전 스트리밍 스캔
+## 2. 적용된 로직
 
-Artec Spider 는 한 frame 의 좌표를 **직전 frame 에 정합해서** 얻는다. 절대 좌표를 프레임마다
+Artec Spider 는 한 frame 의 좌표를 **직전 frame 에 정합해서** 얻는다(streaming SLAM). 절대 좌표를 프레임마다
 따로 주는 센서와 달리 기준이 상대적이므로, 한 frame 을 놓치면 그 다음부터 좌표를 이어붙일
 근거가 사라진다. **추적을 잃는 순간 그 시점까지 쌓인 frame 만 살아남는다.**
 
@@ -39,45 +39,75 @@ Artec Spider 는 한 frame 의 좌표를 **직전 frame 에 정합해서** 얻�
 자세를 옮기는 방식은 쓰지 않는다.
 
 이 성질 때문에 Phase 1 에는 추적 상태를 실시간으로 감시하는 watchdog 과, 끊겼을 때
-되돌아갈 지점(last-good θ), 그리고 자동 복구 절차가 함께 붙는다(§6).
+되돌아갈 지점(last-good θ), 그리고 자동 복구 절차를 구현하였다(§6).
 
-시작 자세는 **사용자가 눈으로 조준해 둔 home 자세를 그대로 쓴다**(2026-05-20 결정).
-사전 probe 나 elevation 탐색을 하지 않는데, 그 탐색이 모든 스캔에 1~2분을 더하는 데
-비해 잘 조준된 자세면 대개 그냥 성공하기 때문이다. 추적이 끊겨야 비로소 자세가 나쁘다는
-신호이고, 그때만 **recovery 로직**(추적을 잃었을 때 자동으로 되돌아가 자세를 다시
+시작 자세는 한 바퀴 전체를 감당할 수 있는 것으로 골라야 한다. 그 선정 알고리즘이
+§3 이고, 그래도 도중에 추적이 끊기면 **recovery 로직**(자동으로 되돌아가 자세를 다시
 고르는 복구 절차, §6)이 개입한다.
 
 ---
 
-## 3. 자세 선정 — elevation view-score
+## 3. 자세 선정 — 전회전 maximin 채점
 
-로봇이 고를 자유도는 고도각 φ 하나이므로, 후보 φ 들을 preview 로 찍어 점수화하고
-가장 높은 것을 고른다.
+물체가 도는 동안 로봇은 고정이므로, 자세 하나를 고르는 일은 곧 **360° 전체를 그 자세
+하나로 감당할 수 있는가**를 묻는 일이 된다. 그래서 후보 자세마다 턴테이블 한 바퀴를 미리
+시뮬레이션해 프레임별 가시 면적 곡선을 그리고, **평균이 아니라 최악 프레임으로** 점수를
+매긴다(maximin). 납작한 물체가 edge-on 으로 지나가는 한순간에 추적이 끊기면 그 뒤가 전부
+날아가기 때문에, 평균이 좋은 자세보다 바닥이 높은 자세가 낫다.
 
-> **score(φ)** = 그 자세의 preview 점 중 **물체로 분류된** 점들이
-> **최적 작업거리(≈225mm) 근처의 FOV 안** 에 얼마나 모여 있는가(개수 가중합).
+구현은 `utils/nbv/phase1_viewpoint.py::plan_phase1_viewpoints` 이며 sim/real 공용 코어다.
 
-| 단계 | 하는 일 |
+### 3.1 물체 점만 남기기
+
+클러스터링이나 모션 차분을 쓰지 않고 **캘리브레이션 기하로 자른다**(`crop_object_points`).
+턴테이블 상판 평면 위, 그리고 회전축 기준 실린더 안쪽만 남긴다. 이렇게 하면 "턴테이블
+자체를 물체로 착각해 조준하는" 실패 모드가 구조적으로 사라진다.
+
+### 3.2 센서 모델
+
+가시성은 frustum ∩ 작동거리 대역 ∩ 입사각으로 판정한다(`SensorModel`, `visible_masks`).
+FOV 는 30°×22.62°, 작동거리는 0.20~0.30m, 면적 정규화 복셀은 2mm 다.
+
+입사각 한계가 **두 개**인 것이 이 모델의 요점이다. 누적과 품질에는 50°까지만 쳐주고
+(`max_incidence_deg`), 추적 기여는 75°까지 인정한다(`track_incidence_deg`). 비스듬히
+스치는 면은 모델 품질에 보탬이 안 되더라도 추적은 붙잡아 주기 때문이다.
+
+### 3.3 탐색 격자와 점수
+
+| 축 | 후보 |
 |---|---|
-| 1 | preview 점군을 카메라 프레임에서 base 프레임으로 옮긴다. 멤버십 판정과 `z_table` 이 모두 base 기준이기 때문이다. |
-| 2 | 물체에 속하는 점만 세 조건의 AND 로 고른다. 실린더로 미리 자르고, 턴테이블 상판을 hard floor(`z > z_table+8mm`)로 쳐내고, probe 로 만든 축대칭 `(r,z)` occupancy 를 조회한다. occupancy 는 360° 회전대칭화되어 있어 어느 θ 에서도 성립한다. |
-| 3 | 광축 기저를 캘리브레이션된 `fwd_C`·`up_C` 로부터 정규직교화해 만든다. 하드코딩된 `+Z_C` 를 쓰지 않는 이유는 스캐너가 조금 삐뚤어 장착돼도 판정이 틀리지 않게 하기 위해서다. |
-| 4 | Spider 의 FOV 30°(수평)×21°(수직) 안인지 본다. `depth > 1mm` 조건으로 카메라 등 뒤의 점을 제거한다. |
-| 5 | 거리에 Gaussian 가중을 준다. `w(d) = exp(−((d−225)/25)²)` 이므로 작동 대역 [200,250]mm 가 1σ 에 해당한다. |
+| 고도각 el | `DEFAULT_ELS = (20, 30, 40, 50)°`. sim 은 `MMS_SIM_P1_ELS` 로 `30,40,50,60,70` 을 쓴다 |
+| standoff | `near+20mm+r_max`, `mid+r_max`, `mid+r_max+30mm` 세 가지 (`_standoff_candidates`) |
+| 타깃 높이 tz | 물체 z 의 35 / 50 / 65 분위수 |
 
-최종 점수는 `score = Σ w(depth) · 1_FOV` 다. 물체 점 개수가 같더라도 **225mm 부근에
-모인 자세가 이긴다.**
+각 조합마다 θ 를 36등분해 한 바퀴를 돌려보고(`evaluate_viewpoint`) 아래 점수를 낸다.
 
-**언제 호출되나.** 정상 시작 때는 호출하지 않는다(사용자가 맞춘 home 자세로 출발).
-**recovery 로직(§6)이 돌 때만** 호출하며, 그때는 후보를 `[-5°, 0°, +5°]` 로 줄이고
-fine search 를 건너뛰어 30초 안에 끝낸다.
+```
+score = 2.0 · min(min_fill / 12cm², 1)   ← 최악 프레임 가시면적 (maximin, 지배항)
+      + 1.0 · z_cover_frac                ← 높이 방향 커버율
+      + 0.5 · covered_frac                ← 전체 점 중 품질-가시 비율
+```
 
-구현은 `artec_multipass_scan_session.py` 의 `_elevation_search`, `_phase1_view_score`,
-`_in_object_profile`, `_build_rz_profile` 이다. 판정에 쓰는 Spider v1 광학 상수는
-`recovery_pose_selector.py` 에 있다 — FOV 30°×21°, 작동거리 170~350mm(최적 200~250),
-기본 standoff 250mm, 3D 해상도 0.1mm, 정확도 0.05mm.
+**방위각 az 는 점수에 들어가지 않는다.** 회전 대칭이라 관측 조건을 바꾸지 못하고
+도달성(IK)과 충돌만 좌우하므로, 백엔드가 az 를 스윕하며 통과하는 값을 고른다(부록 T4).
 
-view-score 의 구조적 한계는 부록 T6 을 본다.
+standoff 후보에 near 쪽으로 치우친 값이 하나 들어 있는 이유는, 지름이 작동거리
+대역(≈10cm)에 육박하는 큰 물체는 최근접면을 near-clip 에 붙여야 반대편이 far-clip 을
+넘지 않기 때문이다.
+
+최악 프레임이 `FILL_MIN_CM2 = 6cm²` 에 못 미치면 계획을 그대로 반환하되
+`tracking_risk = True` 로 표시한다. 계획을 막지는 않고 경고만 남긴다.
+
+### 3.4 sim 과 real 의 현재 차이
+
+| | 시작 자세를 어떻게 정하나 |
+|---|---|
+| **sim** | 위 채점기가 고른다. `_pick_phase1_planner` 가 el=30°(`MMS_SIM_PREVIEW_EL`)에서 preview 를 찍어 점군을 만든 뒤 `plan_phase1_viewpoints` 를 호출한다. |
+| **real** | **아직 home 자세로 그대로 출발한다**(2026-05-20 결정). 시작 시 probe 나 elevation 탐색을 하지 않고, 추적이 끊겼을 때만 recovery 로직(§6)이 자세를 다시 고른다. |
+
+`plan_phase1_viewpoints` 는 입력이 점군과 캘리브 상수뿐이라 real 에 그대로 붙일 수 있게
+설계돼 있다. 남은 일은 home 정적 캡처(0°/90° 두 장)를 점군으로 넣는 것과 광축 규약을
+백엔드에서 맞추는 것뿐이며, **아직 실물에서 검증되지 않았다**(부록 T9).
 
 ---
 
@@ -88,14 +118,19 @@ view-score 의 구조적 한계는 부록 T6 을 본다.
 
 ![밴드 분할 계획](figures/phase1_viewpoint/fig4_bands.png)
 
-**분할 여부는 물체의 높이가 아니라 단일 자세의 z-커버율로 정해진다.** standoff 가 물체
-반경에 비례해 결정되므로 **가는 물체일수록** 카메라가 가까이 붙어 시야가 높이를 못 덮는다.
-그래서 293mm 세제(지름 194mm)가 2밴드인데 그보다 낮은 207mm 스프레이캔(지름 68mm)은
-3밴드로 나뉜다. 어떤 밴드로 갈렸는지는 `[phase1] z_cover=` 로그로 확인한다.
+**분할 여부는 물체의 높이가 아니라 §3 에서 고른 단일 자세의 z-커버율로 정해진다.**
+`z_cover_frac < ZCOVER_MIN(0.75)` 이면 밴드로 넘어간다. standoff 가 물체 반경에 비례해
+결정되므로 **가는 물체일수록** 카메라가 가까이 붙어 시야가 높이를 못 덮는다. 그래서
+293mm 세제(지름 194mm)가 2밴드인데 그보다 낮은 207mm 스프레이캔(지름 68mm)은 3밴드로
+나뉜다. 어떤 밴드로 갈렸는지는 `[phase1] z_cover=` 로그로 확인한다.
 
-밴드는 **안전한 것부터** 돈다. 위 그림에서 minfill 이 큰 band1 → band2 → … 순으로
-스캔하는 이유는, 위험한 밴드를 나중에 돌면 그때까지 쌓인 모델이 추적 복구(relocalization)의
-기준점으로 남아 있기 때문이다.
+밴드 높이는 단일 자세가 **실제로 덮은** z 폭(`seen_mask` 의 z 범위)으로 잡고, 인접 밴드를
+`BAND_OVERLAP = 0.35` 만큼 겹친다. 이 겹침이 곧 Artec relocalization 이 성립하는 조건이다.
+밴드 수는 `ceil(h / (band_h · 0.65))` 로 정해진다.
+
+밴드는 **안전한 것부터** 돈다(min_fill 내림차순). 위 그림에서 minfill 이 큰 band1 →
+band2 → … 순으로 스캔하는 이유는, 위험한 밴드를 나중에 돌면 그때까지 쌓인 모델이 추적
+복구(relocalization)의 기준점으로 남아 있기 때문이다.
 
 밴드 경로에서 과거에 터졌던 두 결함은 부록 T3·T4 에, 아직 남아 있는 문제는 T5 에 있다.
 
@@ -177,7 +212,34 @@ rollback 기준이 되는 **`last_good_theta_rad`** 를 담는다.
    무한 retry 는 금지다.
 2. **safe-back** — `last_good_theta_rad` 보다 10° 더 뒤로 턴테이블을 되돌린다.
 3. `_adaptive_prescan_position(recovery=True)` 로 probe 를 새로 찍고 축소된 elevation
-   search(§3)를 돌려 로봇 자세를 다시 고른다.
+   search 를 돌려 로봇 자세를 다시 고른다(아래).
+
+### 복구 자세를 고르는 채점기 — view-score
+
+여기서 쓰는 채점기는 §3 의 maximin 과 **다른 것**이다. 복구는 빠를수록 좋으므로 한 바퀴를
+시뮬레이션하지 않고, 지금 보이는 preview 한 장만으로 고도각을 고른다.
+
+> **score(φ)** = 그 자세의 preview 점 중 **물체로 분류된** 점들이
+> **최적 작업거리(≈225mm) 근처의 FOV 안** 에 얼마나 모여 있는가(개수 가중합).
+
+| 단계 | 하는 일 |
+|---|---|
+| 1 | preview 점군을 카메라 프레임에서 base 프레임으로 옮긴다. 멤버십 판정과 `z_table` 이 모두 base 기준이기 때문이다. |
+| 2 | 물체에 속하는 점만 세 조건의 AND 로 고른다. 실린더로 미리 자르고, 턴테이블 상판을 hard floor(`z > z_table+8mm`)로 쳐내고, probe 로 만든 축대칭 `(r,z)` occupancy 를 조회한다. occupancy 는 360° 회전대칭화되어 있어 어느 θ 에서도 성립한다. |
+| 3 | 광축 기저를 캘리브레이션된 `fwd_C`·`up_C` 로부터 정규직교화해 만든다. 하드코딩된 `+Z_C` 를 쓰지 않는 이유는 스캐너가 조금 삐뚤어 장착돼도 판정이 틀리지 않게 하기 위해서다. |
+| 4 | Spider 의 FOV 30°(수평)×21°(수직) 안인지 본다. `depth > 1mm` 조건으로 카메라 등 뒤의 점을 제거한다. |
+| 5 | 거리에 Gaussian 가중을 준다. `w(d) = exp(−((d−225)/25)²)` 이므로 작동 대역 [200,250]mm 가 1σ 에 해당한다. |
+
+최종 점수는 `score = Σ w(depth) · 1_FOV` 다. 물체 점 개수가 같더라도 **225mm 부근에
+모인 자세가 이긴다.** 후보는 `[-5°, 0°, +5°]` 로 줄이고 fine search 를 건너뛰어 30초 안에
+끝낸다.
+
+구현은 `artec_multipass_scan_session.py` 의 `_elevation_search`, `_phase1_view_score`,
+`_in_object_profile`, `_build_rz_profile` 이고, 판정에 쓰는 Spider v1 광학 상수는
+`recovery_pose_selector.py` 에 있다 — FOV 30°×21°, 작동거리 170~350mm(최적 200~250),
+기본 standoff 250mm, 3D 해상도 0.1mm, 정확도 0.05mm.
+
+이 채점기의 구조적 한계는 부록 T6 을 본다.
 
 sim 에는 SLAM 이 없으므로 캡처된 점 개수를 프록시로 삼아, 일부러 나쁜 자세를 줘서 lost 를
 유발하는 방식으로 이 흐름을 검증했다.
@@ -254,7 +316,9 @@ cd <MMS repo>
 | 변수 | 뜻 | 스크립트 기본 |
 |---|---|---|
 | `MMS_SIM_PHASE_MODE` | 1 / 2 / 3 (누적) | 1 |
-| `MMS_SIM_P1_MODE` | `planner`(밴드 플래너) 또는 `legacy` | planner |
+| `MMS_SIM_P1_MODE` | `planner`(§3 채점기 + 밴드 플래너) 또는 `legacy` | planner |
+| `MMS_SIM_P1_ELS` | 채점할 고도각 후보(°) | `30,40,50,60,70` |
+| `MMS_SIM_PREVIEW_EL` | 계획용 preview 를 찍는 고도각(°) | 30 |
 | `MMS_SIM_NTHETA` | 한 바퀴를 몇 개 θ 로 나눠 캡처할지 | 24 |
 | `MMS_SIM_DRIVE_STEPS` | 자세 이동 보간 step 수 | 20 |
 | `MMS_SIM_USD` | 씬 USD 경로 | 스크립트가 계산 |
@@ -308,8 +372,8 @@ mms_artec/nbv/artec_streaming_scan_session.py   ★ 실물 streaming SLAM
     ArtecStreamingScanSession.run()     # → ArtecStreamingScanResult
 mms_artec/nbv/artec_multipass_scan_session.py   # Phase 1+2 오케스트레이션 + recovery 로직 + view-score
 mms_artec/nbv/live_scan_viewer.py               # SDK 정합행렬 누적 뷰어
-utils/nbv/phase1_viewpoint.py                   # 밴드 분할·순서 계획
-mms_artec/nbv/recovery_pose_selector.py         # Spider 광학 상수, 자세 후보
+utils/nbv/phase1_viewpoint.py                   # ★ §3 maximin 채점 + §4 밴드 분할·순서 (sim/real 공용)
+mms_artec/nbv/recovery_pose_selector.py         # 복구용 Spider 광학 상수, 자세 후보
 utils/turntable/turntable_interface.py          # 실물 턴테이블 (move_velocity/getActualPos, UDP)
 mms_artec/backends/isaac/isaac_turntable.py     # sim 턴테이블 (RevoluteJoint)
 
@@ -360,12 +424,16 @@ Phase 1 경계가 408mm → 227mm 로 줄었다.
 그러면 밴드 계획 자체가 틀어진다. z_cover 경계 사례(0.67, 0.71)가 이 탓일 가능성이 있으나
 검증되지 않았다.
 
-### T6. 〔한계〕 view-score 는 θ 한 시점만 본다
+### T6. 〔한계〕 복구용 view-score 는 θ 한 시점만 본다
 
-현재 score 는 θ=0 의 preview 하나만 평가한다. 손잡이나 주둥이가 달린 비대칭 물체는 θ 마다
-최적 φ 가 다를 수 있는데 360° 동안 로봇은 고정이므로, 한 시점 기준으로 고른 φ 가 다른
-구간에서 나쁠 수 있다. 미구현 해결안은 세 가지다 — ① probe 로 얻은 물체점을 축 기준으로
-회전 보정해 가상의 θ N개를 합산, ② 후보마다 짧게 회전시켜 평균, ③ top-K 를 뽑아 multi-pass.
+§6 의 view-score 는 θ=0 의 preview 하나만 평가한다. 손잡이나 주둥이가 달린 비대칭 물체는
+θ 마다 최적 φ 가 다를 수 있는데 360° 동안 로봇은 고정이므로, 한 시점 기준으로 고른 φ 가
+다른 구간에서 나쁠 수 있다. 미구현 해결안은 세 가지다 — ① probe 로 얻은 물체점을 축 기준
+으로 회전 보정해 가상의 θ N개를 합산, ② 후보마다 짧게 회전시켜 평균, ③ top-K 를 뽑아
+multi-pass.
+
+§3 의 maximin 채점기는 애초에 θ 를 36등분해 한 바퀴를 돌려보므로 이 한계가 없다. 복구
+경로가 이걸 쓰지 않는 이유는 시간뿐이다 — 복구 중에는 물체를 한 바퀴 돌릴 여유가 없다.
 
 ### T7. 스캔 시작 직후 lost 로 오판된다
 
@@ -376,11 +444,26 @@ warm-up 구간이 곧바로 lost 로 잡힌다.
 ### T8. 지켜야 할 규약 몇 가지
 
 - **연속 회전 + 최대 FPS.** 겹침이 생명이므로 각도를 띄엄띄엄 옮기지 않는다.
-- **시작 자세는 home 그대로.** 사전 probe 를 넣지 않는다. lost 가 났을 때만 recovery 로직이
-  자세를 탐색한다.
+- **시작 자세는 sim 과 real 이 다르다.** sim 은 §3 채점기가 고르고, real 은 아직 home 에서
+  출발한다. real 에서 시작 자세를 바꾸려면 §3.4 와 T9 를 먼저 읽는다.
 - **라이브 뷰어 누적은 SDK 정합행렬만 쓴다.** θ·yaml·hand-eye 를 섞으면 뷰어가 SLAM 의
   거울이 아니게 되어 디버깅 가치가 사라진다.
 - **sim 에는 SLAM 이 없다.** GT θ 와 축으로 누적할 뿐이고, 실물은 그 위에 SLAM 만 얹는다.
   sim 이 잘 된다고 실물 정합이 잘 된다는 뜻은 아니다.
 - **last-good θ** 는 `reg_err ≥ 0` 인 마지막 θ 이며 recovery 로직 safe-back 의 유일한 기준이다.
 - **턴테이블 정지는 stop_event 로 즉시** 이뤄져야 한다. 별도 thread 가 이를 감시한다.
+
+### T9. 〔미검증〕 real 의 시작 자세 선정이 아직 안 붙어 있다
+
+§3 의 `plan_phase1_viewpoints` 는 sim 에서만 돌고 있고, real 은 2026-05-20 결정에 따라
+home 자세로 그대로 출발한다. 채점기 자체는 입력이 점군과 캘리브 상수뿐인 공용 코어라
+백엔드 의존이 없지만, 실물에 붙이려면 두 가지가 남아 있다.
+
+1. **점군 공급** — sim 은 preview 로 점군을 만든다. real 은 home 에서 0°/90° 두 장을
+   정적 캡처해 넣는 방식으로 설계돼 있다(`simulate_planning_captures` 의 real 대응).
+2. **광축 규약** — 채점기는 USD look-at 규약(광축 −Z, up = world +Z)을 쓴다. real 백엔드에서
+   Artec 광축 규약으로 맞춰 줘야 한다.
+
+`fill_target`(12cm²)과 `fill_min`(6cm²)은 sim 기준값이므로, 실물 SLAM 이 실제로 버티는
+최소 가시면적에 맞춰 다시 잡아야 한다. 이 값을 그대로 쓰면 real 에서 `tracking_risk`
+경고가 과다하거나 과소하게 뜬다.
