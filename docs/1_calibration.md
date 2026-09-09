@@ -180,7 +180,18 @@ MMS_RIM_AUTO=1 env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python \
     scripts/sim/calib_rim_sim.py
 ```
 
-**옵션** — `--gui` 화면 표시 · `--max-steps N` 상한(기본 20000) · `--out DIR` 산출물 위치
+**기본은 헤드리스다.** 화면으로 보려면 `--gui` 를 붙인다.
+
+```bash
+env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u \
+    scripts/sim/calib_handeye_sim.py --gui
+```
+
+| 옵션 | 뜻 |
+|---|---|
+| `--gui` | Isaac 창 표시 (기본: 헤드리스) |
+| `--max-steps N` | update 상한 (기본 20000, 정상 완주 ~4600) |
+| `--out DIR` | 산출물 위치 (기본 `scripts/sim/log/handeye`) |
 
 **결과** (2026-09-09 실측, v3 씬)
 
@@ -194,9 +205,16 @@ MMS_RIM_AUTO=1 env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python \
 기준: `t_err < 5mm`, `r_err < 2°`. 로그·`handeye_result.npz` 는
 `scripts/sim/log/handeye/captures_calib/` 에 남는다.
 
-> `calib_handeye_sim.py` 는 `sim_harness/MMS_ext_calibration.py` 의 검증 로직을
-> **그대로 재사용**한다(복제 아님). SimulationApp 을 직접 띄우고 `app.update()` 로
-> 물리 콜백을 돌려 `phase == DONE` 까지 진행시키는 얇은 러너다.
+> **공통 로직은 `utils/calibration/handeye_sim.py` 한 곳에 있다.**
+> 보드 규격·자세 생성·풀이·GT 비교·판정 임계가 거기 정의돼 있고,
+> GUI 하니스와 standalone 러너가 그것을 공유한다. 두 경로가 다른 코드를 돌면
+> sim 검증의 의미가 없어지기 때문이다.
+>
+> | 파일 | 역할 |
+> |---|---|
+> | `utils/calibration/handeye_sim.py` | 공통 로직 (omni 무관) |
+> | `sim_harness/MMS_ext_calibration.py` | GUI 드라이버 — USD 보드 생성·렌더·관절구동 |
+> | `scripts/sim/calib_handeye_sim.py` | standalone 러너 — SimulationApp 기동·스텝 진행 |
 
 ### sim 검증 — Isaac GUI Script Editor (대안)
 

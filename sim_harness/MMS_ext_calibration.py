@@ -133,6 +133,8 @@ try:
     generate_hemisphere_poses = geo.generate_hemisphere_poses
     # pluggable IK provider (로봇제어) — MMS 라이브러리
     RobotIK = _load_mod("mms_ik_provider", "utils/robot/ik_provider.py").RobotIK
+    # 공통 검증 로직 — standalone 러너와 공유 (utils/calibration/handeye_sim.py)
+    HS = _load_mod("mms_handeye_sim", "utils/calibration/handeye_sim.py")
     _HAS_CALIB = True
 except Exception as _e:
     ArtecCharucoDetector = CharucoBoardSpec = HandEyeCalibrator = None
@@ -166,14 +168,10 @@ ARTEC_HOME_JOINTS_DEG = [38.92, -48.70, -65.29, 21.22, 21.46, 72.70, -96.58]
 
 # ── ChArUco 보드 (실기 spider 프리셋: 5×3, 20mm/15mm, DICT_4X4_50) ─────────────
 #   CharucoBoardSpec 는 mm 규약 → solvePnP T_MC 가 mm (HandEyeCalibrator 기대치와 일치).
-CH_SQUARES_X, CH_SQUARES_Y = 5, 3
-CH_SQUARE_LEN_MM = 20.0
-CH_MARKER_LEN_MM = 15.0
-CH_ARUCO_DICT    = "DICT_4X4_50"
-CH_BOARD_W_M     = CH_SQUARES_X * CH_SQUARE_LEN_MM / 1000.0   # 0.10
-CH_BOARD_H_M     = CH_SQUARES_Y * CH_SQUARE_LEN_MM / 1000.0   # 0.06
-CH_BOARD_THICK_M = 0.006
-CH_IMG_PX        = (1000, 600)
+BOARD_CFG        = HS.BoardConfig()          # 공유 정의 (utils/calibration/handeye_sim)
+CH_BOARD_W_M     = BOARD_CFG.width_m
+CH_BOARD_H_M     = BOARD_CFG.height_m
+CH_BOARD_THICK_M = BOARD_CFG.thick_m
 BOARD_PRIM_PATH  = "/World/CharucoBoard"
 
 # ── 보드 낙하/안착 (턴테이블 top=z 0.713, XY중심 (0.325,-0.022), 0.15×0.15m) ───
@@ -185,14 +183,8 @@ BOARD_SETTLE_STEPS = 150
 MARBLE_PRIM_PATH   = os.environ.get("MMS_SIM_OBJECT_PRIM", "/World/ScanTarget/TestObject")
 
 # ── 캘리브 자세: 안착 보드 위 반구에서 내려다보기 ─────────────────────────────
-CALIB_DISTANCE_M   = 0.25
-CALIB_POLARS_DEG   = [0.0, 12.0, 22.0]
-CALIB_AZIS_DEG     = [0.0, 72.0, 144.0, 216.0, 288.0]
-CALIB_ROLLS_DEG    = [-20.0, 0.0, 20.0]
-CALIB_DIST_JITTER  = [-0.02, 0.0, 0.02]
-# look-at 기준 x축(이미지 up). 손목 roll 결정 — 관절공간 구동에선 IK 가 분기를 고르므로
-# 또아리와 무관하나, 이미지 방향 일관성을 위해 유지.
-CALIB_UP_HINT      = (1.0, 0.0, 0.0)
+POSE_CFG           = HS.PoseConfig()         # 공유 정의
+
 
 # ── 상태머신 타이밍 ───────────────────────────────────────────────────────────
 SETTLE_STABLE_N    = 15        # 관절 수렴 연속 N 스텝이면 캡처
@@ -233,7 +225,7 @@ print(f"[CALIB] ===== run start =====  (kin={_HAS_KIN}, calib_modules={_HAS_CALI
 print(f"[CALIB] log file: {LOG_PATH}")
 
 R_FLIP = np.diag([1.0, -1.0, -1.0])
-T_FLIP = np.eye(4); T_FLIP[:3, :3] = R_FLIP
+T_FLIP = HS.T_FLIP            # 공유 (USD ↔ OpenCV 카메라 프레임)
 
 
 # 수학 유틸(make_T/inv_T/quat_wxyz_to_R/rot_angle_deg/mat_to_pose6d_mm/자세생성)과
@@ -287,19 +279,13 @@ def configure_scanner_camera(stage, cam_path):
 
 
 def make_board_spec():
-    """실물과 동일한 CharucoBoardSpec (mm). 검출기·텍스처 생성 공용 단일 정의."""
-    return CharucoBoardSpec(
-        squares_x=CH_SQUARES_X, squares_y=CH_SQUARES_Y,
-        square_length_mm=CH_SQUARE_LEN_MM, marker_length_mm=CH_MARKER_LEN_MM,
-        aruco_dict=getattr(cv2.aruco, CH_ARUCO_DICT))
+    """→ utils/calibration/handeye_sim.make_board_spec (공유)"""
+    return HS.make_board_spec(BOARD_CFG, CharucoBoardSpec, cv2)
 
 
 def write_board_texture(board):
-    """cv2 보드(spec.make_board())로 USD 텍스처 PNG 생성 (marginSize=0 → 평면과 1:1)."""
-    os.makedirs(ASSET_DIR, exist_ok=True)
-    img = board.generateImage(CH_IMG_PX, marginSize=0, borderBits=1)
-    cv2.imwrite(BOARD_PNG, img)
-    print(f"[CALIB] ChArUco board image: {BOARD_PNG} ({img.shape[1]}x{img.shape[0]})")
+    """→ utils/calibration/handeye_sim.write_board_texture (공유)"""
+    return HS.write_board_texture(board, BOARD_PNG, BOARD_CFG, cv2, log=print)
 
 
 def _bind_texture_material(stage, mesh, mat_root, png_path):
@@ -397,46 +383,18 @@ def get_prim_world_T(stage, xform_cache, path):
 # Hand-eye 풀이(MMS HandEyeCalibrator) + sim 전용 GT 비교
 # ============================================================================
 def solve_and_report(ctx):
-    cal = ctx["calibrator"]
-    if cal.n_samples < 3:
-        print(f"[CALIB][ERROR] 샘플 부족 ({cal.n_samples}). 최소 3. 자세/검출 확인.")
-        return
-    T_EC_gt = ctx["T_EC_gt"]
-    print("\n[CALIB] ===== HAND-EYE 결과 (ground-truth 대비) =====")
-    print(f"[CALIB] 유효 샘플: {cal.n_samples} | IK: {ctx['ik_mode']}")
-    print(f"[CALIB] GT  T_E_C  t(mm)={np.round(T_EC_gt[:3,3]*1000,2).tolist()}")
-    try:
-        # HandEyeCalibrator: T_EC = E→C(EE-in-camera), OpenCV cam frame, m
-        T_EC_ocv = cal.calibrate()
-    except Exception as exc:
-        print(f"[CALIB][ERROR] HandEyeCalibrator.calibrate 실패: {exc}")
-        return
-    # OpenCV cam → USD cam 환산. T_EC 는 카메라가 출력(행)측 → flip 은 왼쪽곱.
-    T_EC_est = T_FLIP @ T_EC_ocv
-    t_err = float(np.linalg.norm(T_EC_est[:3, 3] - T_EC_gt[:3, 3]) * 1000.0)
-    r_err = rot_angle_deg(T_EC_est[:3, :3], T_EC_gt[:3, :3])
-    print(f"[CALIB] >>> t_err={t_err:.2f} mm  r_err={r_err:.2f}°")
-    print(f"[CALIB]     EST t(mm)={np.round(T_EC_est[:3,3]*1000,2).tolist()}")
-    verdict = "PASS ✅" if (t_err < 5.0 and r_err < 2.0) else "CHECK ⚠"
-    print(f"[CALIB]     판정: {verdict}")
-    os.makedirs(OUT_DIR, exist_ok=True)
-    np.savez(os.path.join(OUT_DIR, "handeye_result.npz"),
-             T_EC_gt=T_EC_gt, T_EC_est=T_EC_est, t_err_mm=t_err, r_err_deg=r_err,
-             n_samples=cal.n_samples, ik_mode=ctx["ik_mode"])
-    print("[CALIB] ===== COMPLETE =====\n")
+    """→ utils/calibration/handeye_sim.solve_and_report (공유)"""
+    return HS.solve_and_report(ctx["calibrator"], ctx["T_EC_gt"], ctx["ik_mode"],
+                               OUT_DIR, rot_angle_deg, log=print)
 
 
 # ============================================================================
 # 자세 생성 — MMS handeye_geometry.generate_hemisphere_poses 에 config 만 주입
 # ============================================================================
 def build_calibration_poses(board_center, board_normal):
-    poses = generate_hemisphere_poses(
-        board_center, board_normal, _ctx["T_EC_gt"],
-        distance_m=CALIB_DISTANCE_M, polars_deg=CALIB_POLARS_DEG,
-        azis_deg=CALIB_AZIS_DEG, rolls_deg=CALIB_ROLLS_DEG,
-        dist_jitter=CALIB_DIST_JITTER, up_hint=CALIB_UP_HINT)
-    print(f"[CALIB] 캘리브 자세: {len(poses)} (보드중심 {np.round(board_center,3).tolist()})")
-    return poses
+    """→ utils/calibration/handeye_sim.build_calibration_poses (공유)"""
+    return HS.build_calibration_poses(board_center, board_normal, _ctx["T_EC_gt"],
+                                      POSE_CFG, generate_hemisphere_poses, log=print)
 
 
 # ============================================================================
