@@ -22,11 +22,13 @@
 | **C** | 카메라 광학 프레임 |
 | **M** | 마커(보드) 프레임 |
 
-구하려는 값: **`T_EC`** = "E와 C의 고정 관계" (카메라가 손목에 붙은 방식). 한 번 구하면
-센서 교체·재설치 전까지 안 변하는 상수 → `config/sensor_frames.yaml::T_EC_artec` 에 저장.
+구하려는 값은 **`T_EC`**, 즉 카메라가 로봇 손목에 붙어 있는 고정 관계다. 센서를 교체하거나
+다시 설치하기 전까지는 변하지 않는 상수이므로, 한 번 구해 `config/sensor_frames.yaml` 의
+`T_EC_artec` 에 저장해 두고 계속 쓴다.
 
-> ★ **규약 (헷갈리면 다 틀어짐):** `T_EC` 는 **E→C**, 즉 `x_C = T_EC · x_E` (= "EE-in-camera").
-> 시스템 전체가 이 정의를 쓴다 → `utils/transforms.py::compute_T_CB`: `T_CB = T_EB · inv(T_EC)`.
+> **규약을 틀리면 전부 어긋난다.** `T_EC` 는 **E→C** 방향이다(`x_C = T_EC · x_E`).
+> 시스템 전체가 이 정의를 따르며, 그 출처는 `utils/transforms.py::compute_T_CB`
+> (`T_CB = T_EB · inv(T_EC)`) 이다.
 
 ---
 
@@ -56,12 +58,13 @@
 | ⑤ 누적 | `HandEyeCalibrator.add_sample` | 공통 | 공통 |
 | 풀이 | `HandEyeCalibrator.calibrate` → `T_EC` | 공통 | 공통 |
 
-> 보드 물리 사양(5×3, 20/15mm, `DICT_4X4_50`)은 `CharucoBoardSpec` 하나로 정의하고
-> **검출기와 텍스처 생성이 공유**한다. 실물 인쇄본과 sim 텍스처가 어긋나면 안 되기 때문.
+> 보드의 물리 사양(5×3, 20/15mm, `DICT_4X4_50`)은 `CharucoBoardSpec` 한 곳에서만 정의하고
+> 검출기와 텍스처 생성이 그것을 공유한다. 실물 인쇄본과 sim 텍스처가 어긋나면
+> 검출 자체가 무의미해지기 때문이다.
 
 > ⚠ **① 자세 생성은 아직 sim 만 공유 코드를 쓴다.** 설계 의도는 real 도
-> `generate_hemisphere_poses` 를 쓰는 것이고 그래서 sim 에서 먼저 만든 것인데,
-> `scripts/artec/hand_eye_calib.py` 는 현재 teach/yaml 순회만 지원한다. → **T8**
+> `generate_hemisphere_poses` 를 쓰는 것이었고 그래서 sim 에서 먼저 구현했으나,
+> `scripts/artec/hand_eye_calib.py` 는 현재 teach/yaml 순회만 지원한다. 자세한 내용은 **T8**.
 
 ---
 
@@ -144,59 +147,72 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 | **B** | 로봇 base (월드) |
 | **F** | 턴테이블 프레임 (원점=회전축이 disc **표면**과 만나는 점, z=회전축, θ=0 기준) |
 
-구하려는 값: **`T_B_F0`** = "턴테이블이 base 기준 어디서·어느 축으로 도나". 한 번 구하면 하드웨어
-이동 전까지 상수 → `config/calibration/turntable_frame.yaml` 저장.
+구하려는 값은 **`T_B_F0`**, 즉 턴테이블이 로봇 base 기준으로 어디에 있고 어느 축으로 도는가다.
+하드웨어를 옮기기 전까지는 상수이므로 `config/calibration/turntable_frame.yaml` 에 저장한다.
 
-> ★ 규약: `T_B_F0` 는 **B→F** (`x_F = T_B_F0·x_B`). F 의 z = 회전축(위쪽), 원점 = 표면 위 축점.
+> **규약**: `T_B_F0` 는 **B→F** 방향이다(`x_F = T_B_F0 · x_B`).
+> F 프레임의 z축은 회전축(위쪽), 원점은 축이 disc 표면과 만나는 점이다.
 
-왜 필요 — Phase 2 hint·NBV·recovery·충돌회피가 전부 "턴테이블이 base 기준 어디서 도나"에 의존.
-하드웨어팀이 옮기면 무효화 → **버튼 하나로 다시 잡는** 루틴.
+Phase 2 의 조준, NBV 계획, tracking-lost recovery, 충돌 회피가 모두 이 값에 의존한다.
+하드웨어를 옮기면 전부 무효가 되므로, 다시 잡는 절차를 간단하게 유지하는 것이 중요하다.
 
-## 5. 핵심 원리 — "회전하면 원을 그린다"
+## 5. Rim 방법
 
-> 회전판에 고정된 점은 회전축 둘레로 **원**을 그린다 → 원 법선 = 축방향, 중심 = 축 위 한 점.
-
-disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 3D 로 모아 원을 피팅하면 축이 나온다.
-
-> ★ **축 ≠ 표면**: rim/궤적 높이 ≠ disc 표면 높이일 수 있음. 충돌회피·대상물 높이를 위해 disc
-> **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(§8).
-
-## 6. Rim 방법 — 흐름 + 함수
+회전판에 고정된 점은 회전축 둘레로 원을 그린다. 따라서 원의 법선이 축 방향이고
+중심은 축 위의 한 점이다. disc 가장자리(rim)는 그 자체가 축 둘레의 원이므로,
+rim 위의 점들을 3D 로 모아 원을 피팅하면 축을 얻을 수 있다.
 
 ```
-로봇이 disc rim 을 보는 자세 → 1회 캡처 (organized 포인트클라우드 + T_CB)
-        │  ※ 카메라 위치는 로봇이 알려줌: 점 → 센서C → T_CB(=T_EC·FK) → base. Artec SLAM 미사용.
+로봇이 disc rim 을 보는 자세 → 1회 캡처 (organized 점군 + T_CB)
         ▼
    rim 위 점 취득
-        │   real: 사용자가 rim 위 3+점 **클릭** (RimPicker)
-        │   sim : 알려진 disc 기하로 rim 점 **자동 추출**(방위 binning 최외곽)
+        │   real : 사용자가 rim 위 3점 이상 클릭
+        │   sim  : 알려진 disc 기하로 자동 추출 (방위 binning 최외곽)
         ▼
-   pts_B (rim, base) → fit_circle_3d → (center, normal, radius, residual)
+   pts_B → fit_circle_3d → (center, normal, radius, residual)
         ▼
-   (+ disc 표면 평면, §8) → build_T_B_F0(center, normal) → T_B_F0
+   (+ 표면 평면, §6) → build_T_B_F0 → T_B_F0
 ```
 
-- UI/수학: `utils/calibration/`
-  - `rim_picker.py` — `RimPicker(intensity, organized_pts, T_CB)` + `run_picker` (OpenCV 클릭:
-    LClick=추가/RClick=취소/Enter=피팅), `show_3d_result` (Open3D). pixel→base 3D 내장.
-  - `turntable_frame.py::fit_circle_3d(pts)` → `(center, normal, radius, residual)` (평면 SVD + 2D 대수 원피팅).
-- ⚠ Spider 좁은 FOV 탓에 rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 취득
-  (3점이면 가능하나 호가 짧으면 조건수↓).
+카메라의 위치는 로봇이 알려준다. 점군은 `센서 C → T_CB(= T_EC·FK) → base` 경로로
+변환하며, Artec 의 SLAM 은 쓰지 않는다. hand-eye 와 같은 철학이다.
 
-## 7. 표면 평면 → `T_B_F0` 빌드
+**담당 함수** — 둘 다 `utils/calibration/` 에 있다.
 
-축(방향+XY)만으론 부족 → disc **표면**으로 원점 높이 확정:
-- `turntable_frame.py`
-  - `fit_plane(pts)` → 표면 평면(점·법선, SVD).
-  - `build_T_B_F0(center_B, nz_B)` → F 프레임(원점=center, z=nz, x=base x 투영, y=z×x) → **B→F**.
-  - `save_turntable_frame_yaml(...)` → translation(m) + quat 저장.
-- (선택) `mms_artec/system.py::ArtecMMS.disc_surface_frame(disc_points_base, axis_point, axis_dir)` —
-  표면 평면 ∩ 축선 = F0 원점, z축은 축방향, 평면법선은 교차검증. (구 어레이 경로용이었으나
-  rim center/normal 을 바로 `build_T_B_F0` 에 넣어도 됨 — rim 은 표면 근처라 단순.)
+| 함수 | 하는 일 |
+|---|---|
+| `rim_picker.RimPicker(intensity, organized_pts, T_CB)` | OpenCV 클릭 UI. 좌클릭 추가 / 우클릭 취소 / Enter 피팅. 픽셀→base 3D 변환을 내장한다 |
+| `rim_picker.show_3d_result(...)` | Open3D 로 피팅 결과 확인 |
+| `turntable_frame.fit_circle_3d(pts)` | 평면 SVD + 2D 대수 원피팅 → `(center, normal, radius, residual)` |
+
+> Spider 는 FOV 가 좁아 rim 전체가 한 화면에 들어오지 않을 수 있다. 그럴 때는 보이는
+> 호(arc)에서 점을 취득한다. 원 피팅은 3점이면 성립하지만 호가 짧으면 조건수가 나빠진다.
 
 ---
 
-## 8. 실행 — 턴테이블 만
+## 6. 표면 평면으로 원점 높이 확정
+
+원 피팅이 주는 것은 축의 **방향과 XY 위치**뿐이다. 3차원 좌표계를 세우려면 원점의
+높이가 필요한데, rim 이 그리는 궤적의 높이가 disc 표면 높이와 같다는 보장이 없다.
+그래서 disc **표면 평면**을 따로 피팅하고, 그 평면과 축선이 만나는 점을 F 프레임의
+원점으로 삼는다. 이 높이는 충돌 회피와 대상물 높이 기준으로 쓰인다.
+
+F 프레임은 다음과 같이 정의된다. 원점은 위에서 구한 표면 위의 축점, z축은 축 방향,
+x축은 base 의 x축을 그 평면에 투영한 것, y축은 z×x 이다.
+
+| 함수 | 하는 일 |
+|---|---|
+| `turntable_frame.fit_plane(pts)` | 표면 평면을 SVD 로 피팅 → `(point, normal, residual)` |
+| `turntable_frame.build_T_B_F0(center_B, nz_B)` | 위 정의대로 F 프레임을 세워 **B→F** 변환 반환 |
+| `turntable_frame.save_turntable_frame_yaml(...)` | translation(m) + quaternion 으로 저장 |
+
+`ArtecMMS.disc_surface_frame(disc_points_base, axis_point, axis_dir)` 도 같은 일을 하며,
+평면 법선과 축 방향을 교차검증한다는 점이 다르다. 다만 rim 점은 이미 표면 근처에 있으므로
+`fit_circle_3d` 가 낸 center·normal 을 `build_T_B_F0` 에 그대로 넣어도 무방하다.
+
+---
+
+## 7. 실행 — 턴테이블 만
 
 > 처음부터 전체를 잡는 경우엔 **Part 3**(`calibrate.py`)을 쓴다.
 > 아래는 **`T_EC` 가 이미 있고 턴테이블만 다시 잡을 때**(기계 이설·재조립 후)다.
@@ -218,7 +234,8 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3
 
 ### sim 검증
 
-Isaac python 은 cv2 가 headless 라 클릭 창을 못 연다 → **캡처와 클릭을 분리**한다.
+Isaac python 은 cv2 가 headless 로 빌드돼 있어 클릭 창을 띄울 수 없다.
+그래서 캡처와 클릭을 두 단계로 분리한다.
 
 ```bash
 ISAAC=~/miniconda3/envs/env_isaacsim/bin/python
@@ -273,7 +290,7 @@ env -u PYTHONPATH python scripts/sim/rim_click_offline.py        # 2) 클릭+피
 
 Part 1·2 를 **정해진 순서로** 돌린다.
 
-## 9. 실행 순서
+## 8. 실행 순서
 
 캘리브 스크립트는 **단계별로 하나씩** 있고, `calibrate.py` 가 그것들을 **순서대로 호출**한다.
 
@@ -316,7 +333,7 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3  # 3단계만
 >
 > 보드를 원판 위에 두면 2→3 을 **같은 조준 자세에서 이어서** 할 수 있어 0단계를 한 번만 한다.
 
-**개별 실행** — 한 단계만 다시 잡거나 인자를 주고 싶을 때. 자세히는 §3(hand-eye) · §8(turntable).
+**개별 실행** — 한 단계만 다시 잡거나 인자를 주고 싶을 때. 자세히는 §3(hand-eye) · §7(turntable).
 
 ```bash
 env -u PYTHONPATH python scripts/artec/make_charuco.py            # 보드 PNG (최초 1회, 실척 인쇄)
@@ -332,7 +349,7 @@ env -u PYTHONPATH python scripts/artec/turntable_calib.py
 
 ---
 
-## 10. 코드 지도
+## 9. 코드 지도
 
 **공유 라이브러리 — sim·real 공통 (★ 핵심)**
 
@@ -384,8 +401,9 @@ env -u PYTHONPATH python scripts/artec/turntable_calib.py
 | `T_B_F0` | **B→F** (`x_F = T_B_F0·x_B`) |
 | sim GT | `inv(T_W_C) @ T_W_E` — **거꾸로 잡으면 결과가 멀쩡한데도 틀려 보인다** |
 
-**카메라 프레임 USD vs OpenCV** — USD/Isaac 카메라는 광축 **−Z·+Y up**,
-solvePnP(OpenCV)는 **+Z·+Y down**. 차이는 `R_FLIP = diag(1,−1,−1)`.
+USD/Isaac 카메라와 OpenCV 는 카메라 프레임 규약이 다르다. USD 는 광축이 **−Z** 이고 **+Y** 가
+위쪽인 반면, solvePnP 가 쓰는 OpenCV 는 광축이 **+Z** 이고 **+Y** 가 아래쪽이다.
+두 규약의 차이는 `R_FLIP = diag(1, −1, −1)` 로 표현된다.
 
 ```
 T_EC_usd = R_FLIP @ T_EC_ocv      ← T_EC 는 카메라가 출력측이라 왼쪽곱
