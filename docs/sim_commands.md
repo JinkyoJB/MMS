@@ -231,7 +231,6 @@ python scripts/sim/build_results_page.py   # docs/testset_results.md 의 웹판 
 
 ## 관련 문서
 
-- `docs/v3_sim_migration.md` — v2→v3 이관 현황, 남은 blocker
 - `docs/testset_results.md` — 9종 스윕 결과(GT 지표·결함 7건·렌더)
 - `$ASSET/v3_scene_IK.md` — 드래그 IK 타깃 방법론(다른 로봇 재사용용)
 - `README.md` — 전체 파이프라인 개요

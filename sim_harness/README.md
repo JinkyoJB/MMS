@@ -76,7 +76,7 @@ env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration.py"
 
 ## 씬 버전 — v3 기준으로 갱신 완료 (2026-09)
 
-작성 시점은 2026-06(v2 씬)이었으나, 08 월 v3 전환(`docs/v3_sim_migration.md`)에 맞춰
+작성 시점은 2026-06(v2 씬)이었으나, 2026-08 v3 전환에 맞춰
 상수를 갱신했다.
 
 | | 기존(v2) | 현재(v3) |
