@@ -223,11 +223,33 @@ env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u \
 **결과** (2026-09-09 실측, v3 씬)
 
 ```
-[CALIB] 유효 샘플: 11 | IK: analytic
-[CALIB] GT  T_E_C  t(mm)=[-16.34, -163.87, 56.86]
-[CALIB] >>> t_err=1.10 mm  r_err=0.04°
+[CALIB] 캘리브 자세: 16 (보드중심 [0.365, -0.0, 0.672])
+[CALIB] 유효 샘플: 16 | IK: analytic
+[CALIB] >>> t_err=1.00 mm  r_err=0.08°
 [CALIB]     판정: PASS ✅
 ```
+
+#### 자세를 몇 개나 모으나
+
+`polar 0°(수직) 1개 + polar>0 × 방위 5개`. 기본 `(0,15,30,45)×5` → **16 자세**.
+
+hand-eye(`AX=ZB`)는 **자세 간 회전 다양성**이 있어야 풀린다(권장 15~25 자세,
+자세 간 회전 ≥30°). 아래는 그 기본값을 고른 근거다.
+
+| 구성 | 생성 | 유효 | t_err | r_err | 시간 |
+|---|---|---|---|---|---|
+| (0,12,22)×5 (구 기본) | 11 | 11 | 1.10mm | 0.15° | 47s |
+| **(0,15,30,45)×5** | **16** | **16** | **1.01mm** | **0.08°** | 76s |
+| (0,15,30,45)×6 | 19 | 16 | 1.30mm | 0.13° | 63s |
+
+- polar 를 45°까지 넓히자 **회전오차가 절반**(0.15→0.08°)
+- 방위를 6개로 늘리면 **IK 도달 실패 3건** — 유효 샘플은 그대로인데 결과만 나빠진다
+
+> sim 은 검출 잡음이 없어 11 자세로도 수렴한다. **실물은 잡음이 있어 회전 다양성이
+> 더 중요하다**(실측 3.55mm). 실기 캘리브 시 자세를 아끼지 말 것.
+
+조정: `MMS_CALIB_POLARS=0,15,30,45` · `MMS_CALIB_AZIS` · `MMS_CALIB_ROLLS` ·
+`MMS_CALIB_JITTER` · `MMS_CALIB_DIST`
 
 기준: `t_err < 5mm`, `r_err < 2°`. 로그·`handeye_result.npz` 는
 `scripts/sim/log/handeye/captures_calib/` 에 남는다.

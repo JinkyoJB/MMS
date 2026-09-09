@@ -51,14 +51,43 @@ class BoardConfig:
         return self.squares_y * self.square_len_mm / 1000.0
 
 
+def _env_list(name: str, default: Sequence[float]) -> Sequence[float]:
+    """쉼표 구분 실수 목록 env override. 예: MMS_CALIB_POLARS=0,15,30,45"""
+    v = os.environ.get(name)
+    if not v:
+        return default
+    return tuple(float(x) for x in v.replace(" ", "").split(",") if x)
+
+
 @dataclass
 class PoseConfig:
-    """캘리브 자세 — 보드 위 반구에서 내려다본다."""
-    distance_m: float = 0.25
-    polars_deg: Sequence[float] = (0.0, 12.0, 22.0)
-    azis_deg: Sequence[float] = (0.0, 72.0, 144.0, 216.0, 288.0)
-    rolls_deg: Sequence[float] = (-20.0, 0.0, 20.0)
-    dist_jitter: Sequence[float] = (-0.02, 0.0, 0.02)
+    """캘리브 자세 — 보드 위 반구에서 내려다본다.
+
+    자세 수 = 1(nadir) + (polar>0 개수) × (azimuth 개수).
+    기본 (0,15,30,45)×5방위 → **16개**.
+
+    hand-eye(AX=ZB)는 **자세 간 회전 다양성**이 있어야 잘 풀린다(권장: 15~25 자세,
+    자세 간 회전 ≥30°). 아래 값은 sim 실측(2026-09-09)으로 고른 것이다.
+
+    | 구성 | 생성 | 유효 | t_err | r_err | 시간 |
+    |---|---|---|---|---|---|
+    | (0,12,22)×5  | 11 | 11 | 1.10mm | 0.15° | 47s |
+    | **(0,15,30,45)×5** | **16** | **16** | **1.01mm** | **0.08°** | 76s |
+    | (0,15,30,45)×6 | 19 | 16 | 1.30mm | 0.13° | 63s |
+
+    polar 를 45° 까지 넓히니 회전오차가 절반이 됐다. 반면 방위를 6개로 늘리면
+    **IK 도달 실패가 3건** 생겨 유효 샘플이 그대로이면서 결과만 나빠진다
+    → 방위는 5개 유지. env 로 조정 가능(`MMS_CALIB_POLARS` 등).
+    """
+    distance_m: float = float(os.environ.get("MMS_CALIB_DIST", 0.25))
+    polars_deg: Sequence[float] = field(
+        default_factory=lambda: _env_list("MMS_CALIB_POLARS", (0.0, 15.0, 30.0, 45.0)))
+    azis_deg: Sequence[float] = field(
+        default_factory=lambda: _env_list("MMS_CALIB_AZIS", (0.0, 72.0, 144.0, 216.0, 288.0)))
+    rolls_deg: Sequence[float] = field(
+        default_factory=lambda: _env_list("MMS_CALIB_ROLLS", (-20.0, 0.0, 20.0)))
+    dist_jitter: Sequence[float] = field(
+        default_factory=lambda: _env_list("MMS_CALIB_JITTER", (-0.02, 0.0, 0.02)))
     #: look-at 기준 x축(이미지 up). 관절공간 구동에선 IK 가 분기를 고르므로
     #: 또아리와 무관하나, 이미지 방향 일관성을 위해 유지.
     up_hint: tuple[float, float, float] = (1.0, 0.0, 0.0)
