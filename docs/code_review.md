@@ -156,7 +156,7 @@ main()                                                  # main_artec.py:317
   → 크고 높은 객체는 **z 수축** 필요.
 - sim 경로: `IsaacScanSession`(production, `main_artec.py` isaac) / `MMS_ext_phase2_nbv.py`(하니스).
 
-### 4.4 Phase 3 — 바닥면 (180° flip)  (기존 flip 흐름, docs/3_phase2.md §8)  ♻️
+### 4.4 Phase 3 — 바닥면 (180° flip)  (docs/5_phase3_merge.md)  ♻️
 디스크에 닿아 Phase 1·2 가 못 잡는 **바닥면**을 사용자가 객체를 뒤집어 추가 스캔.
 **이전엔 "Phase 2"로 불렸으나 본 설계에서 Phase 3 로 분리**(Phase 2 = NBV 로 재정의).
 

@@ -4,7 +4,7 @@
 > **결과 메시가 어긋나거나 둥둥 떠 있으면 거의 항상 `T_pre` 문제다.**
 >
 > 관련: Phase 1 = `2_phase1.md` · Phase 2 = `3_phase2.md` ·
-> 정합 게이트(bbox 팽창) = `3_phase2.md` §4
+> 정합 게이트(bbox 팽창) 구현 = `utils/nbv/icp_strategy.py`
 
 ---
 
