@@ -27,7 +27,7 @@
 
 ---
 
-## 2. 왜 스트리밍 SLAM 인가
+## 2. 적용된 로직 — 연속 회전 스트리밍 스캔
 
 Artec Spider 는 한 frame 의 좌표를 **직전 frame 에 정합해서** 얻는다. 절대 좌표를 프레임마다
 따로 주는 센서와 달리 기준이 상대적이므로, 한 frame 을 놓치면 그 다음부터 좌표를 이어붙일
@@ -38,13 +38,14 @@ Artec Spider 는 한 frame 의 좌표를 **직전 frame 에 정합해서** 얻�
 회전시키면서 최대 FPS 로 찍어** 매 frame 이 직전 frame 과 겹치게 한다. 회전을 멈추고
 자세를 옮기는 방식은 쓰지 않는다.
 
-이 성질 때문에 Phase 1 에는 추적 상태를 실시간으로 감시하는 watchdog(§6)과, 끊겼을 때
-되돌아갈 지점(last-good θ)이 반드시 필요하다.
+이 성질 때문에 Phase 1 에는 추적 상태를 실시간으로 감시하는 watchdog 과, 끊겼을 때
+되돌아갈 지점(last-good θ), 그리고 자동 복구 절차가 함께 붙는다(§6).
 
 시작 자세는 **사용자가 눈으로 조준해 둔 home 자세를 그대로 쓴다**(2026-05-20 결정).
 사전 probe 나 elevation 탐색을 하지 않는데, 그 탐색이 모든 스캔에 1~2분을 더하는 데
 비해 잘 조준된 자세면 대개 그냥 성공하기 때문이다. 추적이 끊겨야 비로소 자세가 나쁘다는
-신호이고, 그때만 recovery(§6)가 자세를 다시 고른다.
+신호이고, 그때만 **recovery 로직**(추적을 잃었을 때 자동으로 되돌아가 자세를 다시
+고르는 복구 절차, §6)이 개입한다.
 
 ---
 
@@ -68,7 +69,7 @@ Artec Spider 는 한 frame 의 좌표를 **직전 frame 에 정합해서** 얻�
 모인 자세가 이긴다.**
 
 **언제 호출되나.** 정상 시작 때는 호출하지 않는다(사용자가 맞춘 home 자세로 출발).
-**tracking-lost recovery 흐름에서만** 호출하며, 그때는 후보를 `[-5°, 0°, +5°]` 로 줄이고
+**recovery 로직(§6)이 돌 때만** 호출하며, 그때는 후보를 `[-5°, 0°, +5°]` 로 줄이고
 fine search 를 건너뛰어 30초 안에 끝낸다.
 
 구현은 `artec_multipass_scan_session.py` 의 `_elevation_search`, `_phase1_view_score`,
@@ -139,20 +140,20 @@ view-score 의 구조적 한계는 부록 T6 을 본다.
    - `tt_ctrl.actual_pos_rad` 로 현재 θ 를 읽어 timeline 에 기록한다.
    - 라이브 뷰어에 OK frame 의 `frame_mesh` 와 **SDK 정합행렬 `ev.transformation`** 을
      넘겨 scan-world 좌표로 누적시킨다(§7).
-   - `reg_err ≥ 0` 인 마지막 θ 를 **last-good θ** 로 갱신한다. recovery 가 되돌아갈
-     기준점이다.
+   - `reg_err ≥ 0` 인 마지막 θ 를 **last-good θ** 로 갱신한다. recovery 로직이
+     되돌아갈 기준점이다.
    - watchdog 4개(§6)를 검사하고, 하나라도 걸리면 턴테이블을 즉시 정지시킨다.
    - `tt_ctrl.completed` 면 정상 완료, `aborted` 면 abort 로 빠져나온다.
 
 ### 결과 (`ArtecStreamingScanResult`)
 
 `model`(IModel), `n_frames`, `rotation_actual_deg`, `duration_s`, `fps_actual`,
-`tracking_lost`, `loss_reason`, `frames_ok`/`frames_failed`, 그리고 recovery 의
+`tracking_lost`, `loss_reason`, `frames_ok`/`frames_failed`, 그리고 recovery 로직의
 rollback 기준이 되는 **`last_good_theta_rad`** 를 담는다.
 
 ---
 
-## 6. 추적 감시와 자동 recovery
+## 6. 추적 감시와 자동 복구(recovery) 로직
 
 ### 4가지 watchdog (`TrackingState`)
 
@@ -167,10 +168,10 @@ rollback 기준이 되는 **`last_good_theta_rad`** 를 담는다.
 본 뒤(`tracking_established`)부터만 (3)(4)를 센다. warm-up 구간을 lost 로 오인하지 않기
 위한 장치다.
 
-### 자동 recovery
+### 자동 복구(recovery) 로직
 
-Phase 1 과 2 를 묶어 지휘하는 `ArtecMultiPassScanSession` 이 lost 를 받으면 다음 순서로
-복구한다.
+추적을 잃었다고 판정되면 스캔을 포기하지 않고 자동으로 복구를 시도한다. Phase 1 과 2 를
+묶어 지휘하는 `ArtecMultiPassScanSession` 이 lost 를 받아 다음 순서로 처리한다.
 
 1. 같은 자세에서 최대 **3회**까지 자동 retry 한다. lost 는 "물체가 없다"와 다르므로
    무한 retry 는 금지다.
@@ -182,10 +183,10 @@ sim 에는 SLAM 이 없으므로 캡처된 점 개수를 프록시로 삼아, �
 유발하는 방식으로 이 흐름을 검증했다.
 
 - `sim_harness/MMS_ext_phase1_recovery1.py` — **빗나감.** 대상물을 측면으로 빗나가게
-  조준해 FOV 밖으로 내보내면 점이 거의 0 이 되어 lost 가 뜬다. recovery 가 물체 점이
+  조준해 FOV 밖으로 내보내면 점이 거의 0 이 되어 lost 가 뜬다. recovery 로직이 물체 점이
   가장 많은 elevation 을 골라 중심을 다시 조준하고 스캔을 재개한다.
 - `sim_harness/MMS_ext_phase1_recovery2.py` — **윗면 미포착.** el 을 너무 낮춰 옆에서
-  보면 윗면이 grazing 되어 잡히지 않는다. recovery 가 윗면 비율이 최대가 되는 쪽으로
+  보면 윗면이 grazing 되어 잡히지 않는다. recovery 로직이 윗면 비율이 최대가 되는 쪽으로
   elevation 을 올려 윗면을 잡고 재개한다.
 
 둘 다 θ safe-back → 자세 재탐색 → 재개를 거쳐 5면을 완성한다. 형상이 까다로울 필요는
@@ -279,7 +280,7 @@ $MMS_PYTHON scripts/sim/validate_phase1_viewpoint.py
 
 씬을 띄우지 않고 캐시된 점군만으로 기존 sphere sampling 대비 maximin 채점 + 밴드
 분할의 최악프레임 fill·z-커버·IK 도달성을 비교하고, tracking-lost 프록시를 주입해
-recovery 재계획도 함께 본다. 결과는 stdout 표와
+recovery 로직의 재계획도 함께 본다. 결과는 stdout 표와
 `scripts/sim/log/testset_points/validate_results.json` 이다.
 
 ### 실물
@@ -305,7 +306,7 @@ mms_artec/nbv/artec_streaming_scan_session.py   ★ 실물 streaming SLAM
     TrackingState                       # .on_frame, .should_stop, watchdog 4종
     TurntableController                 # 별도 thread, move_velocity, getActualPos polling, stop_event
     ArtecStreamingScanSession.run()     # → ArtecStreamingScanResult
-mms_artec/nbv/artec_multipass_scan_session.py   # Phase 1+2 오케스트레이션 + recovery + view-score
+mms_artec/nbv/artec_multipass_scan_session.py   # Phase 1+2 오케스트레이션 + recovery 로직 + view-score
 mms_artec/nbv/live_scan_viewer.py               # SDK 정합행렬 누적 뷰어
 utils/nbv/phase1_viewpoint.py                   # 밴드 분할·순서 계획
 mms_artec/nbv/recovery_pose_selector.py         # Spider 광학 상수, 자세 후보
@@ -313,8 +314,8 @@ utils/turntable/turntable_interface.py          # 실물 턴테이블 (move_velo
 mms_artec/backends/isaac/isaac_turntable.py     # sim 턴테이블 (RevoluteJoint)
 
 sim_harness/MMS_ext_phase1.py                   # sim 검증 (GT 누적)
-sim_harness/MMS_ext_phase1_recovery1.py         # sim recovery 검증 — 빗나감
-sim_harness/MMS_ext_phase1_recovery2.py         # sim recovery 검증 — 윗면 미포착
+sim_harness/MMS_ext_phase1_recovery1.py         # sim recovery 로직 검증 — 빗나감
+sim_harness/MMS_ext_phase1_recovery2.py         # sim recovery 로직 검증 — 윗면 미포착
 scripts/sim/run_e2e_gui.sh                      # sim E2E 실행 진입점
 scripts/sim/validate_phase1_viewpoint.py        # 밴드 계획 단독 검증
 ```
@@ -375,11 +376,11 @@ warm-up 구간이 곧바로 lost 로 잡힌다.
 ### T8. 지켜야 할 규약 몇 가지
 
 - **연속 회전 + 최대 FPS.** 겹침이 생명이므로 각도를 띄엄띄엄 옮기지 않는다.
-- **시작 자세는 home 그대로.** 사전 probe 를 넣지 않는다. lost 가 났을 때만 recovery 가
+- **시작 자세는 home 그대로.** 사전 probe 를 넣지 않는다. lost 가 났을 때만 recovery 로직이
   자세를 탐색한다.
 - **라이브 뷰어 누적은 SDK 정합행렬만 쓴다.** θ·yaml·hand-eye 를 섞으면 뷰어가 SLAM 의
   거울이 아니게 되어 디버깅 가치가 사라진다.
 - **sim 에는 SLAM 이 없다.** GT θ 와 축으로 누적할 뿐이고, 실물은 그 위에 SLAM 만 얹는다.
   sim 이 잘 된다고 실물 정합이 잘 된다는 뜻은 아니다.
-- **last-good θ** 는 `reg_err ≥ 0` 인 마지막 θ 이며 recovery safe-back 의 유일한 기준이다.
+- **last-good θ** 는 `reg_err ≥ 0` 인 마지막 θ 이며 recovery 로직 safe-back 의 유일한 기준이다.
 - **턴테이블 정지는 stop_event 로 즉시** 이뤄져야 한다. 별도 thread 가 이를 감시한다.
