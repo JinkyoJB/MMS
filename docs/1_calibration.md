@@ -122,6 +122,12 @@ env -u PYTHONPATH $ISAAC -u scripts/sim/calib_handeye_sim.py           # 헤드�
 env -u PYTHONPATH $ISAAC -u scripts/sim/calib_handeye_sim.py --gui     # 화면으로 보며
 ```
 
+![hand-eye sim 실행 화면](figures/calibration/handeye_sim_running.png)
+
+*`--gui` 실행 중 화면.* 로봇이 스캐너(파랑)를 들고 턴테이블 위 ChArUco 보드를
+반구 자세로 순회하며 촬영한다. 오른쪽은 툴체인저 스탠드 — 충돌 게이트가 걸러내는
+대상 중 하나다(→ T4).
+
 | 옵션 / 환경변수 | 기본 | 뜻 |
 |---|---|---|
 | `--gui` | 꺼짐 | Isaac 창 표시 |
