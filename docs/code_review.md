@@ -4,7 +4,7 @@
 > 제대로 공유하는지 확인하고 ② **real 경로(`main_artec.py` → calibration → Phase1 → Phase2)**
 > 를 Spider 도착 즉시 테스트할 수 있게 한다.
 >
-> 관련: `docs/main_flow.md`(큰 그림), `docs/1_calibration.md`, `docs/2_phase1.md`, `docs/3_phase2.md`.
+> 관련: `README.md`(큰 그림), `docs/1_calibration.md`, `docs/2_phase1.md`, `docs/3_phase2.md`.
 
 ---
 

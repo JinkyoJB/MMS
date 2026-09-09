@@ -49,7 +49,22 @@ env -u PYTHONPATH python -c "import main_artec"
 
 ## 1. 캘리브레이션 (설치 후 1회, 이설 시 재수행)
 
-순서대로 한다. **intrinsic → hand-eye → 턴테이블 축.**
+**단일 진입점이 순서를 강제한다.**
+
+```bash
+env -u PYTHONPATH python scripts/artec/calibrate.py          # 전체
+env -u PYTHONPATH python scripts/artec/calibrate.py --from 2 # 2번 단계부터
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 3 # 한 단계만
+```
+
+순서는 **intrinsic → hand-eye → 턴테이블 축**이다. `turntable_calib` 이 rim 점을 base 로
+변환한 뒤 원을 피팅하는데 그 변환에 `T_EC` 가 들어가기 때문이다. 원리와 순서를 뒤집는
+방법은 `1_calibration.md` §9·T10 을 본다.
+
+시작 전에 **사람이 수동으로 조준**한다 — 보드와 턴테이블이 카메라에 들어와야 한다.
+보드를 원판 위에 올려두면 hand-eye 와 턴테이블을 같은 조준 자세에서 이어서 할 수 있다.
+
+아래는 단계별로 따로 돌릴 때다.
 
 ### 1.1 ChArUco 보드 준비 (최초 1회)
 
@@ -157,10 +172,10 @@ env -u PYTHONPATH python scripts/artec/main_artec_demo.py
 |---|---|
 | `No module named 'xarm'` | env 오선택 → `conda activate mms-env` |
 | `No module named 'cv2'` | **base 파이썬**으로 실행한 것 (`miniconda3/bin/python`). `conda activate mms-env` 후 `python` |
-| `No module named 'omni.usd'` | `sim_harness/` 하니스를 standalone 으로 실행한 것 → Isaac GUI Script Editor 에서 실행 (`1_calibration.md` §7) |
+| `No module named 'omni.usd'` | `sim_harness/` 하니스를 standalone 으로 실행한 것 → Isaac GUI Script Editor 에서 실행 (`1_calibration.md` T6) |
 | `connect socket failed` | 로봇 미도달 → §0 네트워크 확인 |
 | `scan settings import 불가` | Artec SDK python 바인딩 미빌드 → `artec_SDK/artec0_build_guide.md`. sim 은 정상 동작 |
-| 스캔이 자꾸 끊긴다 | 시작 자세가 나쁘다. 물체를 조준한 상태로 시작하고, 그래도 반복되면 recovery 로그의 elevation 을 확인 (`2_phase1.md` §6) |
+| 스캔이 자꾸 끊긴다 | 시작 자세가 나쁘다. 물체를 조준한 상태로 시작하고, 그래도 반복되면 recovery 로그의 elevation 을 확인 (`2_phase1.md` §7) |
 | 물체를 치웠는데 계속 스캔됨 | 정합이 `ICP` 로 되어 있을 수 있다 → `HYBRID` 확인 (`2_phase1.md`) |
 | 결과 메시가 어긋남·떠 있음 | 거의 항상 `T_pre` 문제 → `5_phase3_merge.md` |
 | 콘솔 이모지 깨짐 | `PYTHONIOENCODING=utf-8` |
@@ -170,11 +185,28 @@ env -u PYTHONPATH python scripts/artec/main_artec_demo.py
 
 ---
 
+## 6. 조정 가능한 설정은 어디 있나
+
+값을 바꾸려면 코드를 뒤지지 말고 해당 문서의 설정 표를 본다.
+
+| 무엇 | 어디 |
+|---|---|
+| 캘리브 보드 프리셋·자세 수 | `1_calibration.md` §2·§4 |
+| Phase 1 — 자세 후보, 캡처 밀도, 회전 시간, watchdog 임계 | `2_phase1.md` §1 |
+| Phase 2 — NBV 반복, 거리, 충돌 world 치수, 수렴 임계 | `3_phase2.md` §1 |
+| 충돌 — 안전 여유, 특이점 임계, SDF 격자 | `4_collision.md` §1 |
+| Phase 3 — flip 축·각, pass 상한 | `5_phase3_merge.md` §1 |
+| 후처리 — 단계별 on/off, fusion 방식 | `6_postprocess.md` §1 |
+
+하드웨어 IP·홈 자세 같은 상수는 `main_artec.py` 상단에 모여 있다.
+
+---
+
 ## 관련 문서
 
 | 무엇 | 문서 |
 |---|---|
 | sim 실행·씬 생성 | `sim_commands.md` |
 | 캘리브 원리·함정 | `1_calibration.md` |
-| Phase 1 동작·watchdog | `2_phase1.md` |
-| 조정 가능한 설정 | 인수인계서_A1 §4.7 |
+| Phase 1·2·3 동작 | `2_phase1.md` · `3_phase2.md` · `5_phase3_merge.md` |
+| 셀 배치·치수 | `hw_layout.md` |

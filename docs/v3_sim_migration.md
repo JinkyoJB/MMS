@@ -46,7 +46,7 @@ config 실물 캘리브   translation(mm)  [  +4.33, -177.16,  -59.00 ]
 - sim: 캘리브가 필요 없다. USD 가 ground truth 이므로 **캡처도 `_T_EC_gt()` 를 쓰게** 한다.
   (`mms._T_EC` 를 isaac 백엔드에서 GT 로 덮어쓰기)
 - real: 툴 장착이 바뀌었으므로 **hand-eye 재캘리브 필수** (`scripts/artec/hand_eye_calib.py`).
-  `docs/main_flow.md §1.0` "센서 교체·재설치 시 다시 잡는다".
+  `1_calibration.md` — 센서 교체·재설치 시 다시 잡는다.
 
 ---
 

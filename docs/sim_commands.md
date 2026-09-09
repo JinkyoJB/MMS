@@ -119,7 +119,7 @@ env -u PYTHONPATH $ISAAC scripts/sim/ik_follow_target.py --rebuild \
 ```bash
 env -u PYTHONPATH $ISAAC -u scripts/sim/calib_handeye_sim.py   # hand-eye (~90초)
 ```
-> GT 대비 `t_err`/`r_err` 출력. 기준 5mm/2°. 상세는 `1_calibration.md` §7.
+> GT 대비 `t_err`/`r_err` 출력. 기준 5mm/2°. 상세는 `1_calibration.md` §4.
 
 ### 턴테이블 축 캘리브 검증 (standalone)
 
@@ -128,7 +128,7 @@ env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py     # 캡처 → log/rim_c
 env -u PYTHONPATH python scripts/sim/rim_click_offline.py  # mms-env, 클릭+피팅
 MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py   # 자동
 ```
-> 상세는 `1_calibration.md` §13.
+> 상세는 `1_calibration.md` §8.
 
 ### 턴테이블 회전
 ```bash
@@ -162,7 +162,7 @@ phase 는 `main_artec.py::MULTIPASS_SETTINGS.phase_mode` 를 따른다(1=Phase1 
 3=+바닥면 flip). 환경변수로 override 가능:
 ```bash
 MMS_SIM_PHASE_MODE=1     # 스윕 스크립트용 override
-MMS_SIM_NTHETA=8         # 회전 프레임 수(기본 36) — 빠른 확인용
+MMS_SIM_NTHETA=8         # 회전 프레임 수(기본 240 = MMS_SIM_FRAMES_PER_REV) — 빠른 확인용
 MMS_SIM_DRIVE_STEPS=6
 MMS_SIM_USD=<usd>        # 씬 override
 MMS_SIM_OBJECT_PRIM=<prim>
@@ -234,4 +234,4 @@ python scripts/sim/build_results_page.py   # docs/testset_results.md 의 웹판 
 - `docs/v3_sim_migration.md` — v2→v3 이관 현황, 남은 blocker
 - `docs/testset_results.md` — 9종 스윕 결과(GT 지표·결함 7건·렌더)
 - `$ASSET/v3_scene_IK.md` — 드래그 IK 타깃 방법론(다른 로봇 재사용용)
-- `docs/main_flow.md` — 전체 파이프라인
+- `README.md` — 전체 파이프라인 개요

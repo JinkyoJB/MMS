@@ -1,7 +1,7 @@
 # Calibration — Hand-Eye(`T_EC`) & Turntable(`T_B_F0`)
 
 > MMS 의 두 가지 캘리브를 한 문서에. *무엇을·왜·어떻게* + *어느 함수가 무슨 일을 하는지*.
-> 상위 맥락은 `docs/main_flow.md` §1.
+> 다음 단계는 `2_phase1.md`.
 > - **Part 1 — Hand-Eye `T_EC`**: 카메라가 로봇 손목(EE)에 어떻게 붙어있나.
 > - **Part 2 — Turntable `T_B_F0`**: 턴테이블이 로봇 base 기준 어디서·어느 축으로 도나.
 > - **Part 3 — 전체 캘리브레이션**: 위 둘을 어떤 **순서**로 돌리나 (`calibrate.py`).
@@ -511,7 +511,7 @@ T_EC_usd = R_FLIP @ T_EC_ocv      ← T_EC 는 카메라가 출력측이라 왼�
 
 > `start(...)` 사유는 **출발 자세가 이미 여유 밖**이라는 뜻이다. 하니스는 이때 경고만
 > 남기고 이동한다 — 거부하면 이후 전부가 같은 이유로 막히는 연쇄가 생긴다
-> (`4_collision.md` §1.4).
+> (`4_collision.md` T5).
 
 ## T5. 결과 해석 (sim)
 
