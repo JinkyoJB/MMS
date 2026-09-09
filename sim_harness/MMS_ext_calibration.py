@@ -135,6 +135,8 @@ try:
     RobotIK = _load_mod("mms_ik_provider", "utils/robot/ik_provider.py").RobotIK
     # 공통 검증 로직 — standalone 러너와 공유 (utils/calibration/handeye_sim.py)
     HS = _load_mod("mms_handeye_sim", "utils/calibration/handeye_sim.py")
+    # 충돌·특이점 게이트 (메시 SDF). 캐시(utils/collision/data/*.npz)가 없으면 None.
+    _CM_MOD = _load_mod("mms_collision_model", "utils/collision/collision_model.py")
     _HAS_CALIB = True
 except Exception as _e:
     ArtecCharucoDetector = CharucoBoardSpec = HandEyeCalibrator = None
@@ -192,6 +194,9 @@ MOVE_TIMEOUT_N     = int(os.environ.get("MMS_MOVE_TIMEOUT", 400))  # 한 자세 
 # 목표를 한 번에 던지면 급가속한다(특히 max_effort 를 올린 뒤). 파이프라인
 # (isaac_scan_session.DRIVE_STEPS)처럼 관절공간을 N 스텝에 걸쳐 선형 보간한다.
 MOVE_RAMP_N        = int(os.environ.get("MMS_MOVE_RAMP", 90))
+# 충돌 게이트 — 0 이면 끈다(디버깅용). 켜면 IK 해를 **구동 전에** 검사하고,
+# 이동 경로(현재→목표 직선 보간)까지 본다.
+USE_COLLISION      = os.environ.get("MMS_CALIB_COLLISION", "1") == "1"
 # 관절 수렴 허용오차. 2026-09-09 실측: 완전 정지(속도 0) 후에도 목표 대비
 #   joint1 +1.4° / joint2~7 +0.45~0.8° 의 계통 오차가 남는다. 드라이브 게인을
 #   100배(kp 2000→200000) 올려도 joint1 은 1.40° 로 불변 → 제어 문제가 아니다.
@@ -417,7 +422,7 @@ _ctx = {
     "dof_idx": None, "T_W_base": None, "K": None, "dist": None, "T_EC_gt": None,
     "detector": None, "calibrator": None,
     "poses": [], "pose_idx": 0, "seed_q": None, "target_q": None,
-    "ramp_from": None, "board_center": None, "phase": "BOARD_SETTLE", "phase_step": 0, "stable_n": 0,
+    "cm": None, "ramp_from": None, "board_center": None, "phase": "BOARD_SETTLE", "phase_step": 0, "stable_n": 0,
     "step": 0,
 }
 
@@ -465,6 +470,19 @@ def _start_pose(idx):
         T_base_E = inv_T(_ctx["T_W_base"]) @ T_W_E
         pose6d = mat_to_pose6d_mm(T_base_E)
         q, ok = _ctx["provider"].ik(pose6d, seed=_ctx["seed_q"])
+        if ok and _ctx.get("cm") is not None:
+            _cm = _ctx["cm"]
+            _safe, _why = _cm.is_pose_safe(q)
+            if not _safe:
+                print(f"[CALIB]   pose {idx+1}: 충돌/특이점 — {_why} → skip")
+                ok = False
+            else:
+                _rq = np.asarray(_ctx["robot"].get_joint_positions(), float)
+                _q0 = np.array([_rq[d] for d in _ctx["dof_idx"]], float)
+                _psafe, _pwhy, _ = _cm.is_path_safe(_q0, q)
+                if not _psafe:
+                    print(f"[CALIB]   pose {idx+1}: 이동경로 충돌 — {_pwhy} → skip")
+                    ok = False
         if ok:
             _ctx["pose_idx"] = idx
             _ctx["target_q"] = np.asarray(q, float)
@@ -661,6 +679,16 @@ async def setup_async():
                 detector=detector, calibrator=calibrator,
                 poses=[], pose_idx=0, seed_q=home_q.copy(), target_q=home_q.copy(),
                 phase="BOARD_SETTLE", phase_step=0, stable_n=0, step=0)
+    # 충돌 모델 (메시 SDF). 캐시 없으면 None → 게이트 비활성
+    _cm = None
+    if USE_COLLISION:
+        try:
+            _cm = _CM_MOD.get_default()
+        except Exception as _e:
+            print(f"[CALIB][WARN] 충돌 모델 로드 실패: {_e}")
+    _ctx["cm"] = _cm
+    print(f"[CALIB] 충돌 게이트: {'ON' if _cm is not None else 'OFF'}")
+
     _ctx["rigid_ee"].initialize()
 
     # artec home 으로 이동 (보드 낙하 동안 함께 안정)

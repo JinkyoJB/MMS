@@ -251,6 +251,28 @@ hand-eye(`AX=ZB`)는 **자세 간 회전 다양성**이 있어야 풀린다(권�
 조정: `MMS_CALIB_POLARS=0,15,30,45` · `MMS_CALIB_AZIS` · `MMS_CALIB_ROLLS` ·
 `MMS_CALIB_JITTER` · `MMS_CALIB_DIST`
 
+#### 충돌·특이점 게이트
+
+생성한 자세를 **구동 전에** 검사한다. IK 해가 나와도 부딪히면 그 자세를 버린다.
+
+| 검사 | 대상 | 예시 로그 |
+|---|---|---|
+| 자가충돌 | 스캐너·툴 ↔ 로봇 링크 | `self(tool↔link3,0mm)` |
+| 환경충돌 | 셀 프레임·툴체인저 스탠드·턴테이블 | `env(link4,0mm)` |
+| 특이점 | 최소 특이값 σ | `singular(σ=0.020<0.050)` |
+| 이동 경로 | 현재→목표 구간 전체 | `이동경로 충돌 — ...` |
+
+메시 SDF 기반(`utils/collision/collision_model.py`)이며 캐시
+`utils/collision/data/{cell_env,xarm7_spider_links}.npz` 를 읽는다.
+캐시가 없으면 게이트가 자동으로 꺼지므로 **로그의 `충돌 게이트: ON` 을 확인**할 것.
+
+```bash
+MMS_CALIB_COLLISION=0 ...   # 게이트를 끄고 돌리기(디버깅용)
+```
+
+> 게이트를 켜면 유효 샘플이 줄어든다. 자세 구성을 넓혀 **충돌 없는 자세로
+> 15개 이상**을 확보하는 편이 좋다.
+
 기준: `t_err < 5mm`, `r_err < 2°`. 로그·`handeye_result.npz` 는
 `scripts/sim/log/handeye/captures_calib/` 에 남는다.
 
