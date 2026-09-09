@@ -29,7 +29,7 @@
 
 ---
 
-## 2. 전체 흐름 (한눈에)
+## 2. 전체 흐름
 
 ```
                     ┌─────────────── 자세 i = 1..N 반복 ───────────────┐
@@ -42,33 +42,25 @@
                     └───────────────────────────────────────────────────┘
 ```
 
-이 **가운데(①~⑤ + 풀이)는 sim·real 이 똑같은 MMS 라이브러리 코드**를 쓴다.
-다른 건 "자세를 어떻게 만들고 캡처하느냐"의 **껍데기**뿐:
+**①~⑤와 풀이는 sim·real 이 같은 MMS 라이브러리 코드를 쓴다.**
+다른 건 "자세를 어떻게 만들고 캡처하느냐"의 **껍데기**뿐이다.
 
-| | 자세 만들기 ① | 캡처 ② | FK ④ |
+| 단계 | 담당 | real | sim |
 |---|---|---|---|
-| **real** | 사람이 teach / yaml 자세 순회 | Artec 실기 캡처 | xArm SDK |
-| **sim** | IK 로 반구 자세 생성·구동 | Isaac 카메라 렌더 | sim 아티큘레이션 |
+| ① 자세 생성 | `generate_hemisphere_poses` | 사람이 teach / yaml 순회 | 반구 자세 생성 |
+| ① 자세 이동 | `RobotIK.ik` (자체 해석 IK) | xArm SDK 로 모션 명령 | 관절공간 구동 |
+| ② 캡처 | — | Artec 실기 | Isaac 카메라 렌더 |
+| ③ 검출 | `ArtecCharucoDetector.detect` → `T_MC`(mm) | 공통 | 공통 |
+| ④ FK | — | `XArmInterface.get_ee_pose_mat` | `rigid_ee` |
+| ⑤ 누적 | `HandEyeCalibrator.add_sample` | 공통 | 공통 |
+| 풀이 | `HandEyeCalibrator.calibrate` → `T_EC` | 공통 | 공통 |
+
+> 보드 물리 사양(5×3, 20/15mm, `DICT_4X4_50`)은 `CharucoBoardSpec` 하나로 정의하고
+> **검출기와 텍스처 생성이 공유**한다. 실물 인쇄본과 sim 텍스처가 어긋나면 안 되기 때문.
 
 ---
 
-## 3. 단계별 — 담당 함수
-
-| 단계 | 하는 일 | 함수 / 위치 |
-|---|---|---|
-| 보드 정의 | 물리 사양(5×3, 20/15mm, DICT_4X4_50) | `CharucoBoardSpec` — `mms_artec/utils/calibration/artec_charuco_detector.py` |
-| ① 자세 생성 | 보드 위 반구 자세 N개 → EE pose | `generate_hemisphere_poses` — `mms_artec/utils/calibration/handeye_geometry.py` |
-| ① 자세 이동(IK) | pose6d → 관절각 (**자체 해석**, SDK 미사용) | `RobotIK.ik` — `utils/robot/ik_provider.py` |
-| ② 캡처 | 이미지 획득 | (sim) Isaac `camera.get_rgba` / (real) Artec |
-| ③ 검출+solvePnP | 이미지 → `T_MC`(보드→카메라, mm) | `ArtecCharucoDetector.detect` — `artec_charuco_detector.py` |
-| ④ FK | 손목 pose `T_BE` (m) | (sim) `rigid_ee` / (real) `XArmInterface.get_ee_pose_mat` |
-| ⑤ 샘플 누적 | `(T_BE, T_MC)` 저장 | `HandEyeCalibrator.add_sample` — `utils/calibration/hand_eye_calibrator.py` |
-| 풀이 | 5-method 중 잔차 최소 → `T_EC` | `HandEyeCalibrator.calibrate` |
-| 저장 | yaml | `HandEyeCalibrator.save_yaml` |
-
----
-
-## 4. 코드 지도
+## 3. 코드 지도
 
 **공유 라이브러리 — sim·real 공통 (★ 핵심)**
 
@@ -76,6 +68,8 @@
 |---|---|
 | `utils/calibration/hand_eye_calibrator.py` | `HandEyeCalibrator` — `add_sample(T_EB, T_MC)` / `calibrate()→T_EC`. 5-method 중 잔차 최소 채택 |
 | `utils/calibration/handeye_sim.py` | sim 검증 공통 로직 — 보드 규격·자세 생성·풀이·GT 비교·판정 |
+| `utils/calibration/turntable_frame.py` | **턴테이블 공유 코어** — `fit_circle_3d` / `fit_plane` / `build_T_B_F0` / `save_turntable_frame_yaml` / `axis_error` |
+| `utils/calibration/rim_picker.py` | rim 클릭 UI (`RimPicker` / `run_picker` / `show_3d_result`) |
 | `mms_artec/utils/calibration/artec_charuco_detector.py` | `CharucoBoardSpec` / `ArtecCharucoDetector.detect()→T_MC`(mm, OpenCV cam). K 있으면 solvePnP |
 | `mms_artec/utils/calibration/handeye_geometry.py` | SE3 수학 + `look_at_camera` + `generate_hemisphere_poses` (numpy 전용) |
 | `utils/robot/ik_provider.py` | `RobotIK(...).ik(pose6d, seed)` — 기본 자체 해석 IK |
@@ -90,7 +84,8 @@
 | `scripts/artec/make_charuco.py` | 보드 PNG 생성(인쇄용) |
 | `scripts/artec/intrinsic_calib.py` | 카메라 K 측정 (1회) |
 | `scripts/artec/hand_eye_calib.py` | 메인 루프 — 자세순회 → detect → add_sample → calibrate → save |
-| `scripts/artec/turntable_frame_init.py` | 턴테이블 rim 클릭 |
+| `scripts/artec/turntable_frame_init.py` | 턴테이블 rim 클릭 (`ARTEC_TO_OPENCV` z-flip + `T_CB`) |
+| `scripts/phoxi/turntable_frame_init.py` | 〃 PhoXi 판 (`T_CB = T_EB·T_CE`) |
 | `config/sensor_frames.yaml` | 결과 `T_EC_artec` 적용처 |
 
 **sim 검증**
@@ -100,10 +95,11 @@
 | `scripts/sim/calib_handeye_sim.py` | **standalone 러너** (터미널 실행) |
 | `scripts/sim/calib_rim_sim.py` + `rim_click_offline.py` | 턴테이블 축 standalone (캡처 / 클릭 2단계) |
 | `sim_harness/MMS_ext_calibration.py` | GUI 드라이버 — USD 보드 생성·렌더·관절구동 (Isaac 전용) |
+| `sim_harness/MMS_ext_calibration2.py` | 〃 턴테이블 rim 자동추출 → 피팅 → GT 비교 |
 
 ---
 
-## 5. 실행
+## 4. 실행
 
 > 옵션·환경변수의 배경과 주의점은 **부록 T3~T6**.
 
@@ -186,7 +182,7 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 > 로봇 base 기준 **턴테이블 회전축·표면**(= `T_B_F0`)을 구한다. 방법은 **rim 점 피팅** 하나로 통일
 > (구 어레이 방법은 실물 fixture 비용이 커서 채택 안 함 — rim 으로 대체 가능).
 
-## 6. 무엇을 구하나 — `T_B_F0`
+## 5. 무엇을 구하나 — `T_B_F0`
 
 | 프레임 | 의미 |
 |---|---|
@@ -201,16 +197,16 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 왜 필요 — Phase 2 hint·NBV·recovery·충돌회피가 전부 "턴테이블이 base 기준 어디서 도나"에 의존.
 하드웨어팀이 옮기면 무효화 → **버튼 하나로 다시 잡는** 루틴.
 
-## 7. 핵심 원리 — "회전하면 원을 그린다"
+## 6. 핵심 원리 — "회전하면 원을 그린다"
 
 > 회전판에 고정된 점은 회전축 둘레로 **원**을 그린다 → 원 법선 = 축방향, 중심 = 축 위 한 점.
 
 disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 3D 로 모아 원을 피팅하면 축이 나온다.
 
 > ★ **축 ≠ 표면**: rim/궤적 높이 ≠ disc 표면 높이일 수 있음. 충돌회피·대상물 높이를 위해 disc
-> **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(§9).
+> **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(§8).
 
-## 8. Rim 방법 — 흐름 + 함수
+## 7. Rim 방법 — 흐름 + 함수
 
 ```
 로봇이 disc rim 을 보는 자세 → 1회 캡처 (organized 포인트클라우드 + T_CB)
@@ -222,7 +218,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
         ▼
    pts_B (rim, base) → fit_circle_3d → (center, normal, radius, residual)
         ▼
-   (+ disc 표면 평면, §9) → build_T_B_F0(center, normal) → T_B_F0
+   (+ disc 표면 평면, §8) → build_T_B_F0(center, normal) → T_B_F0
 ```
 
 - UI/수학: `utils/calibration/`
@@ -232,7 +228,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
 - ⚠ Spider 좁은 FOV 탓에 rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 취득
   (3점이면 가능하나 호가 짧으면 조건수↓).
 
-## 9. 표면 평면 → `T_B_F0` 빌드
+## 8. 표면 평면 → `T_B_F0` 빌드
 
 축(방향+XY)만으론 부족 → disc **표면**으로 원점 높이 확정:
 - `turntable_frame.py`
@@ -242,26 +238,6 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
 - (선택) `mms_artec/system.py::ArtecMMS.disc_surface_frame(disc_points_base, axis_point, axis_dir)` —
   표면 평면 ∩ 축선 = F0 원점, z축은 축방향, 평면법선은 교차검증. (구 어레이 경로용이었으나
   rim center/normal 을 바로 `build_T_B_F0` 에 넣어도 됨 — rim 은 표면 근처라 단순.)
-
-## 10. 코드 지도 (턴테이블)
-
-```
-utils/calibration/turntable_frame.py     (numpy; 저장 시 scipy/yaml) ★ 공유 코어
-    fit_circle_3d(pts) → (center, normal, radius, residual)
-    fit_plane(pts)     → (point, normal, residual)
-    build_T_B_F0(center_B, nz_B) → T_B_F0 (B→F)
-    save_turntable_frame_yaml(...)
-utils/calibration/rim_picker.py          (cv2) — rim 클릭 UI (RimPicker/run_picker/show_3d_result)
-
-실물 진입:
-  scripts/artec/turntable_frame_init.py  # Artec rim 클릭 (ARTEC_TO_OPENCV z-flip + T_CB)
-  scripts/phoxi/turntable_frame_init.py  # PhoXi rim 클릭 (T_CB = T_EB·T_CE)
-
-sim 검증:
-  sim_harness/MMS_ext_calibration2.py   # 턴테이블 rim 자동추출 → fit → GT 비교
-```
-
----
 
 # 〔부록〕 Troubleshooting — 규약·함정·주의점
 
