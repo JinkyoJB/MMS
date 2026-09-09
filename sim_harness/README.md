@@ -13,20 +13,33 @@
 | `MMS_ext_phase1_recovery2.py` | recovery — **윗면 미포착**(너무 낮은 el) | `2_phase1.md` §6 |
 | `MMS_ext_phase2_nbv.py` | Phase 2 NBV 루프 | `3_phase2.md` §6.4 |
 
-## ⚠ 실행하려면 Isaac 트리에 두어야 한다
+## ⚠ standalone 스크립트가 아니다 — Isaac GUI 안에서 실행한다
 
-Isaac Sim 의 `standalone_examples` 로더가 경로를 기준으로 동작하므로, 리포에 두고
-바로 실행할 수 없다. **복사하거나 심볼릭 링크**를 건다.
+`SimulationApp` 을 스스로 만들지 않는다. **이미 떠 있는 Isaac Sim** 의 app 에 얹히는
+구조라, 터미널에서 바로 돌리면 `omni.*` 를 못 찾는다.
 
-```bash
-DST=~/isaacsim/standalone_examples/play/MMS
-mkdir -p "$DST"
-cp sim_harness/MMS_ext*.py "$DST"/          # 또는: ln -s "$PWD"/sim_harness/MMS_ext*.py "$DST"/
-
-env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration.py"
+```
+ModuleNotFoundError: No module named 'omni.usd'   ← standalone 으로 돌렸을 때
 ```
 
-> 심볼릭 링크를 쓰면 리포에서 수정한 내용이 바로 반영된다(권장).
+**실행 방법**
+
+1. Isaac Sim GUI 를 띄운다 (`~/isaacsim/isaac-sim.sh` 등)
+2. GUI 를 띄우기 **전** 셸에서 `export MMS_ROOT=/경로/MMS`
+3. `Window > Script Editor` 에서:
+   ```python
+   exec(open("/경로/MMS/sim_harness/MMS_ext_calibration.py").read())
+   ```
+   VSCode Isaac 확장(코드러너)으로 파일을 열어 실행해도 된다.
+
+> Isaac 트리에 링크해 두면 GUI 파일 브라우저에서 찾기 편하다(필수는 아니다):
+> ```bash
+> DST=~/isaacsim/standalone_examples/play/MMS && mkdir -p "$DST"
+> ln -sf "$MMS_ROOT"/sim_harness/MMS_ext*.py "$DST"/
+> ```
+
+> **파이프라인 본체(`main_artec.py`)는 반대로 standalone** 이다:
+> `env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python main_artec.py`
 
 ### 경로는 자동으로 찾는다
 

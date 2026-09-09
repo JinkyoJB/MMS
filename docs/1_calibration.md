@@ -165,27 +165,48 @@ sim_harness/MMS_ext_calibration.py
 ChArUco 보드를 USD 평면으로 실제 렌더 → 검출 → solvePnP → `calibrateHandEye` →
 USD 에서 읽은 **GT 와 비교**한다. 실물 없이 파이프라인 자체를 확인하는 용도.
 
+> ⚠ **이 하니스는 standalone 스크립트가 아니다.** `SimulationApp` 을 스스로 만들지 않고
+> **이미 떠 있는 Isaac Sim GUI 안에서** 실행한다. 터미널에서 `python.sh script.py` 로
+> 돌리면 `ModuleNotFoundError: No module named 'omni.usd'` 가 난다
+> (`omni.*` 는 Isaac 런타임이 로드하는 모듈이라 그전엔 없다).
+
+**1) Isaac Sim GUI 를 띄운다**
+
 ```bash
-# 1) 리포 위치를 알려준다 (Isaac 트리로 복사해 돌리므로 필요)
+env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -c "
+from isaacsim import SimulationApp; app = SimulationApp({'headless': False})
+import time
+while app.is_running(): app.update(); time.sleep(0.01)
+"
+```
+또는 설치된 런처로 `~/isaacsim/isaac-sim.sh`.
+
+**2) 리포 경로를 알려준다** — GUI 를 띄우기 **전** 셸에서:
+
+```bash
 export MMS_ROOT=/home/keti/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성/1_코드/MMS
-
-# 2) 하니스를 Isaac 트리에 링크 (최초 1회)
-DST=~/isaacsim/standalone_examples/play/MMS && mkdir -p "$DST"
-ln -sf "$MMS_ROOT"/sim_harness/MMS_ext*.py "$DST"/
-
-# 3) 실행
-env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration.py"
-
-# 4) 로그 (다른 터미널)
-tail -f "$DST/captures_calib/calib_log.txt"
 ```
 
-> 리포 안에서 바로 돌려도 된다(경로 자동 탐색). 다만 Isaac 의 예제 로더를 쓰려면
-> 위처럼 트리에 두는 편이 확실하다.
->
-> 산출물 위치를 바꾸려면 `export MMS_HARNESS_OUT=/원하는/경로`.
+**3) Script Editor 에서 실행** — `Window > Script Editor` 를 열고 아래를 붙여넣는다.
+
+```python
+exec(open("/home/keti/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성"
+          "/1_코드/MMS/sim_harness/MMS_ext_calibration.py").read())
+```
+> VSCode 의 Isaac 확장(코드러너)을 쓰면 파일을 열고 바로 실행해도 된다.
+
+**4) 로그 확인** (다른 터미널)
+
+```bash
+tail -f ~/isaacsim/standalone_examples/play/MMS/captures_calib/calib_log.txt
+```
+> 산출물 위치는 `MMS_HARNESS_OUT` 으로 바꿀 수 있다.
 
 **결과 확인** — 로그 끝에 GT 대비 `t_err` / `r_err` 이 찍힌다. §6 참고.
+
+> 파이프라인 본체(`main_artec.py`)는 반대로 **standalone** 이다. 그쪽은
+> `env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python main_artec.py` 로 돌린다.
+> 자세히는 `sim_commands.md`.
 
 ### real — 실제 캘리브레이션
 
@@ -300,13 +321,17 @@ sim 검증:
 
 ### 실행
 
-```bash
-# ── sim — rim 자동추출 → 원 피팅 → GT 비교 ──
-export MMS_ROOT=/home/keti/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성/1_코드/MMS
-DST=~/isaacsim/standalone_examples/play/MMS
-env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration2.py"
-tail -f "$DST/captures_turntable/calib_log.txt"
+**sim** — rim 자동추출 → 원 피팅 → GT 비교. §7 과 같은 방식으로 **Isaac GUI 의
+Script Editor** 에서 실행한다(standalone 아님).
 
+```python
+exec(open("<MMS_ROOT>/sim_harness/MMS_ext_calibration2.py").read())
+```
+```bash
+tail -f ~/isaacsim/standalone_examples/play/MMS/captures_turntable/calib_log.txt
+```
+
+```bash
 # ── real — rim 위 점을 클릭해서 원 피팅 ──
 conda activate mms-env && cd "$MMS_ROOT"
 env -u PYTHONPATH python scripts/artec/turntable_frame_init.py
