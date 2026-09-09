@@ -41,8 +41,7 @@
 ## 2. 병합 개요
 
 - Artec SDK `GlobalRegistration` 또는 `utils/nbv/icp_strategy.py::icp_with_gates` / `pick_icp_roll`
-- 누적/퓨전: `mms_phoxi/nbv/{tsdf_volume,pcd_accumulate_volume}.integrate_frame / merged_pcd`
-- 🔬 Artec 경로로 통합 + 검증
+- 누적/퓨전은 master IModel 을 기준으로 하며, Artec 경로로 통합·검증한다 (🔬)
 ## 3. `T_pre` 란 무엇인가
 
 `T_pre` = "IScan 의 모든 frame 위치를 master 좌표로 옮길 도장".

@@ -84,7 +84,6 @@ hand-eye 하니스에서 실측: 19 자세 중 **7개가 이 연쇄로 소실**�
 |---|---|---|---|
 | artec home (캘리브 seed) | 65.3mm | 44.9mm | link4 |
 | `HOME_JOINTS_DEG["artec"]` | 66.9mm | 180.4mm | tool↔link5 |
-| `HOME_JOINTS_DEG["phoxi"]` | 68.5mm | 47.2mm | link6 |
 
 → 홈에서 출발하는 한 파이프라인이 `start` 연쇄에 걸릴 일은 없다.
 

@@ -35,20 +35,20 @@ Phase 1(턴테이블 1회전·EE 고정 → 5면)이 만든 **부분 점군에�
 
 ---
 
-## 2. 핵심 통찰 — PhoXi NBV 루프가 이미 완성형
+## 2. 루프의 골격
 
-`mms_phoxi/nbv/scan_session.py::ScanSession` 의 **Phase 2** 가 정확히 우리가 원하는 루프다:
+Phase 2 는 아래 한 바퀴를 수렴할 때까지 반복하는 구조다.
 
 ```
 frontier 추출 → 후보 rank(cost) → execute(로봇+턴테이블 이동) → 캡처 → ICP → integrate → terminate
 ```
 
-본 설계 = 이 검증된 루프를 **Artec 백엔드로 포팅**. 알고리즘은 동일, **3가지만 Artec 에 맞게 교체**:
+Artec 환경에서 이 골격을 채우는 선택은 세 가지다.
 
-1. **누적 표현**: PhoXi=TSDF/`PcdAccumulateVolume` → Artec=master IModel(`_master_to_pcd_B`).
-2. **IK**: PhoXi=SDK IK(`robot.arm.get_inverse_kinematics`) → **해석 IK + 충돌검사**(결정 2026-06).
-3. **캡처/병합**: PhoXi=절대 `T_CO` 한 프레임 정합 → Artec=**SDK relocalization 으로 master 좌표 직접 정합**
-   (T_pre=I, §3.4.1), 실패 시에만 camera-motion T_pre+ICP fallback.
+1. **누적 표현** — master IModel 을 base 좌표 점군으로 뽑아(`_master_to_pcd_B`) 쓴다.
+2. **IK** — SDK IK 대신 **해석 IK + 충돌검사**를 쓴다(결정 2026-06).
+3. **캡처/병합** — **SDK relocalization 으로 master 좌표에 직접 정합**하고(T_pre=I, §3.4.1),
+   실패했을 때만 camera-motion `T_pre` + ICP fallback 으로 내려간다.
 
 ---
 
@@ -127,7 +127,7 @@ Artec real-time 정합(HYBRID)은 들어오는 frame 을 **누적 reconstruction
   → (옵션) `hint_icp_refine_static`(init=T_pre) → `_merge_into_master`.
 - 캡처 후 master→pcd→mesh 재생성 → §3.1 로 루프.
 
-### 3.6 종료 (커버리지 수렴) — PhoXi `_terminate` 재사용 + 각도 커버리지
+### 3.6 종료 (커버리지 수렴)
 1. `K_max` 도달, 또는
 2. **plateau**: 최근 N 스텝 표면적/점수 증가율 < thresh, 또는
 3. **boundary 길이 → 0**: `extract_boundary_edges` 총길이 < thresh (watertight 근접), 또는
@@ -167,7 +167,6 @@ fallback:  T_pre = T_BC_master · inv(T_BC_nbv)     # IScan frame 좌측곱 (cas
 | `ScanSession`(PREVIEW/RECORD/STOP, `CONTINUE_RECORD`) | `mms_artec/sensor/artec_scanning.py` | relocalization 노출(확장 대상, §6.5) |
 | `collision_free_ik` / `pose_collision` | `utils/collision/robot_collision.py` | **해석 IK 충돌-free 자세** ♻️ |
 | `ik` / `fk_pose6d` | `utils/robot/xarm7_kinematics.py` | **해석 IK/FK** ♻️ |
-| `ScanSession._rank_candidates` / `_step` / `_terminate` | `mms_phoxi/nbv/scan_session.py` | **포팅 원본(패턴)** ♻️ |
 | `ProgressVisualizer` | `utils/nbv/_progress_vis.py` | 진행 뷰어 ♻️ |
 
 신규로 작성할 부분은 **오케스트레이션 + Poisson mesh + 해석-IK θ planner** 뿐.
@@ -186,7 +185,7 @@ fallback:  T_pre = T_BC_master · inv(T_BC_nbv)     # IScan frame 좌측곱 (cas
 - **`run()`** (정상완료 분기, 순차 누적): `phase_mode>=2` 면 Phase 1 pose 0 완료 후
   사용자-flip advance 대신 **`self._phase2_nbv_loop(master_model)`** 호출.
 - **신규 메서드**:
-  - `_phase2_nbv_loop(master)` — §3 루프 본체 (PhoXi `ScanSession.run` Phase 2 포팅).
+  - `_phase2_nbv_loop(master)` — §3 루프 본체.
   - `_build_master_mesh_B(master)` — `_master_to_pcd_B` → normal → Poisson → mesh.
   - `_rank_frontier_candidates(cands, mesh)` — §3.3 (**해석-IK θ planner** 사용).
   - `_capture_nbv_stream(T_CB_des)` — §3.4(B): 이동→(relocalize 대기: 프레임 OK·reg_err≥0 재확인)

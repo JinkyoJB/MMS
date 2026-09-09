@@ -70,13 +70,12 @@ mms_artec/
   sensor/artec_client.py         real 스캐너 (+ capture_points_base)
   nbv/artec_streaming_scan_session.py   Phase 1 streaming SLAM + 4 watchdog
   nbv/artec_multipass_scan_session.py   Phase 1+2+3 통합, view-score, recovery
-utils/                           ★ sensor-agnostic 공유 코어 (PhoXi·Artec·Isaac 공용)
+utils/                           ★ sensor-agnostic 공유 코어 (real·sim 공용)
   calibration/{turntable_frame,rim_picker,hand_eye_calibrator,artec_charuco_detector}.py
   collision/{geometry,robot_collision}.py    자세별 충돌 쿼리 (real/sim 공용)
   nbv/{frontier,icp_strategy,manual_picker,phase2_nbv,flip_policy}.py
   robot/{xarm_interface,xarm7_kinematics}.py     ★ 해석 FK/IK (real·sim 공유)
   turntable/turntable_interface.py    transforms.py    control/theta_planner.py
-mms_phoxi/nbv/{scan_session,tsdf_volume,pcd_accumulate_volume}.py   NBV/병합 참조 구현
 main_artec.py                    진입점 (BACKEND, RUN_CALIBRATION 토글)
 mms_paths.py                     자산(USD) 루트 자동 해석
 setup/setup_envs.sh              conda env 3종 생성
@@ -142,7 +141,7 @@ x_B = tt.T_FB(theta) @ x_F   # F 좌표 → B 좌표
 x_F = tt.T_BF(theta) @ x_B   # B 좌표 → F 좌표
 
 # 2. 카메라 → 베이스 변환
-T_EC = load_transform("config/calibration/hand_eye_phoxi.yaml", "T_E_C")
+T_EC = load_transform("config/calibration/hand_eye_artec.yaml", "T_E_C")
 T_EB = robot.get_ee_pose_mat()       # xArm FK 결과 (4x4)
 T_CB = compute_T_CB(T_EB, T_EC)
 points_B = transform_points(T_CB, points_C)
@@ -248,7 +247,7 @@ SDK General Pipeline 으로 최종 메시 생성. **Cleaning 은 반드시 Fusio
 
 1. **turntable_frame.yaml 미검증** — T_BF0 2026-04-23(Artec pivot 이전), rim 3점·residual 0.0.
    Phase 2 hint·NBV·recovery raycast 가 같은 T_BF0 의존 → 정밀도 의심 시 1순위 재캘리브
-   (`scripts/phoxi/turntable_calib.py`). 라이브 뷰어는 SDK 정합행렬 사용해 이 의존 없음.
+   (`scripts/artec/turntable_calib.py`). 라이브 뷰어는 SDK 정합행렬 사용해 이 의존 없음.
 2. **tracking-lost ≠ object-presence**: 물체 제거해도 빈 디스크에 정합 성공해 lost 안 뜰 수 있음 → HYBRID + 별도 휴리스틱.
 3. **last-good θ 없으면 recovery skip** (시작 직후 lost).
 4. **Robot 안전성**: xArm IK/limit/self-collision 의존. 도달 불가 pose 추천 시 `set_position` 실패 → 재시도.
@@ -259,6 +258,6 @@ SDK General Pipeline 으로 최종 메시 생성. **Cleaning 은 반드시 Fusio
 ---
 
 **개발 원칙** — 모든 로직은 sim(ground-truth)에서 개발·검증하고 real(Artec SLAM)에
-동일 코드를 적용한다. sensor-agnostic 코어(`utils/`)를 PhoXi·Artec·Isaac이 공유한다.
+동일 코드를 적용한다. sensor-agnostic 코어(`utils/`)를 real(Artec)과 sim(Isaac)이 공유한다.
 
 > 단계별 구현 상태와 향후 과제는 **인수인계서_A1** §5·§6 참조.

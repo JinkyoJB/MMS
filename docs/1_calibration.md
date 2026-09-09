@@ -53,7 +53,7 @@ env -u PYTHONPATH python scripts/artec/make_charuco.py --board spider_small
 |---|---|---|---|---|---|
 | **`spider`** | 5×3 | 20 / 15mm | **100×60mm** | `DICT_4X4_50` | **권장** |
 | `spider_small` | 5×3 | 16 / 12mm | 80×48mm | `DICT_4X4_50` | 더 가까이 볼 때 |
-| `a4` | 7×5 | 30 / 22mm | 210×150mm | `DICT_5X5_100` | PhoXi·광각용. **Spider 에는 부적합** |
+| `a4` | 7×5 | 30 / 22mm | 210×150mm | `DICT_5X5_100` | 광각 카메라용. **Spider 에는 부적합** |
 
 Spider 는 FOV 가 30°×21° 로 좁고 작동거리가 0.2~0.3m 이므로, `a4` 보드는 화면 밖으로
 나가 검출되지 않는다. 처음 시도에서 A4 7×5 를 썼다가 이 문제로 5×3 으로 바꿨다.
@@ -429,7 +429,6 @@ env -u PYTHONPATH python scripts/artec/turntable_calib.py
 | `scripts/artec/intrinsic_calib.py` | 카메라 K 측정 (1회) |
 | `scripts/artec/hand_eye_calib.py` | 메인 루프 — 자세순회 → detect → add_sample → calibrate → save |
 | `scripts/artec/turntable_calib.py` | 턴테이블 rim 클릭 (`ARTEC_TO_OPENCV` z-flip + `T_CB`) |
-| `scripts/phoxi/turntable_calib.py` | 〃 PhoXi 판 (`T_CB = T_EB·T_CE`) |
 | `config/sensor_frames.yaml` | 결과 `T_EC_artec` 적용처 |
 
 **sim 검증**
