@@ -80,6 +80,7 @@ mms_phoxi/nbv/{scan_session,tsdf_volume,pcd_accumulate_volume}.py   NBV/병합 �
 main_artec.py                    진입점 (BACKEND, RUN_CALIBRATION 토글)
 mms_paths.py                     자산(USD) 루트 자동 해석
 setup/setup_envs.sh              conda env 3종 생성
+sim_harness/MMS_ext_*.py         Isaac 검증 하니스 (실행 시 Isaac 트리로 복사/링크)
 ```
 
 ---

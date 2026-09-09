@@ -134,7 +134,7 @@ sim 엔 Artec SLAM 이 없다. 대신 **턴테이블 θ(ground-truth) + 회전�
 
 - 핵심: `p_obj = Rz(−θ)·(p_world − axis_point) + axis_point` (axis = 턴테이블 회전축, §1_calibration).
   θ 가 정확(sim ground-truth)하면 모든 옆면이 정확히 겹쳐 쌓인다 = "SLAM 대신 GT 누적".
-- 스크립트: **`standalone_examples/play/MMS/MMS_ext_phase1.py`** (Isaac 확장).
+- 스크립트: **`sim_harness/MMS_ext_phase1.py`** (Isaac 확장).
   대상물(box)을 known θ 로 회전(키네마틱) → 캡처 → −θ 누적 → 재구성. real 의 streaming/SLAM 은
   이 검증된 누적 위에 그대로 올린다.
 
@@ -183,7 +183,7 @@ mms_artec/nbv/live_scan_viewer.py               # SDK 정합행렬 누적 뷰어
 utils/turntable/turntable_interface.py          # 실물 턴테이블 (move_velocity/getActualPos, UDP)
 mms_artec/backends/isaac/isaac_turntable.py     # sim 턴테이블 (RevoluteJoint)
 
-standalone_examples/play/MMS/MMS_ext_phase1.py  # sim 검증(GT 누적)
+sim_harness/MMS_ext_phase1.py  # sim 검증(GT 누적)
 ```
 
 ---

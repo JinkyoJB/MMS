@@ -120,7 +120,7 @@ main()                                                  # main_artec.py:317
 - real hand-eye 재보정: `scripts/artec/hand_eye_calib.py`.
 - 턴테이블 축 재보정 = **rim 클릭 별도 스크립트**(2026-06 결정, 구 sphere fixture 폐기):
   - real: `python scripts/artec/turntable_frame_init.py` → rim 클릭 → yaml.
-  - sim 검증: `standalone_examples/play/MMS/MMS_ext_calibration2.py`(rim 자동추출→fit→GT).
+  - sim 검증: `sim_harness/MMS_ext_calibration2.py`(rim 자동추출→fit→GT).
   - main_artec 은 **yaml 만 로드**(인라인 sphere 캘리브 제거됨). 코어=`turntable_frame.py`.
 - ✅ 폐기 코드 제거 완료(2026-09): `turntable_axis.py`·`calib_3sphere_sim.py`·`calib_fixture.py`·
   `system.py::calibrate_turntable_axis`(sphere). `axis_error` 만 `turntable_frame.py` 로 이관.
@@ -248,4 +248,4 @@ GlobalReg → Cleaning → PoissonFusion → Texturize → Export(.obj/.sproj). 
 | 충돌(공용) | `utils/collision/robot_collision.py` |
 | 해석 IK | `utils/robot/xarm7_kinematics.py` |
 | θ 플래너 | `utils/control/theta_planner.py` |
-| sim 하니스 | `standalone_examples/play/MMS/MMS_ext_{calibration,phase1,phase2_nbv}.py` |
+| sim 하니스 | `sim_harness/MMS_ext_{calibration,phase1,phase2_nbv}.py` |

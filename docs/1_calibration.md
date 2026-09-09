@@ -133,7 +133,7 @@ config/sensor_frames.yaml           # 결과 T_EC_artec 적용처
 
 ### sim 검증 하니스 (Isaac 전용 — 이 안엔 USD/Isaac 코드만)
 ```
-standalone_examples/play/MMS/MMS_ext_calibration.py
+sim_harness/MMS_ext_calibration.py
     setup_async()              # USD 열기, 마블 비활성, 보드 rigid 생성, 카메라/로봇/검출기/솔버 셋업
     _on_physics_step()         # 상태머신: BOARD_SETTLE → (자세 i) SETTLE → SOLVE → DONE
     _finalize_board_and_poses()# 보드 안착 후 실제 pose 읽어 자세 생성
@@ -183,7 +183,7 @@ standalone_examples/play/MMS/MMS_ext_calibration.py
 ## 8. 실행
 
 **sim (Isaac):** VSCode Isaac 확장 코드러너 또는 Script Editor 로
-`standalone_examples/play/MMS/MMS_ext_calibration.py` 실행. 로그:
+`sim_harness/MMS_ext_calibration.py` 실행. 로그:
 `tail -f standalone_examples/play/MMS/captures_calib/calib_log.txt`.
 
 **real:**
@@ -276,7 +276,7 @@ utils/calibration/rim_picker.py          (cv2) — rim 클릭 UI (RimPicker/run_
   scripts/phoxi/turntable_frame_init.py  # PhoXi rim 클릭 (T_CB = T_EB·T_CE)
 
 sim 검증:
-  standalone_examples/play/MMS/MMS_ext_calibration2.py   # 턴테이블 rim 자동추출 → fit → GT 비교
+  sim_harness/MMS_ext_calibration2.py   # 턴테이블 rim 자동추출 → fit → GT 비교
 ```
 
 ## 14. 규약·함정 + 실행
@@ -288,7 +288,7 @@ sim 검증:
   `fit_circle_3d`/`_RimPicker` 를 들고 있음(PhoXi 는 공유 코어 사용). Artec 도 공유 코어로 통일 권장.
 - ⚠ **turntable_frame.yaml stale 의심** — 2026-04-23(Artec pivot 이전). 정밀도 의심 시 재캘리브 1순위.
 
-**sim:** `standalone_examples/play/MMS/MMS_ext_calibration2.py` (Isaac 확장/Script Editor).
+**sim:** `sim_harness/MMS_ext_calibration2.py` (Isaac 확장/Script Editor).
 **real:** `python scripts/artec/turntable_frame_init.py` → rim 클릭 → `config/calibration/turntable_frame.yaml`.
 
 > 상태: rim 방법 ✅ (Isaac+PhoXi 검증 0.015°/0.7mm). 구 어레이 방법은 폐기(rim 으로 대체).

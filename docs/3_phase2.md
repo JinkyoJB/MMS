@@ -205,7 +205,7 @@ fallback:  T_pre = T_BC_master · inv(T_BC_nbv)     # IScan frame 좌측곱 (cas
 ### 6.3 `utils/nbv/frontier.py` (소폭, 선택)
 - 그대로 사용. (선택) 구멍 **면적** 가중 후보 점수 보강 — 필요 시.
 
-### 6.4 sim 검증 하니스 (신규) — `standalone_examples/play/MMS/MMS_ext_phase2_nbv.py`
+### 6.4 sim 검증 하니스 (신규) — `sim_harness/MMS_ext_phase2_nbv.py`
 - Phase 1 GT 누적(`MMS_ext_phase1.py` 패턴)으로 5면 pcd 생성하되 **일부 영역 의도적 구멍**
   (특정 θ skip / occluder) → frontier 검출 → NBV 목표포즈 → **해석 IK+충돌** →
   Isaac 로봇 이동(`look_at_camera`) → 그 자세 GT 캡처 → patch 병합 → **구멍 메워짐 검증**.
