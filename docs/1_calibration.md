@@ -85,6 +85,7 @@
 
 | 파일 | 역할 |
 |---|---|
+| `scripts/artec/calibrate.py` | **단일 진입점** — 0~3 단계 순서 강제 |
 | `scripts/artec/make_charuco.py` | 보드 PNG 생성(인쇄용) |
 | `scripts/artec/intrinsic_calib.py` | 카메라 K 측정 (1회) |
 | `scripts/artec/hand_eye_calib.py` | 메인 루프 — 자세순회 → detect → add_sample → calibrate → save |
@@ -162,20 +163,41 @@ exec(open("/경로/MMS/sim_harness/MMS_ext_calibration2.py").read())     # 턴�
 
 ### real — 실제 캘리브레이션
 
+**단일 진입점이 순서를 강제한다.**
+
 ```bash
 conda activate mms-env && cd "$MMS_ROOT"
 
-env -u PYTHONPATH python scripts/artec/make_charuco.py       # 보드 PNG → 실척 인쇄 (최초 1회)
-env -u PYTHONPATH python scripts/artec/intrinsic_calib.py    # 카메라 K 측정 (최초 1회)
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py     # 자세 순회 → hand_eye_artec.yaml
-env -u PYTHONPATH python scripts/artec/turntable_frame_init.py   # rim 클릭 → turntable_frame.yaml
-
-# 기록된 자세로 재실행
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
-    --poses config/calibration/artec_calibration_poses.yaml
+env -u PYTHONPATH python scripts/artec/calibrate.py           # 전체
+env -u PYTHONPATH python scripts/artec/calibrate.py --from 2  # 2단계부터
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 3  # 3단계만
 ```
 
-→ hand-eye 결과를 `config/sensor_frames.yaml` 의 `T_EC_artec` 에 반영한다.
+| 단계 | 내용 | 산출 |
+|---|---|---|
+| **0** | **사람이 수동 조준** — 보드를 턴테이블 원판 위에 올리고, 보드와 rim 이 카메라에 함께 들어오게 로봇을 맞춘다 | — |
+| **1** | intrinsic — 카메라 K (최초 1회) | `artec_intrinsic.yaml` |
+| **2** | **hand-eye — `T_EC`** | `sensor_frames.yaml::T_EC_artec` |
+| **3** | **turntable — `T_B_F0`** | `turntable_frame.yaml` |
+
+> **왜 `T_EC` 가 `T_B_F0` 보다 먼저인가** — `T_B_F0` 는 rim 점을 **base 프레임**으로
+> 옮겨야 구할 수 있고(`build_T_B_F0(center_B, nz_B)`), 그 변환
+> `T_CB = T_EB · inv(T_EC)` 에 `T_EC` 가 들어간다. **순서를 뒤집을 수 없다.**
+> sim 은 Isaac 어댑터가 base 좌표 점군을 바로 주므로 이 제약이 없다 — 실물만의 문제다.
+>
+> 보드를 원판 위에 두면 2→3 을 **같은 조준 자세에서 이어서** 할 수 있어 0단계를 한 번만 한다.
+
+개별 실행이 필요하면 각 스크립트를 직접 부른다.
+
+```bash
+env -u PYTHONPATH python scripts/artec/make_charuco.py            # 보드 PNG (최초 1회, 실척 인쇄)
+env -u PYTHONPATH python scripts/artec/intrinsic_calib.py
+env -u PYTHONPATH python scripts/artec/hand_eye_calib.py
+env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
+    --poses config/calibration/artec_calibration_poses.yaml       # 기록된 자세로 재실행
+env -u PYTHONPATH python scripts/artec/turntable_frame_init.py
+```
+
 자세 15~25개, 자세 간 회전 **≥30°** 확보할 것(→ T3).
 실물 기준값: **t_err 3.55mm / r_err 1.30°** (2026-04-29)
 
@@ -385,10 +407,11 @@ point-consistency(고정점을 여러 자세서 base 로 변환 후 산포)로 �
      └ 정밀도가 필요하면 2~5 를 1회 더
   ```
 
-  > ⚠ **현재 코드는 반대 순서를 강제한다** — `turntable_frame_init.py` 가 `T_EC` 를
-  > 선행 조건으로 요구한다(rim 점을 base 로 옮기는 데 쓴다). 즉 hand-eye → turntable
-  > 이 현재 순서다. 위 부트스트랩은 **둘 다 이미 값이 있는 상태**(현재 그렇다)에서
-  > 자세 생성을 자동화하자는 것이지, 맨바닥에서 순서를 뒤집자는 게 아니다.
+  > ⚠ **순서는 뒤집을 수 없다** — `T_B_F0` 는 base 프레임 입력이 필요하고 그 변환에
+  > `T_EC` 가 들어간다. hand-eye → turntable 이 확정 순서이며
+  > `scripts/artec/calibrate.py` 가 이를 강제한다(§4).
+  > 위 부트스트랩은 **둘 다 이미 값이 있는 상태**(현재 그렇다)에서 자세 생성을
+  > 자동화하자는 것이지, 맨바닥에서 순서를 뒤집자는 게 아니다.
 
 - ⚠ **Spider FOV** 가 좁아 disc rim 전체가 한 화면에 안 들어올 수 있다 → 보이는 호(arc)에서
   클릭. 원 피팅은 3점이면 되나 호가 짧으면 조건수가 나빠진다.

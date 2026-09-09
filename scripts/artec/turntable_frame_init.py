@@ -28,13 +28,17 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 import yaml
-from scipy.spatial.transform import Rotation as ScipyR
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.robot.xarm_interface import XArmInterface
 from utils.transforms import load_transform, compute_T_CB
+# ★ 원 피팅·T_B_F0 구성·저장은 공유 코어를 쓴다 (PhoXi 판과 동일).
+#   과거 이 파일이 fit_circle_3d / T_B_F0 구성 / yaml 저장을 자체 구현해
+#   공유 코어와 미묘하게 갈라져 있었다 → 2026-09 통일.
+from utils.calibration.turntable_frame import (
+    fit_circle_3d, build_T_B_F0, save_turntable_frame_yaml)
 from mms_artec.sensor.artec_client import ArtecClient, ArtecConfig
 
 # ── CONFIG ─────────────────────────────────────────────────────────────
@@ -56,37 +60,6 @@ _WIN = (
 
 
 # ── 3D circle fit (PhoXi 버전과 공용 알고리즘) ──────────────────────────
-
-def fit_circle_3d(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float, float]:
-    """
-    평면에 fit + 원 fit. 반환: (center, normal, radius, rms_residual).
-    pts (N, 3). 단위 임의 (m 권장).
-    """
-    centroid = pts.mean(axis=0)
-    centered = pts - centroid
-    _, _, vh = np.linalg.svd(centered, full_matrices=False)
-    normal = vh[-1]
-    if normal[2] < 0:
-        normal = -normal
-
-    # 평면 좌표계
-    u = vh[0]; v = vh[1]
-    pts2d = np.column_stack([centered @ u, centered @ v])
-
-    # circle fit (Kasa)
-    A = np.column_stack([2 * pts2d, np.ones(len(pts2d))])
-    b = (pts2d ** 2).sum(axis=1)
-    sol, *_ = np.linalg.lstsq(A, b, rcond=None)
-    cx, cy, c = sol
-    r = float(np.sqrt(cx * cx + cy * cy + c))
-    center3d = centroid + cx * u + cy * v
-
-    # residual
-    d = np.linalg.norm(pts2d - np.array([cx, cy]), axis=1)
-    rms = float(np.sqrt(((d - r) ** 2).mean()))
-
-    return center3d, normal, r, rms
-
 
 # ── pixel → 3D (UV nearest vertex) ─────────────────────────────────────
 
@@ -115,6 +88,14 @@ def pixel_to_3d_C(
 # ── interactive picker ────────────────────────────────────────────────
 
 class _RimPicker:
+    """Artec 전용 rim 클릭 UI.
+
+    ⚠ 공유 코어 `utils/calibration/rim_picker.RimPicker` 를 못 쓰는 이유 —
+      공유 판은 **정렬 점군**(organized_pts, H×W×3)과 `T_CB` 를 받는데, Artec 은
+      메시(vertices + uv)를 준다. 픽셀→3D 매핑 방식 자체가 다르다.
+      Artec 캡처를 organized_pts 로 변환하는 어댑터를 만들면 공유 판으로 통일 가능.
+      (원 피팅·T_B_F0 구성·yaml 저장은 이미 공유 코어를 쓴다)
+    """
     def __init__(self, image: np.ndarray, vertices: np.ndarray, uv: np.ndarray):
         self.image = image     # (H, W, 3) RGB
         self.vertices = vertices
@@ -163,27 +144,6 @@ def _capture_frame(client: ArtecClient):
         print("[artec] texture image 없음 — capture_texture 확인")
         return None
     return fmh
-
-
-def _save_yaml(T_BF0: np.ndarray, n_pts: int, radius_mm: float, rms_mm: float):
-    import datetime
-    OUTPUT_YAML.parent.mkdir(parents=True, exist_ok=True)
-    t = T_BF0[:3, 3].tolist()
-    R = T_BF0[:3, :3]
-    q = ScipyR.from_matrix(R).as_quat().tolist()
-    OUTPUT_YAML.write_text(yaml.dump({
-        "T_B_F0": {
-            "matrix": [list(map(float, row)) for row in T_BF0.tolist()],
-            "rotation_quat": [float(v) for v in q],
-            "translation": [float(v) for v in t],
-        },
-        "date": datetime.date.today().isoformat(),
-        "method": "artec_uv_3d_circle_fit",
-        "n_rim_points": int(n_pts),
-        "rim_radius_mm": float(round(radius_mm, 2)),
-        "rim_residual_mm": float(round(rms_mm, 3)),
-    }, default_flow_style=None, allow_unicode=True), encoding="utf-8")
-    print(f"[artec] saved → {OUTPUT_YAML}")
 
 
 # ── main ──────────────────────────────────────────────────────────────
@@ -266,25 +226,17 @@ def main():
             if rms_mm > WARN_RESIDUAL:
                 print(f"⚠ residual 큼 ({rms_mm:.1f} > {WARN_RESIDUAL}mm) — 점 다시 찍기 권장")
 
-            # T_BF0 구성: F.z = -normal (외부 normal 이지만 F.z 는 위쪽이라 부호 조정 필요)
-            # 회전: world z (B 의 z) → F.z 로 정렬
-            z_F = normal / np.linalg.norm(normal)
-            # x_F: world x 를 F 평면에 투영
-            x_world = np.array([1.0, 0.0, 0.0])
-            x_F = x_world - np.dot(x_world, z_F) * z_F
-            x_F /= np.linalg.norm(x_F)
-            y_F = np.cross(z_F, x_F)
-            R_FB = np.column_stack([x_F, y_F, z_F])      # F-axes in B
-            R_BF = R_FB.T
-
-            T_BF0 = np.eye(4)
-            T_BF0[:3, :3] = R_BF
-            T_BF0[:3, 3] = -R_BF @ (center_mm / 1000.0)   # B → F translation in m
+            # 공유 코어로 T_B_F0 구성 (축 퇴화 처리 포함). center 는 m 로 넘긴다.
+            T_BF0 = build_T_B_F0(center_mm / 1000.0, normal)
 
             print(f"\n[T_B_F0]\n{T_BF0}")
             ans = input("\n저장할까요? (y/N): ").strip().lower()
             if ans == "y":
-                _save_yaml(T_BF0, len(pts_B), radius_mm, rms_mm)
+                save_turntable_frame_yaml(
+                    OUTPUT_YAML, T_BF0, n_points=len(pts_B),
+                    radius_mm=radius_mm, residual_mm=rms_mm,
+                    extra={"method": "artec_uv_3d_circle_fit"})
+                print(f"[artec] saved → {OUTPUT_YAML}")
                 return
             else:
                 ans2 = input("재시도? (Enter / q): ").strip().lower()
