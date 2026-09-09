@@ -237,5 +237,8 @@ scripts/sim/log/testset_points/
 # 렌더 녹화 원본 (대용량, 재생성 가능)
 scripts/sim/log/rec/
 
-# sim 캘리브 검증 산출물 (재생성 가능)
-scripts/sim/log/handeye/
+# sim 실행 산출물 — 전부 재생성 가능하므로 추적하지 않는다
+#   rim_capture.npz 등 캡처   : scripts/sim/calib_rim_sim.py
+#   testset_points/           : scripts/sim/extract_testset_points.py
+#   gt/, testset_sweep/       : scripts/sim/testset_sweep.sh
+scripts/sim/log/
