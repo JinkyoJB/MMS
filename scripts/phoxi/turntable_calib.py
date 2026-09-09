@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/phoxi/turntable_frame_init.py
+scripts/phoxi/turntable_calib.py
 
 T_B_F0 캘리브레이션 (PhoXi): 턴테이블 rim 클릭 → 3D 원 피팅 → ^B T_F(0) 추정.
 

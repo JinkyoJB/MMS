@@ -84,7 +84,7 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 ### 1.4 턴테이블 축 `T_B_F0`
 
 ```bash
-env -u PYTHONPATH python scripts/artec/turntable_frame_init.py
+env -u PYTHONPATH python scripts/artec/turntable_calib.py
 # → 원판 rim 위 점을 클릭 → config/calibration/turntable_frame.yaml
 ```
 - rim 이 한 화면에 다 안 들어오면 보이는 호(arc)에서 클릭. 3점이면 되지만 호가 짧으면 정밀도 저하

@@ -3,7 +3,7 @@
 
 실행 순서가 왜 이런가
 --------------------
-`turntable_frame_init.py` 는 rim 점을 **base 로 변환한 뒤** 원을 피팅한다.
+`turntable_calib.py` 는 rim 점을 **base 로 변환한 뒤** 원을 피팅한다.
 그 변환 `T_CB = T_EB · inv(T_EC)` 에 **`T_EC` 가 들어가므로** hand-eye 가 먼저다.
 
   ※ 이는 **현재 구현 기준**이다. 클릭 자체는 카메라 프레임 점을 주므로, 카메라
@@ -27,7 +27,7 @@
   env -u PYTHONPATH python scripts/artec/calibrate.py --only 3     # 3단계만
 
   각 단계는 기존 스크립트를 그대로 호출한다(로직 중복 없음):
-    scripts/artec/intrinsic_calib.py / hand_eye_calib.py / turntable_frame_init.py
+    scripts/artec/intrinsic_calib.py / hand_eye_calib.py / turntable_calib.py
 
 sim 에서 미리 확인하려면 → `scripts/sim/calib_handeye_sim.py`,
 `scripts/sim/calib_rim_sim.py` (docs/1_calibration.md §4)
@@ -46,7 +46,7 @@ STEPS = [
      "config/calibration/artec_intrinsic.yaml"),
     (2, "hand-eye   — T_EC",          "scripts/artec/hand_eye_calib.py",
      "config/calibration/hand_eye_artec.yaml → sensor_frames.yaml::T_EC_artec"),
-    (3, "turntable  — T_B_F0",        "scripts/artec/turntable_frame_init.py",
+    (3, "turntable  — T_B_F0",        "scripts/artec/turntable_calib.py",
      "config/calibration/turntable_frame.yaml"),
 ]
 

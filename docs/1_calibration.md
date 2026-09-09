@@ -89,8 +89,8 @@
 | `scripts/artec/make_charuco.py` | 보드 PNG 생성(인쇄용) |
 | `scripts/artec/intrinsic_calib.py` | 카메라 K 측정 (1회) |
 | `scripts/artec/hand_eye_calib.py` | 메인 루프 — 자세순회 → detect → add_sample → calibrate → save |
-| `scripts/artec/turntable_frame_init.py` | 턴테이블 rim 클릭 (`ARTEC_TO_OPENCV` z-flip + `T_CB`) |
-| `scripts/phoxi/turntable_frame_init.py` | 〃 PhoXi 판 (`T_CB = T_EB·T_CE`) |
+| `scripts/artec/turntable_calib.py` | 턴테이블 rim 클릭 (`ARTEC_TO_OPENCV` z-flip + `T_CB`) |
+| `scripts/phoxi/turntable_calib.py` | 〃 PhoXi 판 (`T_CB = T_EB·T_CE`) |
 | `config/sensor_frames.yaml` | 결과 `T_EC_artec` 적용처 |
 
 **sim 검증**
@@ -169,7 +169,7 @@ exec(open("/경로/MMS/sim_harness/MMS_ext_calibration2.py").read())     # 턴�
 | `make_charuco.py` | — | 보드 PNG 생성 (최초 1회, 실척 인쇄) |
 | `intrinsic_calib.py` | 카메라 **K** | 최초 1회 (렌즈·센서 교체 시 재수행) |
 | `hand_eye_calib.py` | **`T_EC`** | 카메라가 손목에 붙은 관계 |
-| `turntable_frame_init.py` | **`T_B_F0`** | 턴테이블 축. **`T_EC` 를 입력으로 받는다** |
+| `turntable_calib.py` | **`T_B_F0`** | 턴테이블 축. **`T_EC` 를 입력으로 받는다** |
 | **`calibrate.py`** | — | **단일 진입점.** 위 셋을 0→1→2→3 순서로 호출 |
 
 > `calibrate.py` 는 **자체 로직이 없다.** 하는 일은 세 가지뿐이다 —
@@ -193,7 +193,7 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3  # 3단계만
 | **3** | **turntable — `T_B_F0`** | `turntable_frame.yaml` |
 
 > **왜 `T_EC` 가 `T_B_F0` 보다 먼저인가 — 현재 구현 기준이다.**
-> `turntable_frame_init.py` 는 rim 점을 **base 로 변환한 뒤** 원을 피팅한다
+> `turntable_calib.py` 는 rim 점을 **base 로 변환한 뒤** 원을 피팅한다
 > (`pts_B = pts_C @ R_CB.T + t_CB`, 그 다음 `fit_circle_3d(pts_B)`).
 > 그 변환 `T_CB = T_EB · inv(T_EC)` 에 `T_EC` 가 들어가므로 `T_EC` 가 선행돼야 한다.
 >
@@ -211,7 +211,7 @@ env -u PYTHONPATH python scripts/artec/intrinsic_calib.py
 env -u PYTHONPATH python scripts/artec/hand_eye_calib.py
 env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
     --poses config/calibration/artec_calibration_poses.yaml       # 기록된 자세로 재실행
-env -u PYTHONPATH python scripts/artec/turntable_frame_init.py
+env -u PYTHONPATH python scripts/artec/turntable_calib.py
 ```
 
 자세 15~25개, 자세 간 회전 **≥30°** 확보할 것(→ T3).
@@ -294,7 +294,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
 ```bash
 conda activate mms-env && cd "$MMS_ROOT"
 
-env -u PYTHONPATH python scripts/artec/turntable_frame_init.py      # rim 클릭
+env -u PYTHONPATH python scripts/artec/turntable_calib.py      # rim 클릭
 # 또는 단일 진입점으로 3단계만
 env -u PYTHONPATH python scripts/artec/calibrate.py --only 3
 ```
@@ -489,7 +489,7 @@ sim 은 보드 rigid body 의 world pose 를 USD 에서 읽어 둘 다 우회한
 2. T_B_F0 에서 보드 중심·법선 산출          ← 검출 단계 불필요
 3. generate_hemisphere_poses + 충돌 게이트 → 자세 순회
 4. 정확한 T_EC 산출 → sensor_frames.yaml 갱신
-5. (선택) 새 T_EC 로 turntable_frame_init 재실행 → T_B_F0 갱신
+5. (선택) 새 T_EC 로 turntable_calib 재실행 → T_B_F0 갱신
    └ 정밀도가 필요하면 2~5 를 1회 더
 ```
 

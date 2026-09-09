@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/artec/turntable_frame_init.py
+scripts/artec/turntable_calib.py
 
 T_B_F0 캘리브레이션 — Artec 버전.
 턴테이블 rim 점 클릭 → UV→3D 매핑 → B 프레임 변환 → 3D 원 피팅 → T_B_F0 저장.

@@ -248,7 +248,7 @@ SDK General Pipeline 으로 최종 메시 생성. **Cleaning 은 반드시 Fusio
 
 1. **turntable_frame.yaml 미검증** — T_BF0 2026-04-23(Artec pivot 이전), rim 3점·residual 0.0.
    Phase 2 hint·NBV·recovery raycast 가 같은 T_BF0 의존 → 정밀도 의심 시 1순위 재캘리브
-   (`scripts/phoxi/turntable_frame_init.py`). 라이브 뷰어는 SDK 정합행렬 사용해 이 의존 없음.
+   (`scripts/phoxi/turntable_calib.py`). 라이브 뷰어는 SDK 정합행렬 사용해 이 의존 없음.
 2. **tracking-lost ≠ object-presence**: 물체 제거해도 빈 디스크에 정합 성공해 lost 안 뜰 수 있음 → HYBRID + 별도 휴리스틱.
 3. **last-good θ 없으면 recovery skip** (시작 직후 lost).
 4. **Robot 안전성**: xArm IK/limit/self-collision 의존. 도달 불가 pose 추천 시 `set_position` 실패 → 재시도.
