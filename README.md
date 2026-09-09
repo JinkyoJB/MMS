@@ -1,65 +1,119 @@
 # MMS — Multi Modal 3D Scanning System
 
-> Artec Spider + xArm7 + 턴테이블 자동 3D 스캐닝 시스템의 **단일 통합 문서**.
->
-> **최종 산출물 = 아이템 전면(full-coverage)의 water-tight mesh + texture.**
->
-> Phase 1/2/3 · tracking-lost recovery · hand-eye · 라이브 뷰어 등 모든 sub-system 의
-> 존재 이유는 결국 이 한 산출물에 귀결.
+> Artec Spider + xArm7 + 턴테이블 자동 3D 스캐닝 시스템.
+> **최종 산출물 = 대상물 전면(full-coverage)의 watertight mesh + texture.**
+
+**이 문서의 역할** — 알고리즘 설계와 그 근거를 다룬다. 각 Phase가 왜 그렇게 판정하는지,
+어떤 함정이 있는지가 여기 있다.
+
+| 목적 | 볼 문서 |
+|---|---|
+| 설치하고 돌려보기 | `setup/setup_envs.sh` → **인수인계서_A1** §3 |
+| 조정 가능한 설정 찾기 | **인수인계서_A1** §4.7 |
+| **알고리즘이 왜 이런가** | **이 문서** §1~8 |
+| 단계별 상세 | `docs/*.md` (calibration / phase1 / phase2 / collision / hw_layout) |
 
 ---
 
-## 좌표계 표기 규칙 (Notation)
+## 규약 — 좌표계와 단위
 
 ```
-T_AB : 프레임 A → 프레임 B 변환    x_B = T_AB @ x_A
+T_AB : 프레임 A → B 변환      x_B = T_AB @ x_A
+체인 규칙: T_AC = T_AB @ T_BC      (중간 프레임 B가 약분)
 ```
 
-체인 규칙: `T_AC = T_AB @ T_BC` (중간 프레임 B가 약분)
+> 코드·주석·문서 전부 `T_AB` 형식만 쓴다 (`^A T_B`, `T_A^B` 금지).
 
 | 기호 | 프레임 | 설명 |
-|------|--------|------|
-| B | Base | xArm7 로봇 베이스 (≡ 월드 프레임 W) |
-| F | Turntable | 턴테이블 프레임 (원점: 회전축 중심, z축: 위쪽) |
-| O | Object (Internal Global) | 첫 스캔 기준 내부 글로벌 프레임 (Artec 스타일) |
-| E | End-Effector | 로봇 플랜지 / TCP |
-| C | Camera | 카메라 프레임 (C_femto, C_phoxi) |
+|---|---|---|
+| **B** | Base | xArm7 로봇 베이스 (≡ 월드) |
+| **E** | End-Effector | 로봇 플랜지 / TCP |
+| **C** | Camera | 카메라 광학 프레임 |
+| **F** | Turntable | 회전축 중심 원점, z축 위쪽 |
+| **O** | Object | 첫 스캔 기준 내부 글로벌 프레임 |
 
-> **규칙**: 코드 변수명 `T_AB`는 항상 "A에서 B로", `x_B = T_AB @ x_A`.  
-> 주석이나 문서에서도 `T_AB` 형식만 사용한다 (`^A T_B`, `T_A^B` 금지).
-
----
-
-## 아키텍처
-
-```
-MMS  (mms/system.py)
- ├── PhoxiClient    (mms/sensor/phoxi/)        ← Photoneo PhoXi 3D
- ├── OrbbecClient   (mms/sensor/orbbec/)       ← Orbbec Femto Bolt
- ├── ArtecClient    (mms/sensor/artec/)        ← Artec 3D Scanner
- ├── XArmInterface  (mms/robot/xarm_interface.py)
- └── TurntableInterface (mms/turntable/)
-```
-
----
-
-## 좌표계 변환 일람
-
-### 상수 (캘리브레이션/설계로 결정)
+**상수** (캘리브레이션으로 결정)
 
 | 변환 | 의미 | 출처 |
-|------|------|------|
-| `T_BF0` | B → F (θ=0) | `config/calibration/turntable_frame.yaml` |
-| `T_EC` | E → C | `config/calibration/hand_eye_phoxi.yaml` (key: `T_E_C`) |
+|---|---|---|
+| `T_EC` | E → C (hand-eye) | `config/sensor_frames.yaml::T_EC_artec` |
+| `T_B_F0` | B → F (θ=0) | `config/calibration/turntable_frame.yaml` |
 
-### 가변값 (매 스텝 계산)
+**가변값** (매 스텝 계산)
 
-| 변환 | 의미 | 계산 방법 |
-|------|------|-----------|
-| `T_BF(θ)` | B → F | `inv(T_FB0 @ Rz(θ))` |
-| `T_FB(θ)` | F → B | `T_FB0 @ Rz(θ)` |
-| `T_EB` | E → B | 로봇 FK 실시간 (`XArmInterface.get_ee_pose_mat()`) |
-| `T_CB` | C → B | `T_EB @ inv(T_EC)` |
+| 변환 | 계산 |
+|---|---|
+| `T_FB(θ)` | `T_FB0 @ Rz(θ)` |
+| `T_BF(θ)` | `inv(T_FB0 @ Rz(θ))` |
+| `T_EB` | 로봇 FK 실시간 (`XArmInterface.get_ee_pose_mat()`) |
+| `T_CB` | `T_EB @ inv(T_EC)` |
+
+### ⚠ 단위가 섞인다 — 버그 1순위
+
+| 출처 | translation |
+|---|---|
+| `get_ee_pose_mat()`, yaml `T_EC` | **m** |
+| `xarm.set_position(x,y,z,…)` | **mm** |
+| Artec SDK `frame_transformation` / vertices / master pts | **mm** |
+
+→ camera-motion `T_pre`의 translation만 `× 1000` 스케일 (§4 merge hint 블록).
+
+---
+
+## 구조
+
+```
+mms_artec/
+  system.py                      ArtecMMS (오케스트레이터 + disc_surface_frame)
+  backends/                      real / isaac 백엔드 팩토리
+    isaac/{isaac_world,isaac_xarm,isaac_turntable,isaac_scanner}.py
+  sensor/artec_client.py         real 스캐너 (+ capture_points_base)
+  nbv/artec_streaming_scan_session.py   Phase 1 streaming SLAM + 4 watchdog
+  nbv/artec_multipass_scan_session.py   Phase 1+2+3 통합, view-score, recovery
+utils/                           ★ sensor-agnostic 공유 코어 (PhoXi·Artec·Isaac 공용)
+  calibration/{turntable_frame,rim_picker,hand_eye_calibrator,artec_charuco_detector}.py
+  collision/{geometry,robot_collision}.py    자세별 충돌 쿼리 (real/sim 공용)
+  nbv/{frontier,icp_strategy,manual_picker,phase2_nbv,flip_policy}.py
+  robot/{xarm_interface,xarm7_kinematics}.py     ★ 해석 FK/IK (real·sim 공유)
+  turntable/turntable_interface.py    transforms.py    control/theta_planner.py
+mms_phoxi/nbv/{scan_session,tsdf_volume,pcd_accumulate_volume}.py   NBV/병합 참조 구현
+main_artec.py                    진입점 (BACKEND, RUN_CALIBRATION 토글)
+mms_paths.py                     자산(USD) 루트 자동 해석
+setup/setup_envs.sh              conda env 3종 생성
+```
+
+---
+
+## 환경
+
+```bash
+bash setup/setup_envs.sh          # mms-env / env_isaacsim / step2usd 생성 + 검증
+```
+
+| env | 용도 |
+|---|---|
+| `mms-env` | real 백엔드 + 오프라인 스크립트(캘리브·분석). numpy 2.x |
+| `env_isaacsim` | isaac 백엔드 (Isaac Sim 5.1). **numpy 1.x** — 섞으면 ABI 오류 |
+| `step2usd` | STEP→USD 전용. Isaac 불필요라 빠름 |
+
+**주의 3가지**
+
+| # | 내용 |
+|---|---|
+| 1 | 셸의 ROS python3.10 경로가 섞인다 → **모든 실행에 `env -u PYTHONPATH`** |
+| 2 | OpenCV 5.x엔 `cv2.calibrateHandEye`가 없다 → **`opencv<5` 고정**. 상수는 남아 있어 import는 통과하므로 발견이 늦다 |
+| 3 | 콘솔 cp949 이모지 깨짐 → `PYTHONIOENCODING=utf-8` |
+
+**장비** — Artec Spider `SP.10.36181288` (SDK 1.18.4) · xArm7 `192.168.1.210` ·
+턴테이블 Ezi-SERVO `192.168.0.10` **UDP**(TCP는 지속 polling 시 socket 막힘)
+
+**실행·씬 생성 명령**은 `docs/sim_commands.md`, 설정 항목은 인수인계서_A1 §4.7 참조.
+
+> SDK 바인딩 변경 시:
+> `cmake --build mms_artec/sensor/build --config Release --target <module>`
+>
+> raw scan(`output/scan_raw/<TS>/`)은 `master.sproj` + `meta.npz`로 저장된다.
+> `merge_compare.py --load`로 **스캔 없이 후처리만 반복 실험**할 수 있다.
 
 ---
 
@@ -94,69 +148,6 @@ with MMS(cfg) as mms:
 
 ---
 
-## 프로젝트 구조
-
-```
-MMS/
-├── main.py
-├── config/
-│   ├── calibration/
-│   │   ├── turntable_frame.yaml      # T_B_F0 (B→F at θ=0)
-│   │   ├── hand_eye_phoxi.yaml       # T_E_C (E→C, PhoXi)
-│   │   └── calibration_poses.yaml
-│   └── sensor_frames.yaml            # T_EC_femto, T_EC_phoxi (기타 센서)
-└── mms/
-    ├── system.py                      # MMS 최상위 오케스트레이터
-    ├── core/
-    │   ├── frames.py                  # Frame 데이터클래스
-    │   └── stream.py                  # Stream — 슬라이딩 윈도우 버퍼
-    ├── sensor/
-    │   ├── phoxi/                     # PhoxiClient
-    │   ├── orbbec/                    # OrbbecClient
-    │   └── artec/                     # ArtecClient
-    ├── robot/
-    │   └── xarm_interface.py
-    └── utils/
-        ├── transforms.py              # TurntableTransformConfig, compute_T_CB, ...
-        ├── calibration/
-        │   └── hand_eye_calibrator.py # HandEyeCalibrator (T_EC 추정)
-        └── visualization.py
-```
-
----
-
-## 환경 설정
-
-`BACKEND` 에 따라 **쓰는 python 이 다르다** (섞지 말 것).
-
-### real 백엔드 — conda `mms-env`
-
-```bash
-conda create -n mms-env python=3.11
-conda activate mms-env
-pip install -r requirements.txt
-env -u PYTHONPATH python main_artec.py
-```
-
-### isaac(sim) 백엔드 — conda `env_isaacsim`
-
-`isaacsim`/`pxr` 는 Isaac Sim 배포판이 제공하므로 `requirements.txt` 대상이 아니다.
-
-```bash
-env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u main_artec.py
-./scripts/sim/run_e2e_gui.sh mug      # testset 물체 씬 (권장 — 경로/인자 처리 포함)
-```
-
-> ⚠ 셸에 ROS `PYTHONPATH`(python3.10) 가 잡혀 있으면 3.11 env 에 섞이므로
-> `env -u PYTHONPATH` 를 붙이거나 미리 `unset PYTHONPATH` 한다.
->
-> ⚠ opencv 는 **`<5`** 여야 한다. OpenCV 5.x 는 `cv2.calibrateHandEye` 가 python
-> 바인딩에서 빠져 hand-eye 캘리브가 깨진다 (상수만 남아 import 는 통과).
-
-자세한 실행·씬 자산 규약은 `docs/main_flow.md` §0 · §환경/재현 체크리스트 참고.
-
-
----
 ### ★ sim / real 듀얼 백엔드 (핵심 전략)
 
 `ArtecMMSConfig.backend = "real" | "isaac"` 하나로 robot/turntable/scanner 를 통째 교체.
@@ -689,41 +680,6 @@ Phase 1/2 모두 같은 **Spider ↔ Turntable 양방향 피드백** 위에서 �
 
 ---
 
-## 핵심 파일 맵
-
-```
-mms_artec/
-  system.py                      ArtecMMS (orchestrator + disc_surface_frame)
-  backends/                      real/isaac 백엔드 팩토리
-    isaac/{isaac_world,isaac_xarm,isaac_turntable,isaac_scanner}.py
-  sensor/artec_client.py         real 스캐너 (+ capture_points_base)
-  nbv/artec_*_scan_session.py    Artec 스캔 세션(streaming/multipass)
-utils/
-  calibration/{turntable_frame,rim_picker,hand_eye_calibrator}.py
-  collision/{geometry,robot_collision}.py          ★ 자세별 충돌 쿼리(real/sim 공용)
-  control/{theta_planner,hardware_layer}.py
-  nbv/{frontier,icp_strategy,manual_picker}.py     ★ sensor-agnostic NBV 코어
-  robot/{xarm_interface,xarm7_kinematics}.py    turntable/turntable_interface.py    transforms.py
-mms_phoxi/nbv/{scan_session,tsdf_volume,pcd_accumulate_volume}.py   ★ NBV/병합 참조 구현
-main_artec.py                    진입점 (BACKEND, RUN_CALIBRATION 토글)
-standalone_examples/play/MMS/MMS_ext_calibration{,2}.py   hand-eye / 턴테이블 rim sim 검증
-```
-
-## 좌표 / 단위 규약
-
-프레임: **B**=xArm base=world, **E**=TCP, **C**=Spider camera(≈ scan-world W; 각 ScanSession 이
-첫 frame 카메라 frame 을 W 로 잡음), **F**=turntable, **O**=object. 표기 `T_AB : A→B`, `x_B = T_AB @ x_A`.
-
-| 출처 | translation 단위 |
-|---|---|
-| `XArmInterface.get_ee_pose_mat()` T_EB, yaml `T_EC` | **m** |
-| `xarm.set_position(x,y,z,…)` | **mm** |
-| SDK frame_transformation / vertices / master pts | **mm** |
-
-→ camera-motion T_pre 의 translation 만 `× 1000` scale (merge hint 블록).
-
----
-
 ## 알려진 한계 / 가정
 
 1. **turntable_frame.yaml 미검증** — T_BF0 2026-04-23(Artec pivot 이전), rim 3점·residual 0.0.
@@ -738,59 +694,7 @@ standalone_examples/play/MMS/MMS_ext_calibration{,2}.py   hand-eye / 턴테이�
 
 ---
 
-## 환경 / 재현 체크리스트
+**개발 원칙** — 모든 로직은 sim(ground-truth)에서 개발·검증하고 real(Artec SLAM)에
+동일 코드를 적용한다. sensor-agnostic 코어(`utils/`)를 PhoXi·Artec·Isaac이 공유한다.
 
-- Artec SDK 1.17.3, 스캐너 Spider `SP.10.36181288`. xArm `192.168.1.210`,
-  Turntable `192.168.0.10` **UDP**. (real 개발 환경: Windows 11 PowerShell, conda `mms-env`.
-  sim 개발 환경: Linux + conda `env_isaacsim` — §0 ★ 백엔드별 python 참고.)
-- **env 2개** (섞지 말 것):
-  - `mms-env` (py3.11) — real 백엔드 + 오프라인 스크립트(캘리브·rim 클릭·분석).
-    `pip install -r requirements.txt`
-  - `env_isaacsim` (py3.11) — isaac 백엔드. `isaacsim`/`pxr` 는 Isaac 배포판이 제공하므로
-    requirements.txt 대상이 아니다.
-  - ⚠ **opencv 는 `<5` 고정**: OpenCV 5.x python 바인딩엔 `cv2.calibrateHandEye` 가 없어
-    hand-eye 가 깨진다. 상수(`CALIB_HAND_EYE_*`)는 남아 있어 import 시엔 멀쩡해 보인다.
-  - ⚠ ROS `PYTHONPATH`(py3.10) 오염 → 모든 실행에 `env -u PYTHONPATH` 를 붙인다.
-- 캘리브 파일: `config/sensor_frames.yaml`(`T_EC_artec`), `config/calibration/turntable_frame.yaml`(§알려진 한계 1 주의).
-- binding 변경 시: `cmake --build mms_artec/sensor/build --config Release --target <module>`.
-- 콘솔 인코딩: `PYTHONIOENCODING=utf-8` (cp949 이모지 깨짐 회피).
-- 실행 (앞에 `env -u PYTHONPATH` 생략 금지):
-  ```
-  # real — mms-env
-  python main_artec.py                          # 메인 (BACKEND, RUN_CALIBRATION 토글)
-  python scripts/artec/live_scan_view.py        # 라이브 뷰어 (별도 터미널)
-  python scripts/artec/merge_compare.py [--load output/scan_raw/<TS>]  # 병합 variant 비교
-  python -c "import main_artec"                  # import smoke test
-
-  # sim — env_isaacsim (BACKEND="isaac")
-  ~/miniconda3/envs/env_isaacsim/bin/python -u main_artec.py   # 기본 씬(마블)
-  ./scripts/sim/run_e2e_gui.sh mug              # testset 물체, GUI (씬·인자 처리 포함)
-  ./scripts/sim/run_e2e_gui.sh mug 2            # Phase1 → Phase2 NBV
-  ./scripts/sim/e2e_sweep.sh                    # testset 9종 순회 (headless)
-  ```
-- sim 씬 자산: `2_3Dassets/frame_xarm7_spider_turntable/v2.usd`(베이스 셀) +
-  `2_3Dassets/spider/`(Spider 스캐너 소스·텍스처). **v2.usd 는 스캐너 텍스처를 상대경로
-  `../spider/...` 로 참조** → 두 폴더는 항상 형제로 같이 옮긴다.
-  testset 합성 씬은 `place_testset_object.py` 가 v2.usd 를 **subLayer 절대경로**로 굽기 때문에,
-  v2.usd 를 옮기면 `--all --headless` 로 **재합성해야 한다**(안 하면 씬 prim 0개).
-- raw scan 저장(`output/scan_raw/<TS>/`): `master.sproj`(IScan raw frame_transformations) +
-  `meta.npz`(`scan_indices/T_pres/T_BC/T_CB/n_scans`). `--load` 로 scan 없이 후처리 반복 실험.
-
----
-
-## 상태 요약
-
-| 단계 | 상태 | 비고 |
-|---|---|---|
-| 0. sim/real 백엔드 | ✅ | robot/turntable/scanner 전환, Phase A(모션) 검증 |
-| 1. auto-calibration | ✅ | hand-eye(ChArUco+solvePnP, 3.55mm) + 턴테이블 rim(Isaac, 0.015°/0.7mm; 3구는 폐기) |
-| 2. 5면 Phase1 streaming | ✅🔬 | streaming SLAM + elevation view-score 구현, sim view-planning 검증 남음 |
-| 3. 아랫면(flip 병합) | ♻️🔬 | multipass 설계 존재, 병합 검증 필요 |
-| 4. 2+3 병합(T_pre hint) | ♻️🔬 | centroid-pivot hint + ICP/GlobalReg/누적 부품 존재 |
-| 5. 구멍 보충 NBV | ♻️🔬 | PhoXi frontier 루프 재사용, Artec 적용+조사 |
-| 6. watchdog + recovery | ✅ | 4 watchdog + 3-retry 자동 recovery(probe+축소 elevation) |
-| 7. 후처리 artec_process | ♻️🔬 | SDK General Pipeline(cleaning→fusion 순서), Artec 통합 검증 |
-| 8. 라이브 시각화 | ✅ | SDK 정합행렬 누적, Filament 뷰어(별도 터미널) |
-
-**개발 원칙**: 모든 로직은 sim(ground-truth)에서 개발·검증 → real(Artec SLAM)에 동일 코드 적용.
-sensor-agnostic 코어(`utils/`)를 PhoXi·Artec·Isaac이 공유.
+> 단계별 구현 상태와 향후 과제는 **인수인계서_A1** §5·§6 참조.
