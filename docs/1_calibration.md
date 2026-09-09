@@ -200,6 +200,7 @@ env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u \
 | `MMS_DRIVE_KP` / `KD` | 2000 / 200 | 관절 위치 드라이브 게인 |
 | `MMS_DRIVE_MAXEFF` | 500 | 최대 토크. **USD 원본 maxForce(20~100)는 중력에 포화**한다 |
 | `MMS_MOVE_TIMEOUT` | 400 | 한 자세 구동 최대 스텝 |
+| `MMS_MOVE_RAMP` | 90 | **이동 램프 스텝** — 크게 하면 더 천천히 움직인다 |
 | `MMS_SETTLE_TOL` | 0.045 rad (≈2.6°) | 관절 수렴 허용오차 |
 
 > ⚠ **알려진 계통 오차** — 로봇이 완전히 정지한(속도 0) 뒤에도 목표 대비
@@ -210,6 +211,14 @@ env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u \
 > hand-eye 는 **실측 EE 자세와 실측 영상을 쌍으로** 쓰므로 결과에는 영향이 없다
 > (t_err ~1mm PASS). 허용오차를 2.6°로 잡아 헛된 타임아웃만 막아두었다.
 > 원인(충돌 접촉 / 드라이브 수렴 한계 등)은 미규명 — 로그에 잔차를 남긴다.
+
+> **로봇이 너무 빠르게 움직이면** `MMS_MOVE_RAMP` 를 키운다(기본 90).
+> 목표를 한 번에 던지지 않고 관절공간을 smoothstep 으로 보간해 보내므로,
+> 값이 클수록 부드럽고 느려진다.
+
+> **종료 시 빨간 메시지** — `Task was destroyed but it is pending!` /
+> `coroutine ... was never awaited` 는 **Isaac 위젯 정리 과정의 잡음**이다.
+> 결과와 무관하니 무시하고, 판정은 그 위의 `===== COMPLETE =====` 블록을 본다.
 
 **결과** (2026-09-09 실측, v3 씬)
 

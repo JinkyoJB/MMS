@@ -189,6 +189,9 @@ POSE_CFG           = HS.PoseConfig()         # 공유 정의
 # ── 상태머신 타이밍 ───────────────────────────────────────────────────────────
 SETTLE_STABLE_N    = 15        # 관절 수렴 연속 N 스텝이면 캡처
 MOVE_TIMEOUT_N     = int(os.environ.get("MMS_MOVE_TIMEOUT", 400))  # 한 자세 구동 최대 스텝
+# 목표를 한 번에 던지면 급가속한다(특히 max_effort 를 올린 뒤). 파이프라인
+# (isaac_scan_session.DRIVE_STEPS)처럼 관절공간을 N 스텝에 걸쳐 선형 보간한다.
+MOVE_RAMP_N        = int(os.environ.get("MMS_MOVE_RAMP", 90))
 # 관절 수렴 허용오차. 2026-09-09 실측: 완전 정지(속도 0) 후에도 목표 대비
 #   joint1 +1.4° / joint2~7 +0.45~0.8° 의 계통 오차가 남는다. 드라이브 게인을
 #   100배(kp 2000→200000) 올려도 joint1 은 1.40° 로 불변 → 제어 문제가 아니다.
@@ -414,7 +417,7 @@ _ctx = {
     "dof_idx": None, "T_W_base": None, "K": None, "dist": None, "T_EC_gt": None,
     "detector": None, "calibrator": None,
     "poses": [], "pose_idx": 0, "seed_q": None, "target_q": None,
-    "board_center": None, "phase": "BOARD_SETTLE", "phase_step": 0, "stable_n": 0,
+    "ramp_from": None, "board_center": None, "phase": "BOARD_SETTLE", "phase_step": 0, "stable_n": 0,
     "step": 0,
 }
 
@@ -466,7 +469,10 @@ def _start_pose(idx):
             _ctx["pose_idx"] = idx
             _ctx["target_q"] = np.asarray(q, float)
             _ctx["seed_q"] = np.asarray(q, float)
-            drive_joints(q)
+            # 램프 시작점 = 현재 실측 관절각
+            _rq = np.asarray(_ctx["robot"].get_joint_positions(), float)
+            _ctx["ramp_from"] = np.array([_rq[d] for d in _ctx["dof_idx"]], float)
+            drive_joints(_ctx["ramp_from"])
             _ctx["phase"] = "SETTLE"; _ctx["phase_step"] = 0; _ctx["stable_n"] = 0
             print(f"[CALIB] → pose {idx+1}/{len(poses)} IK ok, 구동")
             return
@@ -515,7 +521,15 @@ def _on_physics_step(step_size):
                 _ctx["phase"] = "DONE"
 
     elif phase == "SETTLE":
-        if _joint_err_to_target() < JOINT_SETTLE_TOL:
+        # 램프: 현재→목표를 MOVE_RAMP_N 스텝에 나눠 보낸다 (급가속 방지)
+        _k = _ctx["phase_step"]
+        if _k <= MOVE_RAMP_N and _ctx.get("ramp_from") is not None:
+            _a = _k / float(MOVE_RAMP_N)
+            _a = _a * _a * (3.0 - 2.0 * _a)          # smoothstep — 시작·끝 가속도 0
+            drive_joints((1.0 - _a) * _ctx["ramp_from"] + _a * _ctx["target_q"])
+
+        # 램프가 끝난 뒤부터 수렴 판정 (도중엔 목표와 다른 게 정상)
+        if _k > MOVE_RAMP_N and _joint_err_to_target() < JOINT_SETTLE_TOL:
             _ctx["stable_n"] += 1
         else:
             _ctx["stable_n"] = 0

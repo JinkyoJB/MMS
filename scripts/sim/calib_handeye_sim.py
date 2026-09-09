@@ -27,6 +27,12 @@ SimulationApp 을 직접 띄워 헤드리스로도 돌아가게 한다.
 ----
   로그에 `t_err` / `r_err` 과 판정(PASS/CHECK). `handeye_result.npz` 저장.
   기준: t_err < 5mm, r_err < 2°  (실물 2026-04-29 기준 3.55mm / 1.30°)
+
+종료 시 빨간 메시지
+------------------
+  "Task was destroyed but it is pending!" / "coroutine ... was never awaited"
+  → **Isaac 내부 위젯 정리 잡음.** 우리 코드·결과와 무관하니 무시해도 된다.
+  판정은 그 위의 `[CALIB] ===== COMPLETE =====` 블록을 본다.
 """
 from __future__ import annotations
 
@@ -109,6 +115,15 @@ def main() -> int:
         print(f"[standalone] 산출물: {out}", flush=True)
         return 0
     finally:
+        # Isaac 종료 시 viewport/stage 위젯의 async 태스크가 정리되며
+        #   "Task was destroyed but it is pending!" / "coroutine ... was never awaited"
+        # 를 빨간색으로 찍는다. **Isaac 내부 정리 잡음이고 결과와 무관하다.**
+        # 한 프레임 더 돌려 대기 중인 태스크를 정리할 기회를 준 뒤 닫는다.
+        try:
+            for _ in range(5):
+                app.update()
+        except Exception:
+            pass
         try:
             app.close()
         except Exception:
