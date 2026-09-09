@@ -539,15 +539,20 @@ Spider·xArm 으로는 한 번도 돌리지 않았다. 첫 실물 시도 때 다
 구조(`2_데이터/2_3Dassets/...` ↔ `2_데이터/testset/`)만 유지하면 어느 머신에서도 열린다.
 구 절대참조본은 `_bak_absref_20260909/` 에 남겨 두었다.
 
-### T11. sim 물체가 전부 회색이다 — 텍스처 결손
+### T11. sim 물체가 회색으로 보인다 — 텍스처 참조 결손
 
 머티리얼은 정상이다. testset USD 는 텍스처를 `./textures/<이름>.png` 외부 파일로
-참조하는데 그 폴더가 없어서 안 열리고, `UsdPreviewSurface` 는 `diffuseColor` 가
-텍스처에 연결돼 있고 fallback 이 없으면 **말없이 기본 회색으로** 렌더한다. 9종 전부
-해당하며, `testset_results.md` 의 스캔 렌더가 회색인 것도 같은 이유다.
+참조하는데 그 폴더가 없으면 안 열리고, `UsdPreviewSurface` 는 `diffuseColor` 가 텍스처에
+연결돼 있고 fallback 이 없으면 **말없이 기본 회색으로** 렌더한다.
 
-Phase 1~3 은 형상만 쓰므로 자세 선정·밴드 분할·스캔 지표에는 영향이 없다. 화면 표시와
-스캔 색만 달라진다. 복구 방법과 물체별 파일 목록은 `2_데이터/README.md` 의
-"결손 — 텍스처 이미지가 빠져 있다" 절에 있다.
+2026-09-09 에 9종 중 8종을 복구해 `2_데이터/testset/textures/` 에 넣었다.
+`0263_protein_drink` 만 아직 결손이다. 자세한 내역과 복구 경로는
+`2_데이터/README.md` 의 텍스처 절에 있다.
 
-`build_scene_v3.py` 가 씬 생성 시 안 열리는 텍스처를 경고한다(2026-09-09).
+**Phase 1~3 결과와는 무관하다.** sim 스캐너는 XYZ 만 캡처하고
+(`isaac_scanner.capture_points_base`) `render_scan_results.py` 는 정점색을 지운 뒤 회색
+재질로 렌더하므로, `testset_results.md` 의 회색 렌더는 원래 그렇게 만든 것이다. 텍스처는
+Isaac 뷰포트 표시에만 영향을 준다. 실물 Artec 의 HYBRID(형상+텍스처) 정합을 sim 에서
+흉내 내려 할 때에야 이 자산이 필요해진다.
+
+`build_scene_v3.py` 가 씬 생성 시 안 열리는 텍스처를 경고한다.
