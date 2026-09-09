@@ -107,7 +107,14 @@ bash setup/setup_envs.sh          # mms-env / env_isaacsim / step2usd 생성 + �
 **장비** — Artec Spider `SP.10.36181288` (SDK 1.18.4) · xArm7 `192.168.1.210` ·
 턴테이블 Ezi-SERVO `192.168.0.10` **UDP**(TCP는 지속 polling 시 socket 막힘)
 
-**실행·씬 생성 명령**은 `docs/sim_commands.md`, 설정 항목은 인수인계서_A1 §4.7 참조.
+**실행 명령**
+
+| 대상 | 문서 | 진입점 |
+|---|---|---|
+| **sim** (Isaac) | `docs/sim_commands.md` | `./scripts/sim/run_e2e_gui.sh mug` |
+| **real** (실물 장비) | `docs/7_real_commands.md` | `python main_artec.py` (`BACKEND="real"`) |
+
+조정 가능한 설정은 인수인계서_A1 §4.7.
 
 > SDK 바인딩 변경 시:
 > `cmake --build mms_artec/sensor/build --config Release --target <module>`
