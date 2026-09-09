@@ -135,29 +135,10 @@ env -u PYTHONPATH $ISAAC -u scripts/sim/calib_handeye_sim.py --gui     # 화면�
 
 **③ 턴테이블 축 `T_B_F0`**
 
-Isaac python 은 cv2 가 headless 라 클릭 창을 못 연다 → **캡처와 클릭을 분리**한다.
-
 ```bash
-# 자동 (클릭 없이 — 권장. rim 점을 기하로 합성)
 MMS_ISAAC_HEADLESS=1 MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py
-
-# GUI 로 축 시각화까지 보며 자동
-MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py
-
-# 수동 클릭 (실물 절차와 동일하게 확인할 때)
-env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py                  # 1) 캡처 → log/rim_capture.npz
-conda activate mms-env
-env -u PYTHONPATH python scripts/sim/rim_click_offline.py              # 2) 클릭+피팅+저장
 ```
-
-| 환경변수 | 기본 | 뜻 |
-|---|---|---|
-| `MMS_RIM_AUTO` | 0 | 1 = rim 점 자동 합성(클릭 생략) |
-| `MMS_ISAAC_HEADLESS` | 0 | 1 = 창 없이 수치만 |
-| `MMS_RIM_R` | 0.05 m | **자동모드 합성 rim 반경** (→ T9) |
-| `MMS_RIM_N` | 12 | 자동모드 합성 점 수 |
-
-산출물: `scripts/sim/log/` — `rim_capture.npz` · `rim_intensity.png` · `rim_result.json`
+> 옵션·수동 클릭 경로·결과는 **§9**.
 
 ### sim 검증 (대안: Isaac GUI Script Editor)
 
@@ -276,6 +257,68 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
 - (선택) `mms_artec/system.py::ArtecMMS.disc_surface_frame(disc_points_base, axis_point, axis_dir)` —
   표면 평면 ∩ 축선 = F0 원점, z축은 축방향, 평면법선은 교차검증. (구 어레이 경로용이었으나
   rim center/normal 을 바로 `build_T_B_F0` 에 넣어도 됨 — rim 은 표면 근처라 단순.)
+
+---
+
+## 9. 실행 — 턴테이블만 단독으로
+
+> **전체 캘리브(순서 포함)는 §4.** `T_B_F0` 는 `T_EC` 가 있어야 구할 수 있으므로
+> 처음부터 잡는 경우엔 §4 의 `calibrate.py` 를 쓸 것. 아래는 **`T_EC` 가 이미 있고
+> 턴테이블만 다시 잡을 때**(기계 이설·재조립 후) 쓴다.
+
+### real
+
+```bash
+conda activate mms-env && cd "$MMS_ROOT"
+
+env -u PYTHONPATH python scripts/artec/turntable_frame_init.py      # rim 클릭
+# 또는 단일 진입점으로 3단계만
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 3
+```
+→ `config/calibration/turntable_frame.yaml`
+
+- rim 이 한 화면에 다 안 들어오면 보이는 **호(arc)** 에서 클릭한다. 3점이면 풀리지만
+  호가 짧으면 조건수가 나빠진다.
+- 기준값: **0.015° / 0.7mm**
+
+### sim 검증
+
+Isaac python 은 cv2 가 headless 라 클릭 창을 못 연다 → **캡처와 클릭을 분리**한다.
+
+```bash
+ISAAC=~/miniconda3/envs/env_isaacsim/bin/python
+
+# 자동 (클릭 없이 — rim 점을 기하로 합성. 축 방향 검증용)
+MMS_ISAAC_HEADLESS=1 MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py
+
+# GUI 로 축 시각화까지 보며
+MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py
+
+# 수동 클릭 (실물 절차와 동일하게 확인)
+env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py            # 1) 캡처 → log/rim_capture.npz
+conda activate mms-env
+env -u PYTHONPATH python scripts/sim/rim_click_offline.py        # 2) 클릭+피팅+저장
+```
+
+| 환경변수 | 기본 | 뜻 |
+|---|---|---|
+| `MMS_RIM_AUTO` | 0 | 1 = rim 점 자동 합성(클릭 생략) |
+| `MMS_ISAAC_HEADLESS` | 0 | 1 = 창 없이 수치만 |
+| `MMS_RIM_R` | 0.05 m | 자동모드 합성 rim 반경 |
+| `MMS_RIM_N` | 12 | 자동모드 합성 점 수 |
+
+산출물: `scripts/sim/log/` — `rim_capture.npz` · `rim_intensity.png` · `rim_result.json`
+
+**결과** (2026-09-09, v3 씬, 자동모드)
+
+```
+[rim] 원피팅: 반경=48.4mm  RMS=0.060mm  (11점)
+  축 방향오차 = 0.012 deg      ← 기준 0.015° 충족
+  중심 XY오차 = 2.549 mm       ← 자동모드 한계, T9 참고
+```
+
+> ⚠ 자동모드는 실제 rim(119mm)이 아니라 합성 링(50mm)을 피팅해 **중심 오차가 크다**.
+> **축 방향 검증용**으로 쓰고 중심 정확도는 실기에서 확인한다 → **T9**
 
 # 〔부록〕 Troubleshooting — 규약·함정·주의점
 
