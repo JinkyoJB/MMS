@@ -85,7 +85,7 @@
 
 | 파일 | 역할 |
 |---|---|
-| `scripts/artec/calibrate.py` | **단일 진입점** — 0~3 단계 순서 강제 |
+| `scripts/artec/calibrate.py` | **단일 진입점** — 아래 셋을 순서대로 호출만 한다(자체 로직 없음) |
 | `scripts/artec/make_charuco.py` | 보드 PNG 생성(인쇄용) |
 | `scripts/artec/intrinsic_calib.py` | 카메라 K 측정 (1회) |
 | `scripts/artec/hand_eye_calib.py` | 메인 루프 — 자세순회 → detect → add_sample → calibrate → save |
@@ -162,7 +162,20 @@ exec(open("/경로/MMS/sim_harness/MMS_ext_calibration2.py").read())     # 턴�
 
 ### real — 실제 캘리브레이션
 
-**단일 진입점이 순서를 강제한다.**
+캘리브 스크립트는 **단계별로 하나씩** 있고, `calibrate.py` 가 그것들을 **순서대로 호출**한다.
+
+| 스크립트 | 구하는 값 | 비고 |
+|---|---|---|
+| `make_charuco.py` | — | 보드 PNG 생성 (최초 1회, 실척 인쇄) |
+| `intrinsic_calib.py` | 카메라 **K** | 최초 1회 (렌즈·센서 교체 시 재수행) |
+| `hand_eye_calib.py` | **`T_EC`** | 카메라가 손목에 붙은 관계 |
+| `turntable_frame_init.py` | **`T_B_F0`** | 턴테이블 축. **`T_EC` 를 입력으로 받는다** |
+| **`calibrate.py`** | — | **단일 진입점.** 위 셋을 0→1→2→3 순서로 호출 |
+
+> `calibrate.py` 는 **자체 로직이 없다.** 하는 일은 세 가지뿐이다 —
+> ① 0단계 수동 조준 안내를 띄우고 ② 정해진 순서로 각 스크립트를 실행하고
+> ③ 한 단계가 실패하면 거기서 멈춘다.
+> 따라서 개별 스크립트를 직접 불러도 결과는 같다. 순서를 안 틀리게 하려는 장치다.
 
 ```bash
 conda activate mms-env && cd "$MMS_ROOT"
@@ -190,7 +203,7 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3  # 3단계만
 >
 > 보드를 원판 위에 두면 2→3 을 **같은 조준 자세에서 이어서** 할 수 있어 0단계를 한 번만 한다.
 
-개별 실행이 필요하면 각 스크립트를 직접 부른다.
+**개별 실행** — 한 단계만 다시 잡거나 인자를 주고 싶을 때.
 
 ```bash
 env -u PYTHONPATH python scripts/artec/make_charuco.py            # 보드 PNG (최초 1회, 실척 인쇄)
