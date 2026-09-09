@@ -40,7 +40,7 @@ from isaacsim.sensors.camera import Camera
 from pxr import Usd, UsdGeom, Sdf, Gf
 
 # ── MMS 공유 코어 (파일경로 로드, 자기완결 모듈만) ────────────────────────────
-_MMS_REPO = "/home/keti/workspace/MMS/MMS"
+_MMS_REPO = _find_mms_repo()
 import importlib.util as _ilu
 
 
@@ -52,7 +52,7 @@ def _load_mod(name, relpath):
     return mod
 
 
-_XARM_SDK = "/home/keti/workspace/MMS/xArm-Python-SDK"
+_XARM_SDK = os.environ.get("MMS_XARM_SDK", "")
 if _XARM_SDK not in sys.path:
     sys.path.insert(0, _XARM_SDK)
 try:
@@ -75,7 +75,7 @@ except Exception:
 
 
 # ── 상수 ───────────────────────────────────────────────────────────────────────
-USD_PATH     = "/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd"
+USD_PATH     = _asset("frame_xarm7_spider_turntable/v2.usd")
 ROBOT_PRIM   = "/World/xarm7"
 JOINTS_SCOPE = "/World/xarm7/joints"
 CAMERA_PRIM  = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
@@ -152,7 +152,8 @@ PHYSICS_DT = 1.0 / 120.0        # 1/60→1/120: 강성 드라이브 수치 안�
 WARMUP_STEPS, SETTLE_STABLE_N, MOVE_TIMEOUT_N, JOINT_SETTLE_TOL = 120, 24, 800, 0.01
 PHYSICS_CB_NAME = "mms_phase2_step"
 
-_BASE_DIR = "/home/keti/isaacsim/standalone_examples/play/MMS"
+_BASE_DIR = os.environ.get("MMS_HARNESS_OUT",
+    os.path.expanduser("~/isaacsim/standalone_examples/play/MMS"))
 OUT_DIR   = os.path.join(_BASE_DIR, "captures_phase2_nbv")
 os.makedirs(OUT_DIR, exist_ok=True)
 LOG_PATH  = os.path.join(OUT_DIR, "calib_log.txt")

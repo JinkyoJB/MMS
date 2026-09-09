@@ -39,10 +39,38 @@ from isaacsim.sensors.camera import Camera
 from pxr import Usd, UsdGeom, Sdf, Gf
 
 # ── MMS 공유 코어 ─────────────────────────────────────────────────────────────
-_MMS_REPO = "/home/keti/workspace/MMS/MMS"
-_XARM_SDK = "/home/keti/workspace/MMS/xArm-Python-SDK"
-if _XARM_SDK not in sys.path:
+# ── 경로 해석 (하드코딩 금지) ─────────────────────────────────────────────────
+#   이 스크립트는 Isaac 트리에 복사/링크해서 돌리므로 __file__ 이 리포 밖일 수 있다.
+#   따라서 리포 위치를 아래 순서로 찾는다.  ※ 자세히는 sim_harness/README.md
+def _find_mms_repo():
+    import os as _os
+    cands = [_os.environ.get("MMS_ROOT"),
+             _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".."),  # 리포 안에서 실행
+             _os.path.expanduser("~/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성/1_코드/MMS"),
+             _os.path.expanduser("~/workspace/sync/2_Rapid_Digital_Twin/1_MMS/7_MMS_framework")]
+    for c in cands:
+        if c and _os.path.isfile(_os.path.join(c, "main_artec.py")):
+            return _os.path.abspath(c)
+    raise RuntimeError("MMS 리포를 찾지 못했다. export MMS_ROOT=/경로/MMS")
+
+
+_MMS_REPO = _find_mms_repo()
+if _MMS_REPO not in sys.path:
+    sys.path.insert(0, _MMS_REPO)
+
+# xArm SDK — pip 설치본(mms-env)이 있으면 그걸 쓰고, 없으면 소스 경로를 MMS_XARM_SDK 로
+_XARM_SDK = os.environ.get("MMS_XARM_SDK", "")
+if _XARM_SDK and _XARM_SDK not in sys.path:
     sys.path.insert(0, _XARM_SDK)
+
+# 씬 USD — mms_paths 가 자산 루트를 해석한다 (MMS_ASSET_ROOT 로 override)
+from mms_paths import asset as _asset  # noqa: E402
+
+# 산출물 — 기본은 Isaac 트리, MMS_HARNESS_OUT 으로 변경 가능
+_BASE_DIR = os.environ.get(
+    "MMS_HARNESS_OUT",
+    os.path.expanduser("~/isaacsim/standalone_examples/play/MMS"))
+# ─────────────────────────────────────────────────────────────────────────────
 import importlib.util as _ilu
 
 
@@ -73,7 +101,7 @@ except Exception:
 
 
 # ── 상수 ───────────────────────────────────────────────────────────────────────
-USD_PATH     = "/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd"
+USD_PATH     = _asset("frame_xarm7_spider_turntable/v2.usd")
 ROBOT_PRIM   = "/World/xarm7"
 JOINTS_SCOPE = "/World/xarm7/joints"
 CAMERA_PRIM  = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
@@ -114,7 +142,8 @@ WARMUP_STEPS, SETTLE_STABLE_N, MOVE_TIMEOUT_N, JOINT_SETTLE_TOL = 50, 12, 400, 0
 PROBE_WAIT = 30                # recovery preview 정착 대기
 PHYSICS_CB_NAME = "mms_recov2_step"
 
-_BASE_DIR = "/home/keti/isaacsim/standalone_examples/play/MMS"
+_BASE_DIR = os.environ.get("MMS_HARNESS_OUT",
+    os.path.expanduser("~/isaacsim/standalone_examples/play/MMS"))
 OUT_DIR = os.path.join(_BASE_DIR, "captures_phase1_recovery2")
 os.makedirs(OUT_DIR, exist_ok=True)
 LOG_PATH = os.path.join(OUT_DIR, "calib_log.txt")

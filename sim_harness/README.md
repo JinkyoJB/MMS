@@ -28,6 +28,44 @@ env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration.py"
 
 > 심볼릭 링크를 쓰면 리포에서 수정한 내용이 바로 반영된다(권장).
 
+### 경로는 자동으로 찾는다
+
+절대경로를 소스에 박지 않는다. 필요하면 환경변수로 지정한다.
+
+| 변수 | 무엇 | 기본 |
+|---|---|---|
+| `MMS_ROOT` | MMS 리포 위치 | 스크립트 상위 → 알려진 경로 순으로 탐색 |
+| `MMS_ASSET_ROOT` | 자산(`2_3Dassets`) 루트 | `mms_paths.py` 가 해석 |
+| `MMS_HARNESS_OUT` | 캡처·로그 출력 위치 | `~/isaacsim/standalone_examples/play/MMS` |
+| `MMS_XARM_SDK` | xArm SDK **소스** 경로 | 미설정(=`mms-env` 의 pip 설치본 사용) |
+
+Isaac 트리로 복사해서 돌리면 `__file__` 이 리포 밖이라 상위 탐색이 실패한다.
+그때는 `MMS_ROOT` 를 준다.
+
+```bash
+export MMS_ROOT=/경로/MMS
+env -u PYTHONPATH ~/isaacsim/python.sh "$DST/MMS_ext_calibration.py"
+```
+
+---
+
+## ⚠ 이 하니스들은 **v2(옛) 씬 기준**이다
+
+작성 시점이 2026-06 이고, 씬은 2026-08 에 **v3 로 바뀌었다**(`docs/v3_sim_migration.md`).
+그대로 돌리면 prim 을 못 찾고 조용히 실패한다.
+
+| | 하니스(v2) | 현재(v3) |
+|---|---|---|
+| 씬 | `frame_xarm7_spider_turntable/v2.usd` | `frame_xarm7_spider_turntable_v2/v3_scene.usd` |
+| 카메라 prim | `/World/xarm7/link7/Artec_Space_Spider_mm/Camera` | `/World/xarm7/link7/tool/spider/Camera` |
+| 로봇 base | `(0.538, 0, 1.407)` | `(0.365, 0, 1.500)` |
+
+**되살리려면** 각 파일 상단 상수(`USD_PATH`·`CAMERA_PRIM`·`ROBOT_PRIM` 등)를 v3 기준으로
+맞춰야 한다. 현재 값은 `mms_artec/backends/isaac/isaac_world.py` 를 참고한다.
+
+> 경로 하드코딩은 이미 제거했으므로(위 환경변수), 남은 작업은 **prim 경로와 씬 파일**
+> 갱신이다. 검증 로직 자체는 그대로 쓸 수 있다.
+
 ## ★ 설계 원칙 — sim 에 중복 구현하지 않는다
 
 이 하니스는 **USD/Isaac 환경 코드만** 갖는다. 검출·솔버·IK·기하 연산은 MMS 본체

@@ -1,6 +1,6 @@
 """
 MMS Extension Script - Isaac Sim 5.1.0 (VSCode Extension / Script Editor 버전)
-USD: /home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd
+USD: 자산 루트의 frame_xarm7_spider_turntable/v2.usd (mms_paths 가 해석)
 
 ⚠️ 이 파일은 standalone(python.sh)이 아니라 **이미 실행 중인 Isaac Sim** 안에서
    돌리는 버전이다. 다음 둘 중 하나로 실행한다:
@@ -31,7 +31,7 @@ from isaacsim.sensors.camera import Camera
 from pxr import Usd, UsdGeom, Sdf, Gf
 
 # ── 2. 상수 ───────────────────────────────────────────────────────────────────
-USD_PATH     = "/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd"
+USD_PATH     = _asset("frame_xarm7_spider_turntable/v2.usd")
 ROBOT_PRIM   = "/World/xarm7"
 JOINTS_SCOPE = "/World/xarm7/joints"
 

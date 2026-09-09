@@ -52,8 +52,8 @@ except Exception:
     _HAS_ARUCO = False
 
 # ── 해석 운동학·SDK import ────────────────────────────────────────────────────
-_MMS_REPO = "/home/keti/workspace/MMS/MMS"
-_XARM_SDK = "/home/keti/workspace/MMS/xArm-Python-SDK"
+_MMS_REPO = _find_mms_repo()
+_XARM_SDK = os.environ.get("MMS_XARM_SDK", "")
 # xArm SDK 는 패키지(xarm.wrapper 등) → sys.path 로 추가
 if _XARM_SDK not in sys.path:
     sys.path.insert(0, _XARM_SDK)
@@ -112,7 +112,7 @@ except Exception as _e:
 
 
 # ── 상수 ───────────────────────────────────────────────────────────────────────
-USD_PATH     = "/home/keti/workspace/MMS/MMS_isaac/xarm7_spider/v2.usd"
+USD_PATH     = _asset("frame_xarm7_spider_turntable/v2.usd")
 ROBOT_PRIM   = "/World/xarm7"
 JOINTS_SCOPE = "/World/xarm7/joints"
 CAMERA_PRIM  = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
@@ -177,7 +177,8 @@ PHYSICS_CB_NAME = "mms_calib_step"
 
 # ★ VSCode Isaac 코드러너는 __file__ 을 확장 자신의 디렉토리로 잡아 출력이 엉뚱한
 #   곳(.../code_editor/vscode/)에 묻힌다 → 스크립트 위치를 절대경로로 고정.
-_BASE_DIR = "/home/keti/isaacsim/standalone_examples/play/MMS"
+_BASE_DIR = os.environ.get("MMS_HARNESS_OUT",
+    os.path.expanduser("~/isaacsim/standalone_examples/play/MMS"))
 OUT_DIR   = os.path.join(_BASE_DIR, "captures_calib")
 ASSET_DIR = os.path.join(_BASE_DIR, "calib_assets")
 BOARD_PNG = os.path.join(ASSET_DIR, "charuco_5x3_20_15.png")
