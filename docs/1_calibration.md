@@ -32,7 +32,59 @@
 
 ---
 
-## 2. 전체 흐름
+## 2. ChArUco 보드 준비
+
+캘리브의 출발점은 **실물 보드**다. 여기서 어긋나면 이후 모든 수치가 무의미해진다.
+
+![ChArUco 보드 (spider 프리셋)](figures/calibration/charuco_board.png)
+
+### 생성
+
+```bash
+conda activate mms-env && cd "$MMS_ROOT"
+env -u PYTHONPATH python scripts/artec/make_charuco.py                  # spider (기본)
+env -u PYTHONPATH python scripts/artec/make_charuco.py --board spider_small
+```
+
+출력은 `debug_calib/charuco_<sx>x<sy>_<sq>_<mk>.png` 이며, `--out` 으로 바꿀 수 있다.
+바로 인쇄할 수 있는 PNG 를 저장소에도 넣어 두었다 — **`assets/charuco/`**.
+
+| 프리셋 | 칸 구성 | square / marker | 실물 크기 | 사전 | 비고 |
+|---|---|---|---|---|---|
+| **`spider`** | 5×3 | 20 / 15mm | **100×60mm** | `DICT_4X4_50` | **권장** |
+| `spider_small` | 5×3 | 16 / 12mm | 80×48mm | `DICT_4X4_50` | 더 가까이 볼 때 |
+| `a4` | 7×5 | 30 / 22mm | 210×150mm | `DICT_5X5_100` | PhoXi·광각용. **Spider 에는 부적합** |
+
+Spider 는 FOV 가 30°×21° 로 좁고 작동거리가 0.2~0.3m 이므로, `a4` 보드는 화면 밖으로
+나가 검출되지 않는다. 처음 시도에서 A4 7×5 를 썼다가 이 문제로 5×3 으로 바꿨다.
+
+### 인쇄
+
+> **인쇄 배율을 100% 로 두고 "용지에 맞춤(fit to page)" 을 반드시 끈다.**
+> 이 옵션이 켜져 있으면 칸 크기가 달라지고, 검출은 정상으로 보이는데
+> `T_MC` 의 스케일이 틀려 결과가 조용히 어긋난다.
+
+인쇄한 뒤 **자로 한 칸을 실측한다.** 20mm 가 아니면 그 값을 캘리브 실행 시 넘긴다.
+
+```bash
+env -u PYTHONPATH python scripts/artec/hand_eye_calib.py --square-mm 19.8
+```
+
+기본 해상도는 10 px/mm(= 300 DPI)라 100×60mm 보드가 1000×600 px 로 나온다.
+`--pixels-per-mm` 으로 조절한다.
+
+### 부착과 배치
+
+- **평평하고 단단한 판에 붙인다.** 종이가 휘면 `solvePnP` 가 그 왜곡을 그대로 자세 오차로
+  낸다. 폼보드나 아크릴판에 양면테이프로 전면 접착하는 방식을 권한다.
+- **광택 없는 용지**를 쓴다. 코팅지는 스캐너 조명이 반사돼 코너 검출이 실패한다.
+- **턴테이블 원판 위에 올려 둔다.** hand-eye 를 끝낸 뒤 같은 조준 자세에서 턴테이블
+  캘리브(Part 2)로 바로 넘어갈 수 있어 수동 조준을 한 번만 하면 된다.
+- 보드 전체가 카메라에 들어오고, 반구 자세로 기울여 봐도 시야를 벗어나지 않는 위치에 둔다.
+
+---
+
+## 3. 전체 흐름
 
 ```
                     ┌─────────────── 자세 i = 1..N 반복 ───────────────┐
@@ -68,7 +120,7 @@
 
 ---
 
-## 3. 실행 — hand-eye 만
+## 4. 실행 — hand-eye 만
 
 > 처음부터 전체를 잡는 경우엔 **Part 3**(`calibrate.py`)을 쓴다.
 > 아래는 **hand-eye 만** 다시 잡거나 sim 으로 검증할 때다.
@@ -117,10 +169,11 @@ exec(open("/경로/MMS/sim_harness/MMS_ext_calibration.py").read())      # hand-
 
 ### real — hand-eye 만
 
+보드가 준비돼 있어야 한다(→ **§2**).
+
 ```bash
 conda activate mms-env && cd "$MMS_ROOT"
 
-env -u PYTHONPATH python scripts/artec/make_charuco.py       # 보드 PNG (최초 1회, 실척 인쇄)
 env -u PYTHONPATH python scripts/artec/intrinsic_calib.py    # 카메라 K (최초 1회)
 env -u PYTHONPATH python scripts/artec/hand_eye_calib.py     # 자세 순회 → T_EC
 
@@ -140,7 +193,7 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 > 로봇 base 기준 **턴테이블 회전축·표면**(= `T_B_F0`)을 구한다. 방법은 **rim 점 피팅** 하나로 통일
 > (구 어레이 방법은 실물 fixture 비용이 커서 채택 안 함 — rim 으로 대체 가능).
 
-## 4. 무엇을 구하나 — `T_B_F0`
+## 5. 무엇을 구하나 — `T_B_F0`
 
 | 프레임 | 의미 |
 |---|---|
@@ -156,7 +209,7 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 Phase 2 의 조준, NBV 계획, tracking-lost recovery, 충돌 회피가 모두 이 값에 의존한다.
 하드웨어를 옮기면 전부 무효가 되므로, 다시 잡는 절차를 간단하게 유지하는 것이 중요하다.
 
-## 5. Rim 방법
+## 6. Rim 방법
 
 회전판에 고정된 점은 회전축 둘레로 원을 그린다. 따라서 원의 법선이 축 방향이고
 중심은 축 위의 한 점이다. disc 가장자리(rim)는 그 자체가 축 둘레의 원이므로,
@@ -171,7 +224,7 @@ rim 위의 점들을 3D 로 모아 원을 피팅하면 축을 얻을 수 있다.
         ▼
    pts_B → fit_circle_3d → (center, normal, radius, residual)
         ▼
-   (+ 표면 평면, §6) → build_T_B_F0 → T_B_F0
+   (+ 표면 평면, §7) → build_T_B_F0 → T_B_F0
 ```
 
 카메라의 위치는 로봇이 알려준다. 점군은 `센서 C → T_CB(= T_EC·FK) → base` 경로로
@@ -190,7 +243,7 @@ rim 위의 점들을 3D 로 모아 원을 피팅하면 축을 얻을 수 있다.
 
 ---
 
-## 6. 표면 평면으로 원점 높이 확정
+## 7. 표면 평면으로 원점 높이 확정
 
 원 피팅이 주는 것은 축의 **방향과 XY 위치**뿐이다. 3차원 좌표계를 세우려면 원점의
 높이가 필요한데, rim 이 그리는 궤적의 높이가 disc 표면 높이와 같다는 보장이 없다.
@@ -212,7 +265,7 @@ x축은 base 의 x축을 그 평면에 투영한 것, y축은 z×x 이다.
 
 ---
 
-## 7. 실행 — 턴테이블 만
+## 8. 실행 — 턴테이블 만
 
 > 처음부터 전체를 잡는 경우엔 **Part 3**(`calibrate.py`)을 쓴다.
 > 아래는 **`T_EC` 가 이미 있고 턴테이블만 다시 잡을 때**(기계 이설·재조립 후)다.
@@ -290,7 +343,7 @@ env -u PYTHONPATH python scripts/sim/rim_click_offline.py        # 2) 클릭+피
 
 Part 1·2 를 **정해진 순서로** 돌린다.
 
-## 8. 실행 순서
+## 9. 실행 순서
 
 캘리브 스크립트는 **단계별로 하나씩** 있고, `calibrate.py` 가 그것들을 **순서대로 호출**한다.
 
@@ -333,7 +386,7 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3  # 3단계만
 >
 > 보드를 원판 위에 두면 2→3 을 **같은 조준 자세에서 이어서** 할 수 있어 0단계를 한 번만 한다.
 
-**개별 실행** — 한 단계만 다시 잡거나 인자를 주고 싶을 때. 자세히는 §3(hand-eye) · §7(turntable).
+**개별 실행** — 한 단계만 다시 잡거나 인자를 주고 싶을 때. 자세히는 §4(hand-eye) · §8(turntable).
 
 ```bash
 env -u PYTHONPATH python scripts/artec/make_charuco.py            # 보드 PNG (최초 1회, 실척 인쇄)
@@ -349,7 +402,7 @@ env -u PYTHONPATH python scripts/artec/turntable_calib.py
 
 ---
 
-## 9. 코드 지도
+## 10. 코드 지도
 
 **공유 라이브러리 — sim·real 공통 (★ 핵심)**
 
@@ -371,7 +424,8 @@ env -u PYTHONPATH python scripts/artec/turntable_calib.py
 | 파일 | 역할 |
 |---|---|
 | `scripts/artec/calibrate.py` | **단일 진입점** — 아래 셋을 순서대로 호출만 한다(자체 로직 없음) |
-| `scripts/artec/make_charuco.py` | 보드 PNG 생성(인쇄용) |
+| `scripts/artec/make_charuco.py` | 보드 PNG 생성(인쇄용) → §2 |
+| `assets/charuco/*.png` | **인쇄용 보드 PNG** (바로 출력 가능) |
 | `scripts/artec/intrinsic_calib.py` | 카메라 K 측정 (1회) |
 | `scripts/artec/hand_eye_calib.py` | 메인 루프 — 자세순회 → detect → add_sample → calibrate → save |
 | `scripts/artec/turntable_calib.py` | 턴테이블 rim 클릭 (`ARTEC_TO_OPENCV` z-flip + `T_CB`) |

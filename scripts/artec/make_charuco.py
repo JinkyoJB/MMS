@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """
-scripts/artec_make_charuco.py
+scripts/artec/make_charuco.py
 
 ChArUco 보드 PNG 생성 (Artec hand-eye 캘리브용).
 
-기본 사양 (`mms/utils/calibration/artec_charuco_detector.CharucoBoardSpec`):
-- 7×5 squares, square=30mm, marker=22mm, DICT_5X5_100
-- A4 출력 후 한 칸 30mm 가 되도록 인쇄 배율 100% 로 설정.
-- 인쇄 후 자로 한 칸 길이 실측 → 캘리브 스크립트에서 `square_length_mm` 보정.
+프리셋은 `hand_eye_calib.BOARD_PRESETS` 를 그대로 쓴다. 기본은 `spider`.
+
+  spider        5×3, square 20mm, marker 15mm, DICT_4X4_50  → 100×60mm  (권장)
+  spider_small  5×3, square 16mm, marker 12mm, DICT_4X4_50  →  80×48mm
+  a4            7×5, square 30mm, marker 22mm, DICT_5X5_100 → 210×150mm (PhoXi/광각용)
+
+★ Spider 는 FOV 가 좁아(30°×21°, 작동거리 0.2~0.3m) a4 보드는 화면 밖으로 나간다.
+
+인쇄
+----
+  배율 **100%** 로 출력한다. "용지에 맞춤(fit to page)" 을 반드시 끌 것 —
+  이 옵션이 켜져 있으면 칸 크기가 달라져 캘리브 결과가 전부 틀어진다.
+  인쇄 후 자로 한 칸을 실측하고, 20mm 가 아니면 캘리브 실행 시 `--square-mm` 으로 보정한다.
 
 Usage
 -----
-  python scripts/artec_make_charuco.py
-  python scripts/artec_make_charuco.py --out custom.png --pixels-per-mm 5
+  python scripts/artec/make_charuco.py
+  python scripts/artec/make_charuco.py --board spider_small
+  python scripts/artec/make_charuco.py --out custom.png --pixels-per-mm 5
 """
 
 from __future__ import annotations
