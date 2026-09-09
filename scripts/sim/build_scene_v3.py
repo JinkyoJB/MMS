@@ -476,6 +476,33 @@ def shift_turntable(stage, dx: float) -> None:
           f"파트 {len(moved)}개")
 
 
+def _warn_unresolved_textures(root_prim, obj_usd: str) -> None:
+    """대상물 머티리얼의 텍스처가 실제로 열리는지 확인하고 안 열리면 경고한다.
+
+    testset USD 는 Blender 로 내보낼 때 텍스처를 `./textures/<이름>.png` **상대참조**로
+    적는데, USD 파일만 옮기고 그 폴더를 안 가져오면 참조가 깨진다. UsdPreviewSurface 는
+    diffuseColor 가 텍스처에 연결돼 있고 fallback 이 없으면 조용히 기본 회색으로
+    렌더되므로, 경고가 없으면 "원래 회색 물체"인 줄 알게 된다(2026-09-09 실측:
+    testset 9종 전부 텍스처 결손).
+    """
+    from pxr import UsdShade, Sdf
+    missing = []
+    for prim in Usd.PrimRange(root_prim):
+        if not prim.IsA(UsdShade.Shader):
+            continue
+        for inp in UsdShade.Shader(prim).GetInputs():
+            v = inp.Get()
+            if isinstance(v, Sdf.AssetPath) and v.path and not v.resolvedPath:
+                missing.append(v.path)
+    if missing:
+        uniq = sorted(set(missing))
+        print(f"  ⚠ 텍스처 {len(uniq)}개가 안 열린다 — 물체가 회색으로 보인다:")
+        for m in uniq[:4]:
+            print(f"      {m}")
+        print(f"    → {os.path.dirname(obj_usd) or '.'} 옆에 textures/ 폴더를 같이 두라 "
+              f"(원본: {os.path.basename(obj_usd)} 를 만든 라이브러리).")
+
+
 def add_scan_target(stage, obj_usd: str) -> None:
     """스캔 대상을 턴테이블 원판 위 중앙에 올린다.
 
@@ -504,6 +531,8 @@ def add_scan_target(stage, obj_usd: str) -> None:
                  cy - (olo[1] + ohi[1]) / 2,
                  top - olo[2])
     set_matrix(o, Gf.Matrix4d().SetTranslate(t))
+
+    _warn_unresolved_textures(o, obj_usd)
 
     # ⚠ testset 객체는 RigidBodyAPI 가 **자식**(예: Smart_Fusion_1)에 붙어 있다.
     #   isaac_world._prepare_turntable() 은 OBJECT_PRIM 자신에만 kinematicEnabled 를
