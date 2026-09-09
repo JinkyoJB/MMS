@@ -113,17 +113,13 @@
 ```bash
 cd "$MMS_ROOT"                                    # 예: .../A1_.../1_코드/MMS
 ISAAC=~/miniconda3/envs/env_isaacsim/bin/python
+```
 
-# ── hand-eye (약 60초) ──
+**② hand-eye `T_EC`** (약 60초)
+
+```bash
 env -u PYTHONPATH $ISAAC -u scripts/sim/calib_handeye_sim.py           # 헤드리스
 env -u PYTHONPATH $ISAAC -u scripts/sim/calib_handeye_sim.py --gui     # 화면으로 보며
-
-# ── 턴테이블 축 ──  Isaac python 은 cv2 headless 라 클릭 창을 못 연다 → 2단계
-env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py                  # 1) 캡처
-conda activate mms-env
-env -u PYTHONPATH python scripts/sim/rim_click_offline.py              # 2) 클릭+피팅
-
-MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py   # 클릭 없이 자동
 ```
 
 | 옵션 / 환경변수 | 기본 | 뜻 |
@@ -137,15 +133,31 @@ MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py   # 클릭 
 | `MMS_DRIVE_KP` / `KD` / `MAXEFF` | 2000 / 200 / 500 | 드라이브 게인·최대토크 |
 | `MMS_SETTLE_TOL` | 0.045 rad | 관절 수렴 허용오차 (→ T7) |
 
-**결과** (2026-09-09, v3 씬)
+**③ 턴테이블 축 `T_B_F0`**
 
+Isaac python 은 cv2 가 headless 라 클릭 창을 못 연다 → **캡처와 클릭을 분리**한다.
+
+```bash
+# 자동 (클릭 없이 — 권장. rim 점을 기하로 합성)
+MMS_ISAAC_HEADLESS=1 MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py
+
+# GUI 로 축 시각화까지 보며 자동
+MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py
+
+# 수동 클릭 (실물 절차와 동일하게 확인할 때)
+env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py                  # 1) 캡처 → log/rim_capture.npz
+conda activate mms-env
+env -u PYTHONPATH python scripts/sim/rim_click_offline.py              # 2) 클릭+피팅+저장
 ```
-[CALIB] 캘리브 자세: 25 (보드중심 [0.365, -0.0, 0.672])
-[CALIB]   pose 6: 충돌/특이점 — self(tool↔link3,0mm) → skip     ← 게이트가 거른다
-[CALIB] 유효 샘플: 15 | IK: analytic
-[CALIB] >>> t_err=0.95 mm  r_err=0.10°
-[CALIB]     판정: PASS ✅
-```
+
+| 환경변수 | 기본 | 뜻 |
+|---|---|---|
+| `MMS_RIM_AUTO` | 0 | 1 = rim 점 자동 합성(클릭 생략) |
+| `MMS_ISAAC_HEADLESS` | 0 | 1 = 창 없이 수치만 |
+| `MMS_RIM_R` | 0.05 m | **자동모드 합성 rim 반경** (→ T9) |
+| `MMS_RIM_N` | 12 | 자동모드 합성 점 수 |
+
+산출물: `scripts/sim/log/` — `rim_capture.npz` · `rim_intensity.png` · `rim_result.json`
 
 ### sim 검증 (대안: Isaac GUI Script Editor)
 
@@ -412,6 +424,26 @@ point-consistency(고정점을 여러 자세서 base 로 변환 후 산포)로 �
   > `scripts/artec/calibrate.py` 가 이를 강제한다(§4).
   > 위 부트스트랩은 **둘 다 이미 값이 있는 상태**(현재 그렇다)에서 자세 생성을
   > 자동화하자는 것이지, 맨바닥에서 순서를 뒤집자는 게 아니다.
+
+- ⚠ **T9. sim 자동모드 rim 중심 오차 2.5mm** — `MMS_RIM_AUTO=1` 은 실제 원판 rim
+  (반경 119mm)이 아니라 **합성 링**(`MMS_RIM_R`, 기본 50mm)을 피팅한다. Spider FOV
+  (작동거리 0.2~0.3m)에 원판 전체가 안 들어오기 때문이다.
+
+  | r (m) | n | 피팅 | 축 오차 | 중심 오차 |
+  |---|---|---|---|---|
+  | **0.05** | 12 | 48.4mm / RMS 0.060mm | **0.012°** | **2.549mm** |
+  | 0.05 | 24 | 48.4mm / RMS 0.073mm | 0.012° | 2.547mm |
+  | 0.08 · 0.11 | — | **실패 — FOV 밖** | — | — |
+
+  **축 방향은 0.012° 로 정확**하지만 중심이 2.5mm 벗어난다. 점을 2배로 늘려도
+  줄지 않으므로(2.549→2.547) 잡음이 아니라 **계통 오차**다 — 합성 링 점을
+  정렬 점군에서 최근접 픽셀로 되읽는 과정의 양자화로 보인다. 반경을 키우면
+  조건수가 좋아지겠지만 FOV 밖이라 불가.
+
+  > **실물 절차는 이 한계를 받지 않는다.** 사람이 **실제 rim(119mm)** 위를 클릭하므로
+  > 합성 링보다 조건수가 훨씬 낫다. 즉 2.5mm 는 **sim 자동모드의 아티팩트**이지
+  > 방법 자체의 정확도가 아니다. sim 에서는 **축 방향 검증** 용도로 쓰고, 중심
+  > 정확도는 실기에서 확인할 것.
 
 - ⚠ **Spider FOV** 가 좁아 disc rim 전체가 한 화면에 안 들어올 수 있다 → 보이는 호(arc)에서
   클릭. 원 피팅은 3점이면 되나 호가 짧으면 조건수가 나빠진다.

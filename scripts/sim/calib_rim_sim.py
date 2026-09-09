@@ -37,12 +37,16 @@ from utils.calibration.turntable_frame import axis_error
 from PIL import Image
 
 LOG_DIR = Path(__file__).resolve().parent / "log"
-DISC_PRIM = "/World/ScanTarget/turntable_demo/turntable/turntable"
+# ★ prim 경로는 정본(isaac_world)에서 가져온다 — v2/v3 전환 때 여기만 낡는 일이 없도록.
+from mms_artec.backends.isaac.isaac_world import DISC_PRIM, OBJECT_PRIM  # noqa: E402
 
 STANDOFF = 0.25
 DISC_VIEW = (0.0, -0.3, 0.95)      # 디스크 위에서 내려다보는 조준
-RIM_R_AUTO = 0.05                  # 자동모드 합성 rim 반경(작동거리 FOV 안)
-N_AUTO = 12                        # 자동모드 합성 클릭 수
+# 자동모드 합성 rim — 실제 원판 반경은 119mm 지만 Spider FOV(작동거리 0.2~0.3m)에
+# 전부 들어오지 않아 더 작은 링을 쓴다. 반경이 작을수록 원피팅 조건수가 나빠져
+# **중심 오차가 커진다** → FOV 안에서 최대한 크게 잡는 것이 좋다.
+RIM_R_AUTO = float(os.environ.get("MMS_RIM_R", 0.05))   # m
+N_AUTO     = int(os.environ.get("MMS_RIM_N", 12))
 
 HEADLESS = os.environ.get("MMS_ISAAC_HEADLESS", "0") == "1"
 AUTO = HEADLESS or os.environ.get("MMS_RIM_AUTO", "0") == "1"
@@ -88,8 +92,13 @@ def main():
         from pxr import UsdGeom
         robot, tt = mms.create_hardware()
         robot.go_home(sensor="artec", confirm=False)
-        UsdGeom.Imageable(
-            W.stage.GetPrimAtPath("/World/ScanTarget/Solid_Marble")).MakeInvisible()
+        # 스캔 대상이 rim 을 가리지 않게 숨긴다. v3 는 prim 경로가 바뀌었으므로
+        # 정본(isaac_world.OBJECT_PRIM)을 쓰고, 없으면 조용히 넘어간다.
+        _obj = W.stage.GetPrimAtPath(OBJECT_PRIM)
+        if _obj.IsValid():
+            UsdGeom.Imageable(_obj).MakeInvisible()
+        else:
+            print(f"[rim] 스캔 대상 prim 없음(무시): {OBJECT_PRIM}")
 
         # 디스크 위에서 조준 → 조직화 캡처
         dctr, _ = W.prim_world_pose(DISC_PRIM)

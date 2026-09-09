@@ -42,8 +42,11 @@ from mms_paths import asset, testset_dir
 TESTSET_DIR    = testset_dir()
 COMPOSED_DIR   = os.path.join(TESTSET_DIR, "composed")
 
-TURNTABLE_MESH = "/World/ScanTarget/turntable_demo/turntable/turntable"
-MARBLE_PRIM    = "/World/ScanTarget/Solid_Marble"      # 기존 사물(비활성화 대상)
+# prim 경로는 정본(isaac_world)에서 가져온다 — v2/v3 전환 때 낡지 않도록
+from mms_artec.backends.isaac import isaac_world as _IW  # noqa: E402
+
+TURNTABLE_MESH = _IW.DISC_PRIM        # 정본 참조 (v2 경로 하드코딩 제거)
+MARBLE_PRIM    = _IW.OBJECT_PRIM      # 기존 사물(비활성화 대상)
 TEST_PARENT    = "/World/ScanTarget/TestObject"        # 우리가 transform 을 거는 Xform
 TEST_ASSET     = TEST_PARENT + "/Asset"                # 사물 USD 참조 지점
 DISC_TOP_Z_FALLBACK = 0.713                            # 턴테이블 bbox 실패 시 (USD 검증값)

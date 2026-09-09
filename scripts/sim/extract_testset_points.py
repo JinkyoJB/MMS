@@ -24,9 +24,12 @@ COMPOSED_GLOB = os.path.join(testset_dir(), "composed", "*_on_turntable.usd")
 
 ROBOT_PRIM = "/World/xarm7"
 EE_PRIM = "/World/xarm7/link7"
-CAM_PRIM = "/World/xarm7/link7/Artec_Space_Spider_mm/Camera"
-TT_MESH = "/World/ScanTarget/turntable_demo/turntable/turntable"
-MARBLE_PRIM = "/World/ScanTarget/Solid_Marble"
+# prim 경로는 정본(isaac_world)에서 가져온다 — v2/v3 전환 때 낡지 않도록
+from mms_artec.backends.isaac import isaac_world as _IW  # noqa: E402
+
+CAM_PRIM = _IW.CAMERA_PRIM            # 정본 참조
+TT_MESH = _IW.DISC_PRIM
+MARBLE_PRIM = _IW.OBJECT_PRIM
 TESTOBJ_PRIM = "/World/ScanTarget/TestObject"
 
 N_SAMPLE = 200_000        # 면적비례 표면 샘플 수 (voxel 전)
