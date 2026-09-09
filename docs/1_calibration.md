@@ -47,7 +47,7 @@
 
 | 단계 | 담당 | real | sim |
 |---|---|---|---|
-| ① 자세 생성 | `generate_hemisphere_poses` | 사람이 teach / yaml 순회 | 반구 자세 생성 |
+| ① 자세 생성 | `generate_hemisphere_poses` | ⚠ **미연결** — 아직 teach / yaml 순회 | 반구 자세 생성 |
 | ① 자세 이동 | `RobotIK.ik` (자체 해석 IK) | xArm SDK 로 모션 명령 | 관절공간 구동 |
 | ② 캡처 | — | Artec 실기 | Isaac 카메라 렌더 |
 | ③ 검출 | `ArtecCharucoDetector.detect` → `T_MC`(mm) | 공통 | 공통 |
@@ -57,6 +57,10 @@
 
 > 보드 물리 사양(5×3, 20/15mm, `DICT_4X4_50`)은 `CharucoBoardSpec` 하나로 정의하고
 > **검출기와 텍스처 생성이 공유**한다. 실물 인쇄본과 sim 텍스처가 어긋나면 안 되기 때문.
+
+> ⚠ **① 자세 생성은 아직 sim 만 공유 코드를 쓴다.** 설계 의도는 real 도
+> `generate_hemisphere_poses` 를 쓰는 것이고 그래서 sim 에서 먼저 만든 것인데,
+> `scripts/artec/hand_eye_calib.py` 는 현재 teach/yaml 순회만 지원한다. → **T8**
 
 ---
 
@@ -349,5 +353,18 @@ point-consistency(고정점을 여러 자세서 base 로 변환 후 산포)로 �
   하드웨어 연결이 필요하고 불안정해 **미사용**(`use_sdk=False` 기본). 모션 명령만 SDK.
 - 🔬 **hand-eye 검증 스크립트 미작성** (`artec_hand_eye_validate.py`) — 캘리브에 쓰지 않은
   별도 N_test 자세에서 point-consistency 측정. 목표 <0.5mm.
+- 🔬 **T8. real 자세 생성 미연결** — sim 은 `generate_hemisphere_poses` 로 반구 자세를
+  자동 생성하지만 `scripts/artec/hand_eye_calib.py` 는 아직 teach/yaml 순회다.
+  설계 의도는 **양쪽이 같은 자세 생성을 쓰는 것**이다(그래서 sim 에서 먼저 구현했다).
+
+  연결하려면 **닭-달걀 문제**를 풀어야 한다 — 반구 자세를 만들려면 보드 중심·법선을
+  base 프레임에서 알아야 하는데, 그걸 구하려면 `T_EC` 가 필요하고 `T_EC` 가 바로
+  지금 구하려는 값이다. sim 은 USD 에서 GT 를 읽어 우회한다.
+
+  실물 해법(제안): `config/sensor_frames.yaml` 의 **기존 `T_EC` 를 시드**로 써서
+  ① 사람이 보드를 보는 자세 1개를 잡고 ② 검출 → 대략적인 보드 위치 추정
+  ③ 반구 자세 생성·순회 ④ 정확한 `T_EC` 산출. 필요하면 ②~④ 를 1회 반복.
+  (센서를 처음 다는 경우엔 CAD 공칭값을 시드로)
+
 - ⚠ **Spider FOV** 가 좁아 disc rim 전체가 한 화면에 안 들어올 수 있다 → 보이는 호(arc)에서
   클릭. 원 피팅은 3점이면 되나 호가 짧으면 조건수가 나빠진다.
