@@ -26,29 +26,7 @@
 
 ---
 
-## 2. 핵심 아이디어 — 왜 풀리나 (AX = ZB)
-
-매 자세 i 에서 **체인**이 성립한다 (보드의 base 위치는 안 변함):
-
-```
-   T_B_M  =  T_BE(i) · T_EC · T_MC(i)        (∀ i, 우변이 항상 같은 값)
-   └고정┘    └로봇 FK┘ └미지┘  └이미지 검출┘
-```
-
-- `T_BE(i)` : 로봇 FK 로 안다 (손목이 base 기준 어디).
-- `T_MC(i)` : 이미지에서 보드를 검출해 안다 (보드가 카메라에 어떻게).
-- `T_B_M`   : 보드의 base 위치 — 모르지만 **모든 i 에서 동일**.
-- `T_EC`    : 미지, **모든 i 에서 동일**.
-
-두 개의 미지(`T_EC`, `T_B_M`)가 여러 자세에 걸쳐 동시에 만족돼야 하므로, 자세를
-**충분히·다양하게**(특히 회전 다양성 ≥30°) 모으면 유일하게 풀린다.
-이게 OpenCV `cv2.calibrateHandEye` (AX=ZB).
-
-> **그래서 필요한 입력은 자세마다 딱 2개:** `T_BE`(로봇 FK) + `T_MC`(보드 검출). 끝.
-
----
-
-## 3. 전체 흐름 (한눈에)
+## 2. 전체 흐름 (한눈에)
 
 ```
                     ┌─────────────── 자세 i = 1..N 반복 ───────────────┐
@@ -71,7 +49,7 @@
 
 ---
 
-## 4. 단계별 — 담당 함수
+## 3. 단계별 — 담당 함수
 
 | 단계 | 하는 일 | 함수 / 위치 |
 |---|---|---|
@@ -87,7 +65,7 @@
 
 ---
 
-## 5. 코드 지도 (어디에 뭐가 있나)
+## 4. 코드 지도 (어디에 뭐가 있나)
 
 ### 공유 라이브러리 — sim·real 공통 (★ 핵심)
 ```
@@ -146,7 +124,7 @@ sim_harness/MMS_ext_calibration.py
 
 ---
 
-## 6. 꼭 알아야 할 규약·함정
+## 5. 꼭 알아야 할 규약·함정
 
 1. **`T_EC` = E→C = EE-in-camera** (`x_C = T_EC·x_E`). calibrator 가 반환하는 것도 이 규약.
    - sim GT(정답) = `inv(T_W_C) @ T_W_E`. ← 이걸 거꾸로 잡으면 결과가 멀쩡한데도 틀려 보임.
@@ -166,13 +144,13 @@ sim_harness/MMS_ext_calibration.py
 
 ---
 
-## 7. 결과 해석 (sim)
+## 6. 결과 해석 (sim)
 
 `solve_and_report` 가 GT 대비 **t_err(mm) / r_err(°)** 출력 + `captures_calib/handeye_result.npz` 저장.
 디버그 이미지 `ok_NN.png`(검출 성공, 코너 표시) / `fail_NN.png`(실패).
 
 - 무왜곡 sim 이면 검출 노이즈·자세 다양성만이 오차원 → **작을수록 좋음**(목표 t<5mm, r<2°).
-- `t_err` 큰데 `r_err` 작음 → 자세 회전 다양성 부족(§6-4) 의심.
+- `t_err` 큰데 `r_err` 작음 → 자세 회전 다양성 부족(§5-4) 의심.
 - 검출 `fail` 많음 → 자세가 너무 비스듬/보드 시야 이탈.
 
 > 실물 검증은 GT 가 없으니 calibrator 내부 **잔차**(_compute_residuals, T_B_M 일관성)와
@@ -180,7 +158,7 @@ sim_harness/MMS_ext_calibration.py
 
 ---
 
-## 8. 실행
+## 7. 실행
 
 **sim (Isaac):** VSCode Isaac 확장 코드러너 또는 Script Editor 로
 `sim_harness/MMS_ext_calibration.py` 실행. 로그:
@@ -204,7 +182,7 @@ python scripts/artec/hand_eye_calib.py      # 자세 순회 → T_EC → hand_ey
 > 로봇 base 기준 **턴테이블 회전축·표면**(= `T_B_F0`)을 구한다. 방법은 **rim 점 피팅** 하나로 통일
 > (구 어레이 방법은 실물 fixture 비용이 커서 채택 안 함 — rim 으로 대체 가능).
 
-## 9. 무엇을 구하나 — `T_B_F0`
+## 8. 무엇을 구하나 — `T_B_F0`
 
 | 프레임 | 의미 |
 |---|---|
@@ -219,16 +197,16 @@ python scripts/artec/hand_eye_calib.py      # 자세 순회 → T_EC → hand_ey
 왜 필요 — Phase 2 hint·NBV·recovery·충돌회피가 전부 "턴테이블이 base 기준 어디서 도나"에 의존.
 하드웨어팀이 옮기면 무효화 → **버튼 하나로 다시 잡는** 루틴.
 
-## 10. 핵심 원리 — "회전하면 원을 그린다"
+## 9. 핵심 원리 — "회전하면 원을 그린다"
 
 > 회전판에 고정된 점은 회전축 둘레로 **원**을 그린다 → 원 법선 = 축방향, 중심 = 축 위 한 점.
 
 disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 3D 로 모아 원을 피팅하면 축이 나온다.
 
 > ★ **축 ≠ 표면**: rim/궤적 높이 ≠ disc 표면 높이일 수 있음. 충돌회피·대상물 높이를 위해 disc
-> **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(§12).
+> **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(§11).
 
-## 11. Rim 방법 — 흐름 + 함수
+## 10. Rim 방법 — 흐름 + 함수
 
 ```
 로봇이 disc rim 을 보는 자세 → 1회 캡처 (organized 포인트클라우드 + T_CB)
@@ -240,7 +218,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
         ▼
    pts_B (rim, base) → fit_circle_3d → (center, normal, radius, residual)
         ▼
-   (+ disc 표면 평면, §12) → build_T_B_F0(center, normal) → T_B_F0
+   (+ disc 표면 평면, §11) → build_T_B_F0(center, normal) → T_B_F0
 ```
 
 - UI/수학: `utils/calibration/`
@@ -250,7 +228,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
 - ⚠ Spider 좁은 FOV 탓에 rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 취득
   (3점이면 가능하나 호가 짧으면 조건수↓).
 
-## 12. 표면 평면 → `T_B_F0` 빌드
+## 11. 표면 평면 → `T_B_F0` 빌드
 
 축(방향+XY)만으론 부족 → disc **표면**으로 원점 높이 확정:
 - `turntable_frame.py`
@@ -261,7 +239,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
   표면 평면 ∩ 축선 = F0 원점, z축은 축방향, 평면법선은 교차검증. (구 어레이 경로용이었으나
   rim center/normal 을 바로 `build_T_B_F0` 에 넣어도 됨 — rim 은 표면 근처라 단순.)
 
-## 13. 코드 지도 (턴테이블)
+## 12. 코드 지도 (턴테이블)
 
 ```
 utils/calibration/turntable_frame.py     (numpy; 저장 시 scipy/yaml) ★ 공유 코어
@@ -279,9 +257,9 @@ sim 검증:
   sim_harness/MMS_ext_calibration2.py   # 턴테이블 rim 자동추출 → fit → GT 비교
 ```
 
-## 14. 규약·함정 + 실행
+## 13. 규약·함정 + 실행
 
-- **base 프레임 + SLAM 미사용** — `capture_points_base`(센서→T_EC·FK→base). hand-eye 와 동일 철학(§6).
+- **base 프레임 + SLAM 미사용** — `capture_points_base`(센서→T_EC·FK→base). hand-eye 와 동일 철학(§5).
 - **단위** — 코어 수학은 **m** 권장. organized_pts 는 **mm**(rim_picker 가 /1000). 저장은 m.
 - **`T_B_F0` = B→F** (`x_F = T_B_F0·x_B`).
 - ⚠ **코드 중복(정리 필요)** — `scripts/artec/turntable_frame_init.py` 가 공유 코어 대신 자체
@@ -295,13 +273,13 @@ sim 검증:
 
 ---
 
-## 15. 남은 일
+## 14. 남은 일
 
 | 상태 | 항목 |
 |---|---|
 | 🔬 | **hand-eye 검증 스크립트 미작성** (`artec_hand_eye_validate.py`) — 캘리브에 쓰지 않은 별도 N_test 자세에서 point-consistency(고정점을 여러 자세서 base 로 변환 후 산포) 측정. 목표 <0.5mm |
 | ⚠ | Spider FOV(작동거리 0.2~0.3m)가 좁아 disc rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 클릭. 원 피팅은 3점이면 되나 호가 짧으면 조건수 저하 |
-| ⚠ | `scripts/artec/turntable_frame_init.py` 공유 코어 미사용(§14) — 통일 권장 |
+| ⚠ | `scripts/artec/turntable_frame_init.py` 공유 코어 미사용(§13) — 통일 권장 |
 | ✅ | Isaac rim-클릭 어댑터 완료(`capture_organized`). real Artec 은 동일 계약(intensity, organized_pts, T_CB)만 채우면 `rim_picker` 재사용 |
 
 > `utils/calibration/turntable_frame.py` 는 `fit_circle_3d` · `fit_plane` · `build_T_B_F0` ·

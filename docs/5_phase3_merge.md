@@ -43,28 +43,6 @@
 - Artec SDK `GlobalRegistration` 또는 `utils/nbv/icp_strategy.py::icp_with_gates` / `pick_icp_roll`
 - 누적/퓨전: `mms_phoxi/nbv/{tsdf_volume,pcd_accumulate_volume}.integrate_frame / merged_pcd`
 - 🔬 Artec 경로로 통합 + 검증
-## 2.1 비유 — 사진 모자이크
-
-각 **IScan** 은 객체 한 면을 360° 돌면서 찍은 사진묶음 (점군).
-**master** 는 모든 사진을 한 캔버스에 정렬해서 붙인 모자이크.
-
-문제는, 각 IScan 이 **자기 첫 사진을 (0,0,0) 으로 잡는다**는 점.
-
-```
-   IScan_1 의 세계 (W1)             IScan_2 의 세계 (W2)
-        ↑z                                ↑z
-        │                                 │
-        ●─→y  ← 캔 윗면 자세              ●─→y  ← 캔 뒤집은 자세
-       /                                 /
-      x                                 x
-```
-
-W1 과 W2 는 서로 다른 좌표계. 그냥 갖다 붙이면 캔이 두 마리, 90° 어긋난
-이상한 모양이 나옴. → **각 IScan 의 점들을 master 좌표(=W1)로 옮길 변환**
-이 필요. 그 변환이 곧 `T_pre`.
-
----
-
 ## 3. `T_pre` 란 무엇인가
 
 `T_pre` = "IScan 의 모든 frame 위치를 master 좌표로 옮길 도장".
