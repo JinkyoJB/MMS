@@ -4,6 +4,9 @@
 > 상위 맥락은 `docs/main_flow.md` §1.
 > - **Part 1 — Hand-Eye `T_EC`**: 카메라가 로봇 손목(EE)에 어떻게 붙어있나.
 > - **Part 2 — Turntable `T_B_F0`**: 턴테이블이 로봇 base 기준 어디서·어느 축으로 도나.
+>
+> **결과가 이상하면 맨 뒤 〔부록〕 Troubleshooting 부터 본다** — 규약·단위·자세·충돌·
+> 알려진 문제를 T1~T7 로 모아두었다.
 
 ---
 
@@ -65,269 +68,116 @@
 
 ---
 
-## 4. 코드 지도 (어디에 뭐가 있나)
+## 4. 코드 지도
 
-### 공유 라이브러리 — sim·real 공통 (★ 핵심)
-```
-utils/calibration/hand_eye_calibrator.py
-    HandEyeCalibrator
-      .add_sample(T_EB, T_MC)   # T_EB: E→B(m), T_MC: M→C(mm) — 내부서 mm→m
-      .calibrate() → T_EC       # TSAI/PARK/HORAUD/ANDREFF/DANIILIDIS 중 잔차 최소
-      .n_samples (property), .save_yaml(...)
+**공유 라이브러리 — sim·real 공통 (★ 핵심)**
 
-mms_artec/utils/calibration/artec_charuco_detector.py
-    CharucoBoardSpec(squares_x, squares_y, square_length_mm, marker_length_mm, aruco_dict)
-    ArtecCharucoDetector(board_spec, intrinsic={"K","dist"})
-      .detect(image_rgb, min_corners, draw_debug) → CharucoDetection
-          .T_MC (4×4, mm, 보드→카메라, OpenCV cam)  .n_corners  .debug_image  .procrustes_rmse_mm
-      # intrinsic(K) 있으면 solvePnP 경로(권장, sub-pixel), 없으면 UV→3D Procrustes
-
-mms_artec/utils/calibration/handeye_geometry.py   (numpy 전용, 자기완결)
-    make_T, inv_T, quat_wxyz_to_R, rot_about_axis, rot_angle_deg, R_to_euler_xyz
-    mat_to_pose6d_mm(T)                 # 동차변환 → [x,y,z mm, rpy]
-    look_at_camera(eye, center, up, roll)
-    generate_hemisphere_poses(center, normal, T_EC, distance, polars, azis, rolls, jitter, up_hint)
-
-utils/robot/ik_provider.py            (자기완결, kin 주입)
-    reachable(ip)                      # 컨트롤러 소켓 도달성
-    RobotIK(kin, robot_ip, use_sdk=False).ik(pose6d, seed) → (q, ok)
-      # 기본 = 자체 해석 kin IK (SDK IK 미사용 — 컨트롤러 통신이라 불안정)
-
-utils/robot/xarm7_kinematics.py        (해석 운동학, numpy 전용)
-    fk_T / fk_pose6d / ik(pose6d, seed) / R_to_euler_xyz ...
-
-utils/transforms.py
-    compute_T_CB(T_EB, T_EC) = T_EB @ inv(T_EC)     # ★ T_EC 규약의 출처
-```
-
-### 실물 파이프라인 (하드웨어)
-```
-scripts/artec/make_charuco.py       # 보드 PNG 생성(인쇄용)
-scripts/artec/intrinsic_calib.py    # 카메라 K 측정 (1회)
-scripts/artec/hand_eye_calib.py     # 메인 루프: 자세순회→detect→add_sample→calibrate→save
-utils/robot/xarm_interface.py       # XArmInterface (실물 로봇 = xArm SDK)
-config/sensor_frames.yaml           # 결과 T_EC_artec 적용처
-```
-
-### sim 검증 하니스 (Isaac 전용 — 이 안엔 USD/Isaac 코드만)
-```
-sim_harness/MMS_ext_calibration.py
-    setup_async()              # USD 열기, 마블 비활성, 보드 rigid 생성, 카메라/로봇/검출기/솔버 셋업
-    _on_physics_step()         # 상태머신: BOARD_SETTLE → (자세 i) SETTLE → SOLVE → DONE
-    _finalize_board_and_poses()# 보드 안착 후 실제 pose 읽어 자세 생성
-    build_calibration_poses()  # generate_hemisphere_poses 에 config 주입(thin wrapper)
-    _start_pose(i)             # 목표 EE pose → mat_to_pose6d_mm → RobotIK.ik → drive_joints
-    _do_capture(i)             # get_rgba → detector.detect → calibrator.add_sample
-    solve_and_report()         # calibrator.calibrate → GT 비교(t_err/r_err) → npz 저장
-    drive_joints / get_camera_K / get_prim_world_T / create_charuco_board_rigid ...  # USD/Isaac
-```
-
----
-
-## 5. 꼭 알아야 할 규약·함정
-
-1. **`T_EC` = E→C = EE-in-camera** (`x_C = T_EC·x_E`). calibrator 가 반환하는 것도 이 규약.
-   - sim GT(정답) = `inv(T_W_C) @ T_W_E`. ← 이걸 거꾸로 잡으면 결과가 멀쩡한데도 틀려 보임.
-2. **카메라 프레임 USD vs OpenCV** — USD/Isaac 카메라는 광축 **-Z·+Y up**, solvePnP(OpenCV)는
-   **+Z·+Y down**. 둘은 `R_FLIP=diag(1,-1,-1)`. `T_MC`/`T_EC` 가 OpenCV 프레임이므로 USD GT 와
-   비교할 땐 **`T_EC_usd = R_FLIP @ T_EC_ocv`** (T_EC 는 카메라가 출력측 → flip 은 **왼쪽곱**).
-   *(실물엔 USD 가 없으니 이 flip 은 sim 검증 전용.)*
-3. **단위** — `T_BE`: translation **m** / `T_MC`: translation **mm** (보드 사양이 mm 라 solvePnP
-   tvec 도 mm). `add_sample` 이 내부에서 `T_MC` 를 mm→m 변환. 섞으면 병진 오차 폭발.
-4. **자세 다양성** — 병진 정확도는 자세 간 **회전 다양성**에 좌우. 거의 수직으로만 내려다보면
-   회전축이 비슷해 병진이 부정확. polar/roll 범위를 넓혀야 함.
-5. **IK = 자체 해석 운동학** — real·sim 모두 `xarm7_kinematics`(수치 DLS). xArm SDK IK 는
-   컨트롤러 통신이라 하드웨어 연결 필요·불안정 → **미사용**(`use_sdk=False` 기본). 모션 명령만 SDK.
-6. **(sim) `utils` 패키지명 충돌** — Isaac 런타임에 동명 `utils` 가 있어 `from utils...` 가 깨짐.
-   → MMS 모듈을 **파일경로 로드**(`sys.modules` 등록 필수, `@dataclass` 때문). 옮길 모듈은
-   레포 내부 import 없는 **자기완결**이어야 함(`handeye_geometry`/`ik_provider`/`xarm7_kinematics`).
-
----
-
-## 6. 결과 해석 (sim)
-
-`solve_and_report` 가 GT 대비 **t_err(mm) / r_err(°)** 출력 + `captures_calib/handeye_result.npz` 저장.
-디버그 이미지 `ok_NN.png`(검출 성공, 코너 표시) / `fail_NN.png`(실패).
-
-- 무왜곡 sim 이면 검출 노이즈·자세 다양성만이 오차원 → **작을수록 좋음**(목표 t<5mm, r<2°).
-- `t_err` 큰데 `r_err` 작음 → 자세 회전 다양성 부족(§5-4) 의심.
-- 검출 `fail` 많음 → 자세가 너무 비스듬/보드 시야 이탈.
-
-> 실물 검증은 GT 가 없으니 calibrator 내부 **잔차**(_compute_residuals, T_B_M 일관성)와
-> point-consistency(고정점을 여러 자세서 base 로 변환 후 산포)로 본다.
-
----
-
-## 7. 실행
-
-### sim 검증 — standalone (권장)
-
-터미널에서 바로 돌아간다. 헤드리스라 GUI 없이 수치만 확인할 수 있다.
-
-```bash
-cd "$MMS_ROOT"   # 예: .../A1_.../1_코드/MMS
-
-# hand-eye  (약 90초)
-env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u \
-    scripts/sim/calib_handeye_sim.py
-
-# 턴테이블 축 — 캡처 후 클릭 (Isaac python 은 cv2 headless 라 창을 못 연다)
-env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python scripts/sim/calib_rim_sim.py
-conda activate mms-env && env -u PYTHONPATH python scripts/sim/rim_click_offline.py
-
-# 턴테이블 축 — 클릭 없이 자동
-MMS_RIM_AUTO=1 env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python \
-    scripts/sim/calib_rim_sim.py
-```
-
-**기본은 헤드리스다.** 화면으로 보려면 `--gui` 를 붙인다.
-
-```bash
-env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u \
-    scripts/sim/calib_handeye_sim.py --gui
-```
-
-| 옵션 | 뜻 |
+| 파일 | 역할 |
 |---|---|
-| `--gui` | Isaac 창 표시 (기본: 헤드리스) |
-| `--max-steps N` | update 상한 (기본 20000, 정상 완주 ~4600) |
-| `--out DIR` | 산출물 위치 (기본 `scripts/sim/log/handeye`) |
+| `utils/calibration/hand_eye_calibrator.py` | `HandEyeCalibrator` — `add_sample(T_EB, T_MC)` / `calibrate()→T_EC`. 5-method 중 잔차 최소 채택 |
+| `utils/calibration/handeye_sim.py` | sim 검증 공통 로직 — 보드 규격·자세 생성·풀이·GT 비교·판정 |
+| `mms_artec/utils/calibration/artec_charuco_detector.py` | `CharucoBoardSpec` / `ArtecCharucoDetector.detect()→T_MC`(mm, OpenCV cam). K 있으면 solvePnP |
+| `mms_artec/utils/calibration/handeye_geometry.py` | SE3 수학 + `look_at_camera` + `generate_hemisphere_poses` (numpy 전용) |
+| `utils/robot/ik_provider.py` | `RobotIK(...).ik(pose6d, seed)` — 기본 자체 해석 IK |
+| `utils/robot/xarm7_kinematics.py` | 해석 FK/IK (수치 DLS) |
+| `utils/collision/collision_model.py` | 충돌·특이점 게이트 (메시 SDF) |
+| `utils/transforms.py` | `compute_T_CB(T_EB, T_EC)` — ★ `T_EC` 규약의 출처 |
 
-**드라이브 튜닝** (기본값은 파이프라인 `isaac_world.py` 와 동일)
+**실물 파이프라인**
 
-| 환경변수 | 기본 | 뜻 |
+| 파일 | 역할 |
+|---|---|
+| `scripts/artec/make_charuco.py` | 보드 PNG 생성(인쇄용) |
+| `scripts/artec/intrinsic_calib.py` | 카메라 K 측정 (1회) |
+| `scripts/artec/hand_eye_calib.py` | 메인 루프 — 자세순회 → detect → add_sample → calibrate → save |
+| `scripts/artec/turntable_frame_init.py` | 턴테이블 rim 클릭 |
+| `config/sensor_frames.yaml` | 결과 `T_EC_artec` 적용처 |
+
+**sim 검증**
+
+| 파일 | 역할 |
+|---|---|
+| `scripts/sim/calib_handeye_sim.py` | **standalone 러너** (터미널 실행) |
+| `scripts/sim/calib_rim_sim.py` + `rim_click_offline.py` | 턴테이블 축 standalone (캡처 / 클릭 2단계) |
+| `sim_harness/MMS_ext_calibration.py` | GUI 드라이버 — USD 보드 생성·렌더·관절구동 (Isaac 전용) |
+
+---
+
+## 5. 실행
+
+> 옵션·환경변수의 배경과 주의점은 **부록 T3~T6**.
+
+### sim 검증 (권장: standalone — 터미널에서 바로)
+
+```bash
+cd "$MMS_ROOT"                                    # 예: .../A1_.../1_코드/MMS
+ISAAC=~/miniconda3/envs/env_isaacsim/bin/python
+
+# ── hand-eye (약 60초) ──
+env -u PYTHONPATH $ISAAC -u scripts/sim/calib_handeye_sim.py           # 헤드리스
+env -u PYTHONPATH $ISAAC -u scripts/sim/calib_handeye_sim.py --gui     # 화면으로 보며
+
+# ── 턴테이블 축 ──  Isaac python 은 cv2 headless 라 클릭 창을 못 연다 → 2단계
+env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py                  # 1) 캡처
+conda activate mms-env
+env -u PYTHONPATH python scripts/sim/rim_click_offline.py              # 2) 클릭+피팅
+
+MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py   # 클릭 없이 자동
+```
+
+| 옵션 / 환경변수 | 기본 | 뜻 |
 |---|---|---|
-| `MMS_DRIVE_KP` / `KD` | 2000 / 200 | 관절 위치 드라이브 게인 |
-| `MMS_DRIVE_MAXEFF` | 500 | 최대 토크. **USD 원본 maxForce(20~100)는 중력에 포화**한다 |
-| `MMS_MOVE_TIMEOUT` | 400 | 한 자세 구동 최대 스텝 |
-| `MMS_MOVE_RAMP` | 90 | **이동 램프 스텝** — 크게 하면 더 천천히 움직인다 |
-| `MMS_SETTLE_TOL` | 0.045 rad (≈2.6°) | 관절 수렴 허용오차 |
+| `--gui` | 꺼짐 | Isaac 창 표시 |
+| `--max-steps N` | 20000 | update 상한 (정상 완주 ~2400) |
+| `--out DIR` | `scripts/sim/log/handeye` | 산출물 위치 |
+| `MMS_MOVE_RAMP` | 90 | 이동 램프 — 키우면 천천히 움직인다 |
+| `MMS_CALIB_POLARS` / `AZIS` | `0,15,30,45` / 8방위 | 자세 구성 (→ T3) |
+| `MMS_CALIB_COLLISION` | 1 | 충돌 게이트 (→ T4) |
+| `MMS_DRIVE_KP` / `KD` / `MAXEFF` | 2000 / 200 / 500 | 드라이브 게인·최대토크 |
+| `MMS_SETTLE_TOL` | 0.045 rad | 관절 수렴 허용오차 (→ T7) |
 
-> ⚠ **알려진 계통 오차** — 로봇이 완전히 정지한(속도 0) 뒤에도 목표 대비
-> **joint1 +1.4° / joint2~7 +0.45~0.8°** 가 남는다. 게인을 100배(kp 2000→200000)
-> 올려도 joint1 은 1.40° 로 불변이라 제어 문제가 아니다(joint2~7 은 게인에 반응해
-> 0.45°까지 줄어든다 — 이쪽은 중력 처짐).
->
-> hand-eye 는 **실측 EE 자세와 실측 영상을 쌍으로** 쓰므로 결과에는 영향이 없다
-> (t_err ~1mm PASS). 허용오차를 2.6°로 잡아 헛된 타임아웃만 막아두었다.
-> 원인(충돌 접촉 / 드라이브 수렴 한계 등)은 미규명 — 로그에 잔차를 남긴다.
-
-> **로봇이 너무 빠르게 움직이면** `MMS_MOVE_RAMP` 를 키운다(기본 90).
-> 목표를 한 번에 던지지 않고 관절공간을 smoothstep 으로 보간해 보내므로,
-> 값이 클수록 부드럽고 느려진다.
-
-> **종료 시 빨간 메시지** — `Task was destroyed but it is pending!` /
-> `coroutine ... was never awaited` 는 **Isaac 위젯 정리 과정의 잡음**이다.
-> 결과와 무관하니 무시하고, 판정은 그 위의 `===== COMPLETE =====` 블록을 본다.
-
-**결과** (2026-09-09 실측, v3 씬)
+**결과** (2026-09-09, v3 씬)
 
 ```
 [CALIB] 캘리브 자세: 25 (보드중심 [0.365, -0.0, 0.672])
-[CALIB]   pose 6: 충돌/특이점 — self(tool↔link3,0mm) → skip
-...
+[CALIB]   pose 6: 충돌/특이점 — self(tool↔link3,0mm) → skip     ← 게이트가 거른다
 [CALIB] 유효 샘플: 15 | IK: analytic
 [CALIB] >>> t_err=0.95 mm  r_err=0.10°
 [CALIB]     판정: PASS ✅
 ```
 
-#### 자세를 몇 개나 모으나
+### sim 검증 (대안: Isaac GUI Script Editor)
 
-`polar 0°(수직) 1개 + polar>0 × 방위 5개`. 기본 `(0,15,30,45)×5` → **16 자세**.
-
-hand-eye(`AX=ZB`)는 **자세 간 회전 다양성**이 있어야 풀린다(권장 15~25 자세,
-자세 간 회전 ≥30°). 아래는 그 기본값을 고른 근거다.
-
-**충돌 게이트를 통과해야 실제로 쓰이므로 후보를 넉넉히 생성한다.**
-
-| 구성 | 생성 | 제외 | 유효 | t_err | r_err |
-|---|---|---|---|---|---|
-| (0,12,22)×5 (구 기본) | 11 | 0 | 11 | 1.10mm | 0.15° |
-| (0,15,30,45)×5 | 16 | 5 | 11 | 1.30mm | 0.15° |
-| (0,15,30)×6 | 13 | 3 | 10 | 0.93mm | 0.15° |
-| (0,15,30)×8 | 17 | 4 | 13 | 1.13mm | 0.16° |
-| **(0,15,30,45)×8** | **25** | 10 | **15** | **0.95mm** | **0.10°** |
-
-- polar 를 45°까지 넓히면 회전 다양성이 좋아지지만 **자가·환경 충돌로 걸러지는 자세가 늘어난다**
-- 방위를 8개로 늘려 **걸러지고도 15개가 남도록** 후보를 확보했다
-
-> sim 은 검출 잡음이 없어 11 자세로도 수렴한다. **실물은 잡음이 있어 회전 다양성이
-> 더 중요하다**(실측 3.55mm). 실기 캘리브 시 자세를 아끼지 말 것.
-
-조정: `MMS_CALIB_POLARS=0,15,30,45` · `MMS_CALIB_AZIS` · `MMS_CALIB_ROLLS` ·
-`MMS_CALIB_JITTER` · `MMS_CALIB_DIST`
-
-#### 충돌·특이점 게이트
-
-생성한 자세를 **구동 전에** 검사한다. IK 해가 나와도 부딪히면 그 자세를 버린다.
-
-| 검사 | 대상 | 예시 로그 |
-|---|---|---|
-| 자가충돌 | 스캐너·툴 ↔ 로봇 링크 | `self(tool↔link3,0mm)` |
-| 환경충돌 | 셀 프레임·툴체인저 스탠드·턴테이블 | `env(link4,0mm)` |
-| 특이점 | 최소 특이값 σ | `singular(σ=0.020<0.050)` |
-| 이동 경로 | 현재→목표 구간 전체 | `이동경로 충돌 — ...` |
-
-메시 SDF 기반(`utils/collision/collision_model.py`)이며 캐시
-`utils/collision/data/{cell_env,xarm7_spider_links}.npz` 를 읽는다.
-캐시가 없으면 게이트가 자동으로 꺼지므로 **로그의 `충돌 게이트: ON` 을 확인**할 것.
-
-```bash
-MMS_CALIB_COLLISION=0 ...   # 게이트를 끄고 돌리기(디버깅용)
-```
-
-> 게이트를 켜면 유효 샘플이 줄어든다. 자세 구성을 넓혀 **충돌 없는 자세로
-> 15개 이상**을 확보하는 편이 좋다.
-
-기준: `t_err < 5mm`, `r_err < 2°`. 로그·`handeye_result.npz` 는
-`scripts/sim/log/handeye/captures_calib/` 에 남는다.
-
-> **공통 로직은 `utils/calibration/handeye_sim.py` 한 곳에 있다.**
-> 보드 규격·자세 생성·풀이·GT 비교·판정 임계가 거기 정의돼 있고,
-> GUI 하니스와 standalone 러너가 그것을 공유한다. 두 경로가 다른 코드를 돌면
-> sim 검증의 의미가 없어지기 때문이다.
->
-> | 파일 | 역할 |
-> |---|---|
-> | `utils/calibration/handeye_sim.py` | 공통 로직 (omni 무관) |
-> | `sim_harness/MMS_ext_calibration.py` | GUI 드라이버 — USD 보드 생성·렌더·관절구동 |
-> | `scripts/sim/calib_handeye_sim.py` | standalone 러너 — SimulationApp 기동·스텝 진행 |
-
-### sim 검증 — Isaac GUI Script Editor (대안)
-
-하니스를 GUI 안에서 직접 돌린다. 화면으로 보드 낙하·로봇 이동을 보며 디버깅할 때.
+화면으로 보드 낙하·로봇 이동을 보며 디버깅할 때. 하니스는 **standalone 으로 못 돈다**(→ T6).
 
 ```bash
 export MMS_ROOT=/경로/MMS     # GUI 띄우기 전
-~/isaacsim/isaac-sim.sh       # 또는 env_isaacsim 의 isaacsim
+~/isaacsim/isaac-sim.sh
 ```
 ```python
 # Window > Script Editor
-exec(open("/경로/MMS/sim_harness/MMS_ext_calibration.py").read())
+exec(open("/경로/MMS/sim_harness/MMS_ext_calibration.py").read())      # hand-eye
+exec(open("/경로/MMS/sim_harness/MMS_ext_calibration2.py").read())     # 턴테이블 축
 ```
-
-> 이 하니스들은 `SimulationApp` 을 스스로 만들지 않아 **standalone 으로는 못 돈다**
-> (`ModuleNotFoundError: No module named 'omni.usd'`). GUI 안에서만 동작한다.
 
 ### real — 실제 캘리브레이션
 
 ```bash
-conda activate mms-env
-cd "$MMS_ROOT"
+conda activate mms-env && cd "$MMS_ROOT"
 
-env -u PYTHONPATH python scripts/artec/make_charuco.py     # 보드 PNG → 실척 인쇄 (최초 1회)
-env -u PYTHONPATH python scripts/artec/intrinsic_calib.py  # 카메라 K 측정 (최초 1회)
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py   # 자세 순회 → hand_eye_artec.yaml
+env -u PYTHONPATH python scripts/artec/make_charuco.py       # 보드 PNG → 실척 인쇄 (최초 1회)
+env -u PYTHONPATH python scripts/artec/intrinsic_calib.py    # 카메라 K 측정 (최초 1회)
+env -u PYTHONPATH python scripts/artec/hand_eye_calib.py     # 자세 순회 → hand_eye_artec.yaml
+env -u PYTHONPATH python scripts/artec/turntable_frame_init.py   # rim 클릭 → turntable_frame.yaml
 
-# 기록된 자세로 재실행할 때
+# 기록된 자세로 재실행
 env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
     --poses config/calibration/artec_calibration_poses.yaml
 ```
 
-→ 결과를 `config/sensor_frames.yaml` 의 `T_EC_artec` 에 반영한다.
-
-> 자세 15~25개, 자세 간 회전 **≥30°** 를 확보할 것.
-> 실물 결과(2026-04-29): PARK, **t_err 3.55mm / r_err 1.30°**
+→ hand-eye 결과를 `config/sensor_frames.yaml` 의 `T_EC_artec` 에 반영한다.
+자세 15~25개, 자세 간 회전 **≥30°** 확보할 것(→ T3).
+실물 기준값: **t_err 3.55mm / r_err 1.30°** (2026-04-29)
 
 ---
 
@@ -336,7 +186,7 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 > 로봇 base 기준 **턴테이블 회전축·표면**(= `T_B_F0`)을 구한다. 방법은 **rim 점 피팅** 하나로 통일
 > (구 어레이 방법은 실물 fixture 비용이 커서 채택 안 함 — rim 으로 대체 가능).
 
-## 8. 무엇을 구하나 — `T_B_F0`
+## 6. 무엇을 구하나 — `T_B_F0`
 
 | 프레임 | 의미 |
 |---|---|
@@ -351,16 +201,16 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 왜 필요 — Phase 2 hint·NBV·recovery·충돌회피가 전부 "턴테이블이 base 기준 어디서 도나"에 의존.
 하드웨어팀이 옮기면 무효화 → **버튼 하나로 다시 잡는** 루틴.
 
-## 9. 핵심 원리 — "회전하면 원을 그린다"
+## 7. 핵심 원리 — "회전하면 원을 그린다"
 
 > 회전판에 고정된 점은 회전축 둘레로 **원**을 그린다 → 원 법선 = 축방향, 중심 = 축 위 한 점.
 
 disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 3D 로 모아 원을 피팅하면 축이 나온다.
 
 > ★ **축 ≠ 표면**: rim/궤적 높이 ≠ disc 표면 높이일 수 있음. 충돌회피·대상물 높이를 위해 disc
-> **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(§11).
+> **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(§9).
 
-## 10. Rim 방법 — 흐름 + 함수
+## 8. Rim 방법 — 흐름 + 함수
 
 ```
 로봇이 disc rim 을 보는 자세 → 1회 캡처 (organized 포인트클라우드 + T_CB)
@@ -372,7 +222,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
         ▼
    pts_B (rim, base) → fit_circle_3d → (center, normal, radius, residual)
         ▼
-   (+ disc 표면 평면, §11) → build_T_B_F0(center, normal) → T_B_F0
+   (+ disc 표면 평면, §9) → build_T_B_F0(center, normal) → T_B_F0
 ```
 
 - UI/수학: `utils/calibration/`
@@ -382,7 +232,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
 - ⚠ Spider 좁은 FOV 탓에 rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 취득
   (3점이면 가능하나 호가 짧으면 조건수↓).
 
-## 11. 표면 평면 → `T_B_F0` 빌드
+## 9. 표면 평면 → `T_B_F0` 빌드
 
 축(방향+XY)만으론 부족 → disc **표면**으로 원점 높이 확정:
 - `turntable_frame.py`
@@ -393,7 +243,7 @@ disc rim(가장자리)은 그 자체가 축 둘레의 원 → rim 위 점들을 
   표면 평면 ∩ 축선 = F0 원점, z축은 축방향, 평면법선은 교차검증. (구 어레이 경로용이었으나
   rim center/normal 을 바로 `build_T_B_F0` 에 넣어도 됨 — rim 은 표면 근처라 단순.)
 
-## 12. 코드 지도 (턴테이블)
+## 10. 코드 지도 (턴테이블)
 
 ```
 utils/calibration/turntable_frame.py     (numpy; 저장 시 scipy/yaml) ★ 공유 코어
@@ -411,81 +261,117 @@ sim 검증:
   sim_harness/MMS_ext_calibration2.py   # 턴테이블 rim 자동추출 → fit → GT 비교
 ```
 
-## 13. 규약·함정 + 실행
-
-- **base 프레임 + SLAM 미사용** — `capture_points_base`(센서→T_EC·FK→base). hand-eye 와 동일 철학(§5).
-- **단위** — 코어 수학은 **m** 권장. organized_pts 는 **mm**(rim_picker 가 /1000). 저장은 m.
-- **`T_B_F0` = B→F** (`x_F = T_B_F0·x_B`).
-- ⚠ **코드 중복(정리 필요)** — `scripts/artec/turntable_frame_init.py` 가 공유 코어 대신 자체
-  `fit_circle_3d`/`_RimPicker` 를 들고 있음(PhoXi 는 공유 코어 사용). Artec 도 공유 코어로 통일 권장.
-- ⚠ **turntable_frame.yaml stale 의심** — 2026-04-23(Artec pivot 이전). 정밀도 의심 시 재캘리브 1순위.
-
-### 실행
-
-#### sim — standalone (권장)
-
-Isaac python 에는 GUI 툴킷이 없어(cv2 headless) 클릭 창을 못 연다.
-그래서 **캡처와 클릭을 두 단계로 분리**해 두었다.
-
-```bash
-cd "$MMS_ROOT"
-
-# 1) Isaac 에서 rim 캡처 → scripts/sim/log/rim_capture.npz
-env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python scripts/sim/calib_rim_sim.py
-
-# 2) GUI 되는 일반 python 에서 클릭 + 원 피팅 + 저장
-conda activate mms-env
-env -u PYTHONPATH python scripts/sim/rim_click_offline.py
-```
-
-클릭 없이 자동으로 돌리려면 (rim 점을 기하로 자동 추출):
-
-```bash
-# GUI 로 축 시각화까지
-MMS_RIM_AUTO=1 env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python scripts/sim/calib_rim_sim.py
-
-# 헤드리스 — 수치만 (CI·빠른 확인용)
-MMS_ISAAC_HEADLESS=1 MMS_RIM_AUTO=1 \
-  env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python scripts/sim/calib_rim_sim.py
-```
-
-> GT 대비 축 오차가 출력된다. 기준: **0.015° / 0.7mm**
-
-#### sim — Script Editor (대안)
-
-`sim_harness/MMS_ext_calibration2.py` 를 §7 과 같은 방식으로 GUI 안에서 실행한다.
-
-```python
-exec(open("<MMS_ROOT>/sim_harness/MMS_ext_calibration2.py").read())
-```
-```bash
-tail -f ~/isaacsim/standalone_examples/play/MMS/captures_turntable/calib_log.txt
-```
-
-#### real
-
-```bash
-conda activate mms-env && cd "$MMS_ROOT"
-env -u PYTHONPATH python scripts/artec/turntable_frame_init.py   # rim 클릭
-# → config/calibration/turntable_frame.yaml
-```
-
-> rim 이 한 화면에 다 안 들어오면 보이는 호(arc)에서 클릭한다. 3점이면 풀리지만
-> 호가 짧으면 조건수가 나빠진다.
-
-> 상태: rim 방법 ✅ (Isaac+PhoXi 검증 0.015°/0.7mm). 구 어레이 방법은 폐기(rim 으로 대체).
-
 ---
 
-## 14. 남은 일
+# 〔부록〕 Troubleshooting — 규약·함정·주의점
 
-| 상태 | 항목 |
+> 캘리브가 이상할 때 여기부터 본다. 대부분 아래 중 하나다.
+
+## T1. 좌표 규약 — 틀리면 "정상인데 틀려 보인다"
+
+| 항목 | 규약 |
 |---|---|
-| 🔬 | **hand-eye 검증 스크립트 미작성** (`artec_hand_eye_validate.py`) — 캘리브에 쓰지 않은 별도 N_test 자세에서 point-consistency(고정점을 여러 자세서 base 로 변환 후 산포) 측정. 목표 <0.5mm |
-| ⚠ | Spider FOV(작동거리 0.2~0.3m)가 좁아 disc rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 클릭. 원 피팅은 3점이면 되나 호가 짧으면 조건수 저하 |
-| ⚠ | `scripts/artec/turntable_frame_init.py` 공유 코어 미사용(§13) — 통일 권장 |
-| ✅ | Isaac rim-클릭 어댑터 완료(`capture_organized`). real Artec 은 동일 계약(intensity, organized_pts, T_CB)만 채우면 `rim_picker` 재사용 |
+| `T_EC` | **E→C** (`x_C = T_EC·x_E`). calibrator 반환값도 이 규약 |
+| `T_B_F0` | **B→F** (`x_F = T_B_F0·x_B`) |
+| sim GT | `inv(T_W_C) @ T_W_E` — **거꾸로 잡으면 결과가 멀쩡한데도 틀려 보인다** |
 
-> `utils/calibration/turntable_frame.py` 는 `fit_circle_3d` · `fit_plane` · `build_T_B_F0` ·
-> `save_turntable_frame_yaml` 에 더해 **`axis_error`**(추정 축 vs 기준 축 오차, sim 검증용)를
-> 제공한다. 2026-09 폐기 코드 정리 때 `turntable_axis.py` 에서 이관됐다.
+**카메라 프레임 USD vs OpenCV** — USD/Isaac 카메라는 광축 **−Z·+Y up**,
+solvePnP(OpenCV)는 **+Z·+Y down**. 차이는 `R_FLIP = diag(1,−1,−1)`.
+
+```
+T_EC_usd = R_FLIP @ T_EC_ocv      ← T_EC 는 카메라가 출력측이라 왼쪽곱
+```
+> 실물엔 USD 가 없으니 이 flip 은 **sim 검증 전용**이다.
+
+## T2. 단위 — 섞으면 병진 오차가 폭발한다
+
+| 값 | 단위 |
+|---|---|
+| `T_BE` translation | **m** |
+| `T_MC` translation | **mm** (보드 사양이 mm → solvePnP tvec 도 mm) |
+| `organized_pts` | **mm** (`rim_picker` 가 /1000) |
+| 저장 yaml | **m** |
+
+`add_sample` 이 내부에서 `T_MC` 를 mm→m 변환한다.
+
+## T3. 자세가 부족하거나 치우쳐 있다
+
+- 병진 정확도는 **자세 간 회전 다양성**에 좌우된다. 거의 수직으로만 내려다보면
+  회전축이 비슷해져 병진이 부정확해진다 → polar·roll 범위를 넓힌다.
+- 충돌 게이트가 자세를 걸러내므로 **후보를 넉넉히** 만든다.
+  기본 `(0,15,30,45)×8` = 25 생성 → 15 유효.
+
+| 구성 | 생성 | 제외 | 유효 | t_err | r_err |
+|---|---|---|---|---|---|
+| (0,12,22)×5 (구 기본) | 11 | 0 | 11 | 1.10mm | 0.15° |
+| (0,15,30,45)×5 | 16 | 5 | 11 | 1.30mm | 0.15° |
+| (0,15,30)×8 | 17 | 4 | 13 | 1.13mm | 0.16° |
+| **(0,15,30,45)×8** | **25** | 10 | **15** | **0.95mm** | **0.10°** |
+
+조정: `MMS_CALIB_POLARS` · `MMS_CALIB_AZIS` · `MMS_CALIB_ROLLS` · `MMS_CALIB_JITTER` · `MMS_CALIB_DIST`
+
+> sim 은 검출 잡음이 없어 11 자세로도 수렴한다. **실물은 잡음이 있어 회전 다양성이 더 중요**
+> 하다(실측 3.55mm). 실기 캘리브 시 자세를 아끼지 말 것.
+
+## T4. 충돌·특이점 게이트
+
+생성한 자세를 **구동 전에** 검사한다. IK 해가 나와도 부딪히면 버린다.
+
+| 검사 | 예시 로그 |
+|---|---|
+| 자가충돌 (스캐너·툴 ↔ 링크) | `self(tool↔link3,0mm)` |
+| 환경충돌 (프레임·툴체인저·턴테이블) | `env(link4,0mm)` |
+| 특이점 | `singular(σ=0.020<0.050)` |
+| 이동 경로 | `이동경로 충돌 — ...` |
+
+메시 SDF 기반(`utils/collision/collision_model.py`)이며 캐시
+`utils/collision/data/{cell_env,xarm7_spider_links}.npz` 를 읽는다.
+**캐시가 없으면 게이트가 조용히 꺼지므로 로그의 `충돌 게이트: ON` 을 확인**할 것.
+끄려면 `MMS_CALIB_COLLISION=0`.
+
+> `start(...)` 사유는 **출발 자세가 이미 여유 밖**이라는 뜻이다. 하니스는 이때 경고만
+> 남기고 이동한다 — 거부하면 이후 전부가 같은 이유로 막히는 연쇄가 생긴다
+> (`4_collision.md` §1.4).
+
+## T5. 결과 해석 (sim)
+
+`solve_and_report` 가 GT 대비 **t_err(mm) / r_err(°)** 을 찍고
+`captures_calib/handeye_result.npz` 를 남긴다. 디버그 이미지 `ok_NN.png` / `fail_NN.png`.
+
+| 증상 | 의심 |
+|---|---|
+| `t_err` 큰데 `r_err` 작음 | 자세 회전 다양성 부족 → **T3** |
+| 검출 `fail` 많음 | 자세가 너무 비스듬하거나 보드가 시야를 벗어남 |
+| 정상인데 큰 오차 | 프레임 flip 누락 → **T1** |
+
+목표 `t < 5mm`, `r < 2°`. 실물은 GT 가 없으니 calibrator 잔차와
+point-consistency(고정점을 여러 자세서 base 로 변환 후 산포)로 본다.
+
+## T6. sim 실행 관련
+
+- **하니스는 standalone 이 아니다** — `sim_harness/MMS_ext_*.py` 는 Isaac GUI 안에서만
+  돈다(`ModuleNotFoundError: No module named 'omni.usd'`). 터미널에서 돌리려면
+  `scripts/sim/calib_handeye_sim.py` 를 쓴다.
+- **`utils` 패키지명 충돌** — Isaac 런타임에 동명 `utils` 가 있어 `from utils...` 가 깨진다.
+  → MMS 모듈을 **파일경로 로드**(`sys.modules` 등록 필수, `@dataclass` 때문). 옮길 모듈은
+  레포 내부 import 없는 **자기완결**이어야 한다(`handeye_geometry`/`ik_provider`/`xarm7_kinematics`).
+- **종료 시 빨간 메시지** — `Task was destroyed but it is pending!` 등은 Isaac 위젯 정리
+  잡음이다. 결과와 무관하니 무시하고 `===== COMPLETE =====` 블록을 본다.
+- **로봇이 너무 빠르면** `MMS_MOVE_RAMP` 를 키운다(기본 90).
+
+## T7. 알려진 문제
+
+- ⚠ **`turntable_frame.yaml` stale 의심** — 2026-04-23(Artec 장착 이전). Phase 2 조준·
+  recovery·충돌회피가 전부 여기 의존한다. **정밀도 의심 시 재캘리브 1순위.**
+- ⚠ **드라이브 계통 오차** — 완전 정지(속도 0) 후에도 목표 대비 joint1 +1.4° /
+  joint2~7 +0.45~0.8° 가 남는다. 게인을 100배 올려도 joint1 은 불변이라 제어 문제가
+  아니다. **원인 미규명.** hand-eye 는 실측 EE 자세와 실측 영상을 쌍으로 쓰므로 결과
+  영향은 없다(t_err ~1mm PASS). 허용오차 `MMS_SETTLE_TOL` 2.6° 로 헛된 타임아웃만 막아둠.
+- ⚠ **코드 중복** — `scripts/artec/turntable_frame_init.py` 가 공유 코어 대신 자체
+  `fit_circle_3d`/`_RimPicker` 를 들고 있다(PhoXi 는 공유 코어 사용). 통일 권장.
+- ⚠ **IK** — real·sim 모두 `xarm7_kinematics`(수치 DLS). xArm SDK IK 는 컨트롤러 통신이라
+  하드웨어 연결이 필요하고 불안정해 **미사용**(`use_sdk=False` 기본). 모션 명령만 SDK.
+- 🔬 **hand-eye 검증 스크립트 미작성** (`artec_hand_eye_validate.py`) — 캘리브에 쓰지 않은
+  별도 N_test 자세에서 point-consistency 측정. 목표 <0.5mm.
+- ⚠ **Spider FOV** 가 좁아 disc rim 전체가 한 화면에 안 들어올 수 있다 → 보이는 호(arc)에서
+  클릭. 원 피팅은 3점이면 되나 호가 짧으면 조건수가 나빠진다.
