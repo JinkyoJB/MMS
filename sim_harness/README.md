@@ -13,7 +13,19 @@
 | `MMS_ext_phase1_recovery2.py` | recovery — **윗면 미포착**(너무 낮은 el) | `2_phase1.md` §6 |
 | `MMS_ext_phase2_nbv.py` | Phase 2 NBV 루프 | `3_phase2.md` §6.4 |
 
-## ⚠ standalone 스크립트가 아니다 — Isaac GUI 안에서 실행한다
+## 터미널에서 돌리려면 → `scripts/sim/calib_handeye_sim.py`
+
+hand-eye 검증은 **standalone 러너**가 따로 있다. 하니스 로직을 그대로 재사용하면서
+SimulationApp 을 직접 띄운다.
+
+```bash
+env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u scripts/sim/calib_handeye_sim.py
+```
+> 2026-09-09 실측: t_err 1.10mm / r_err 0.04° (PASS)
+
+아래는 **GUI 안에서 직접 돌릴 때**의 이야기다.
+
+## ⚠ 하니스 자체는 standalone 이 아니다 — Isaac GUI 안에서 실행한다
 
 `SimulationApp` 을 스스로 만들지 않는다. **이미 떠 있는 Isaac Sim** 의 app 에 얹히는
 구조라, 터미널에서 바로 돌리면 `omni.*` 를 못 찾는다.

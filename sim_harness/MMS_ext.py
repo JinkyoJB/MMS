@@ -31,6 +31,11 @@ from isaacsim.sensors.camera import Camera
 from pxr import Usd, UsdGeom, Sdf, Gf
 
 # ── 2. 상수 ───────────────────────────────────────────────────────────────────
+import os as _os2, sys as _sys2
+_sys2.path.insert(0, _os2.environ.get("MMS_ROOT",
+    _os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), "..")))
+from mms_paths import asset as _asset  # noqa: E402
+
 USD_PATH     = _asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
 ROBOT_PRIM   = "/World/xarm7"
 JOINTS_SCOPE = "/World/xarm7/joints"

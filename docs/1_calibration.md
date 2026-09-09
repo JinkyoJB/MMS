@@ -160,66 +160,59 @@ sim_harness/MMS_ext_calibration.py
 
 ## 7. 실행
 
-### 실행 경로 두 가지 — 헷갈리기 쉬움
+### sim 검증 — standalone (권장)
 
-같은 sim 검증인데 **대상에 따라 실행 방식이 다르다.**
-
-| 검증 대상 | 방식 | 진입점 |
-|---|---|---|
-| **hand-eye** `T_E_C` | Isaac GUI **Script Editor** (standalone 불가) | `sim_harness/MMS_ext_calibration.py` |
-| **턴테이블 축** `T_B_F0` | **standalone** 도 가능 (권장) | `scripts/sim/calib_rim_sim.py` + `rim_click_offline.py` |
-| 턴테이블 축 (대안) | Isaac GUI Script Editor | `sim_harness/MMS_ext_calibration2.py` |
-
-> hand-eye 하니스는 `SimulationApp` 을 스스로 만들지 않아 GUI 안에서만 돈다.
-> 턴테이블 쪽은 standalone 스크립트가 따로 구현돼 있다(§13).
-
-### sim — hand-eye 파이프라인 검증
-
-ChArUco 보드를 USD 평면으로 실제 렌더 → 검출 → solvePnP → `calibrateHandEye` →
-USD 에서 읽은 **GT 와 비교**한다. 실물 없이 파이프라인 자체를 확인하는 용도.
-
-> ⚠ **이 하니스는 standalone 스크립트가 아니다.** `SimulationApp` 을 스스로 만들지 않고
-> **이미 떠 있는 Isaac Sim GUI 안에서** 실행한다. 터미널에서 `python.sh script.py` 로
-> 돌리면 `ModuleNotFoundError: No module named 'omni.usd'` 가 난다
-> (`omni.*` 는 Isaac 런타임이 로드하는 모듈이라 그전엔 없다).
-
-**1) Isaac Sim GUI 를 띄운다**
+터미널에서 바로 돌아간다. 헤드리스라 GUI 없이 수치만 확인할 수 있다.
 
 ```bash
-env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -c "
-from isaacsim import SimulationApp; app = SimulationApp({'headless': False})
-import time
-while app.is_running(): app.update(); time.sleep(0.01)
-"
-```
-또는 설치된 런처로 `~/isaacsim/isaac-sim.sh`.
+cd "$MMS_ROOT"   # 예: .../A1_.../1_코드/MMS
 
-**2) 리포 경로를 알려준다** — GUI 를 띄우기 **전** 셸에서:
+# hand-eye  (약 90초)
+env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u \
+    scripts/sim/calib_handeye_sim.py
+
+# 턴테이블 축 — 캡처 후 클릭 (Isaac python 은 cv2 headless 라 창을 못 연다)
+env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python scripts/sim/calib_rim_sim.py
+conda activate mms-env && env -u PYTHONPATH python scripts/sim/rim_click_offline.py
+
+# 턴테이블 축 — 클릭 없이 자동
+MMS_RIM_AUTO=1 env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python \
+    scripts/sim/calib_rim_sim.py
+```
+
+**옵션** — `--gui` 화면 표시 · `--max-steps N` 상한(기본 20000) · `--out DIR` 산출물 위치
+
+**결과** (2026-09-09 실측, v3 씬)
+
+```
+[CALIB] 유효 샘플: 11 | IK: analytic
+[CALIB] GT  T_E_C  t(mm)=[-16.34, -163.87, 56.86]
+[CALIB] >>> t_err=1.10 mm  r_err=0.04°
+[CALIB]     판정: PASS ✅
+```
+
+기준: `t_err < 5mm`, `r_err < 2°`. 로그·`handeye_result.npz` 는
+`scripts/sim/log/handeye/captures_calib/` 에 남는다.
+
+> `calib_handeye_sim.py` 는 `sim_harness/MMS_ext_calibration.py` 의 검증 로직을
+> **그대로 재사용**한다(복제 아님). SimulationApp 을 직접 띄우고 `app.update()` 로
+> 물리 콜백을 돌려 `phase == DONE` 까지 진행시키는 얇은 러너다.
+
+### sim 검증 — Isaac GUI Script Editor (대안)
+
+하니스를 GUI 안에서 직접 돌린다. 화면으로 보드 낙하·로봇 이동을 보며 디버깅할 때.
 
 ```bash
-export MMS_ROOT=/home/keti/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성/1_코드/MMS
+export MMS_ROOT=/경로/MMS     # GUI 띄우기 전
+~/isaacsim/isaac-sim.sh       # 또는 env_isaacsim 의 isaacsim
 ```
-
-**3) Script Editor 에서 실행** — `Window > Script Editor` 를 열고 아래를 붙여넣는다.
-
 ```python
-exec(open("/home/keti/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성"
-          "/1_코드/MMS/sim_harness/MMS_ext_calibration.py").read())
+# Window > Script Editor
+exec(open("/경로/MMS/sim_harness/MMS_ext_calibration.py").read())
 ```
-> VSCode 의 Isaac 확장(코드러너)을 쓰면 파일을 열고 바로 실행해도 된다.
 
-**4) 로그 확인** (다른 터미널)
-
-```bash
-tail -f ~/isaacsim/standalone_examples/play/MMS/captures_calib/calib_log.txt
-```
-> 산출물 위치는 `MMS_HARNESS_OUT` 으로 바꿀 수 있다.
-
-**결과 확인** — 로그 끝에 GT 대비 `t_err` / `r_err` 이 찍힌다. §6 참고.
-
-> 파이프라인 본체(`main_artec.py`)는 반대로 **standalone** 이다. 그쪽은
-> `env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python main_artec.py` 로 돌린다.
-> 자세히는 `sim_commands.md`.
+> 이 하니스들은 `SimulationApp` 을 스스로 만들지 않아 **standalone 으로는 못 돈다**
+> (`ModuleNotFoundError: No module named 'omni.usd'`). GUI 안에서만 동작한다.
 
 ### real — 실제 캘리브레이션
 

@@ -52,7 +52,37 @@ except Exception:
     _HAS_ARUCO = False
 
 # ── 해석 운동학·SDK import ────────────────────────────────────────────────────
+# ── 경로 해석 (하드코딩 금지) ─────────────────────────────────────────────────
+#   Isaac 트리에 복사/링크해 돌리면 __file__ 이 리포 밖일 수 있다 → 아래 순서로 탐색.
+def _find_mms_repo():
+    import os as _os
+    cands = [_os.environ.get("MMS_ROOT"),
+             _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".."),
+             _os.path.expanduser("~/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성/1_코드/MMS"),
+             _os.path.expanduser("~/workspace/sync/2_Rapid_Digital_Twin/1_MMS/7_MMS_framework")]
+    for c in cands:
+        if c and _os.path.isfile(_os.path.join(c, "main_artec.py")):
+            return _os.path.abspath(c)
+    raise RuntimeError("MMS 리포를 찾지 못했다. export MMS_ROOT=/경로/MMS")
+
+
 _MMS_REPO = _find_mms_repo()
+if _MMS_REPO not in sys.path:
+    sys.path.insert(0, _MMS_REPO)
+
+# xArm SDK — pip 설치본(mms-env)이 있으면 그걸 쓰고, 없으면 소스 경로를 MMS_XARM_SDK 로
+_XARM_SDK = os.environ.get("MMS_XARM_SDK", "")
+if _XARM_SDK and _XARM_SDK not in sys.path:
+    sys.path.insert(0, _XARM_SDK)
+
+# 씬 USD — mms_paths 가 자산 루트를 해석한다 (MMS_ASSET_ROOT 로 override)
+from mms_paths import asset as _asset  # noqa: E402
+
+# 산출물 — 기본은 Isaac 트리, MMS_HARNESS_OUT 으로 변경 가능
+_BASE_DIR = os.environ.get(
+    "MMS_HARNESS_OUT",
+    os.path.expanduser("~/isaacsim/standalone_examples/play/MMS"))
+# ─────────────────────────────────────────────────────────────────────────────
 _XARM_SDK = os.environ.get("MMS_XARM_SDK", "")
 # xArm SDK 는 패키지(xarm.wrapper 등) → sys.path 로 추가
 if _XARM_SDK not in sys.path:
@@ -179,8 +209,6 @@ PHYSICS_CB_NAME = "mms_calib_step"
 
 # ★ VSCode Isaac 코드러너는 __file__ 을 확장 자신의 디렉토리로 잡아 출력이 엉뚱한
 #   곳(.../code_editor/vscode/)에 묻힌다 → 스크립트 위치를 절대경로로 고정.
-_BASE_DIR = os.environ.get("MMS_HARNESS_OUT",
-    os.path.expanduser("~/isaacsim/standalone_examples/play/MMS"))
 OUT_DIR   = os.path.join(_BASE_DIR, "captures_calib")
 ASSET_DIR = os.path.join(_BASE_DIR, "calib_assets")
 BOARD_PNG = os.path.join(ASSET_DIR, "charuco_5x3_20_15.png")

@@ -41,12 +41,11 @@ from pxr import Usd, UsdGeom, Sdf, Gf
 
 # ── MMS 공유 코어 ─────────────────────────────────────────────────────────────
 # ── 경로 해석 (하드코딩 금지) ─────────────────────────────────────────────────
-#   이 스크립트는 Isaac 트리에 복사/링크해서 돌리므로 __file__ 이 리포 밖일 수 있다.
-#   따라서 리포 위치를 아래 순서로 찾는다.  ※ 자세히는 sim_harness/README.md
+#   Isaac 트리에 복사/링크해 돌리면 __file__ 이 리포 밖일 수 있다 → 아래 순서로 탐색.
 def _find_mms_repo():
     import os as _os
     cands = [_os.environ.get("MMS_ROOT"),
-             _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".."),  # 리포 안에서 실행
+             _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".."),
              _os.path.expanduser("~/workspace/4_인수인계서/A1_멀티모달스캔시스템_3D스캐닝경로생성/1_코드/MMS"),
              _os.path.expanduser("~/workspace/sync/2_Rapid_Digital_Twin/1_MMS/7_MMS_framework")]
     for c in cands:
