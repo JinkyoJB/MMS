@@ -188,13 +188,21 @@ POSE_CFG           = HS.PoseConfig()         # 공유 정의
 
 # ── 상태머신 타이밍 ───────────────────────────────────────────────────────────
 SETTLE_STABLE_N    = 15        # 관절 수렴 연속 N 스텝이면 캡처
-MOVE_TIMEOUT_N     = 400       # 한 자세 구동 최대 스텝
-JOINT_SETTLE_TOL   = 0.01      # 관절 수렴 허용오차 (rad, ≈0.57°)
+MOVE_TIMEOUT_N     = int(os.environ.get("MMS_MOVE_TIMEOUT", 400))  # 한 자세 구동 최대 스텝
+# 관절 수렴 허용오차. 2026-09-09 실측: 완전 정지(속도 0) 후에도 목표 대비
+#   joint1 +1.4° / joint2~7 +0.45~0.8° 의 계통 오차가 남는다. 드라이브 게인을
+#   100배(kp 2000→200000) 올려도 joint1 은 1.40° 로 불변 → 제어 문제가 아니다.
+#   hand-eye 는 **실측 EE 자세 + 실측 영상**을 쌍으로 쓰므로 결과에는 영향이 없다
+#   (t_err ~1mm 로 PASS). 아래 값은 그 계통 오차를 덮어 헛된 타임아웃을 막는다.
+#   ※ 원인 규명 전까지 잔차를 로그에 남긴다(아래 타임아웃 메시지).
+JOINT_SETTLE_TOL   = float(os.environ.get("MMS_SETTLE_TOL", 0.045))   # rad, ≈2.6°
 MIN_CH_CORNERS     = 6
 
 FIX_DRIVE_GAINS = True
-DRIVE_STIFFNESS = 2000.0
-DRIVE_DAMPING   = 200.0
+# 튜닝용 env override (MMS_DRIVE_KP / KD / MAXEFF)
+DRIVE_STIFFNESS  = float(os.environ.get("MMS_DRIVE_KP", 2000.0))
+DRIVE_DAMPING    = float(os.environ.get("MMS_DRIVE_KD", 200.0))
+DRIVE_MAX_EFFORT = float(os.environ.get("MMS_DRIVE_MAXEFF", 500.0))
 WIDEN_JOINT1_LIMIT_DEG = 175.0
 
 PHYSICS_CB_NAME = "mms_calib_step"
@@ -513,7 +521,9 @@ def _on_physics_step(step_size):
             _ctx["stable_n"] = 0
         if _ctx["stable_n"] >= SETTLE_STABLE_N or _ctx["phase_step"] >= MOVE_TIMEOUT_N:
             if _ctx["phase_step"] >= MOVE_TIMEOUT_N:
-                print(f"[CALIB]   pose {_ctx['pose_idx']+1}: 구동 타임아웃 — 현 자세 캡처")
+                _e = _joint_err_to_target()
+                print(f"[CALIB]   pose {_ctx['pose_idx']+1}: 구동 타임아웃 — 현 자세 캡처 "
+                      f"(잔차 {np.degrees(_e):.2f}° / 허용 {np.degrees(JOINT_SETTLE_TOL):.2f}°)")
             _do_capture(_ctx["pose_idx"])
             _start_pose(_ctx["pose_idx"] + 1)
 
@@ -528,10 +538,18 @@ def _on_physics_step(step_size):
 # setup
 # ============================================================================
 def configure_joint_drives(robot):
+    """관절 드라이브 게인 + 최대 토크. 파이프라인(isaac_world._configure_joint_drives)과
+    **같은 값**을 쓴다 — sim 거동이 갈리면 검증 의미가 없다."""
     view = robot._articulation_view
     nd = view.num_dof
     view.set_gains(kps=np.full((1, nd), DRIVE_STIFFNESS, dtype=np.float32),
                    kds=np.full((1, nd), DRIVE_DAMPING, dtype=np.float32))
+    # ★ 원본 USD 의 maxForce(20~100)는 일부 자세에서 중력 토크에 포화된다.
+    #   그러면 목표에 못 닿고 중력에 밀려 출렁이며(=구동 타임아웃) 캡처 자세가 흔들린다.
+    try:
+        view.set_max_efforts(np.full((1, nd), DRIVE_MAX_EFFORT, dtype=np.float32))
+    except Exception as e:
+        print(f"[CALIB][WARN] set_max_efforts 실패(무시): {e}")
 
 
 def build_dof_index(robot):
