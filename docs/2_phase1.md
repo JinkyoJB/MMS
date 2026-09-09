@@ -197,3 +197,38 @@ standalone_examples/play/MMS/MMS_ext_phase1.py  # sim 검증(GT 누적)
 5. **sim 은 SLAM 없음** — GT θ + 축으로 누적(−θ 역회전). real 은 그 위에 SLAM 만 얹음.
 6. **last-good θ** = reg_err≥0 마지막 θ — recovery safe-back rollback 기준.
 7. **턴테이블 UDP** (TCP socket 막힘), 별도 thread + stop_event 로 즉시 정지.
+
+---
+
+## 10. Elevation view-score — 어느 고도각이 좋은가
+
+턴테이블이 방위각을 커버하므로 로봇이 고를 자유도는 **고도각 φ 하나**다.
+후보 φ 들을 preview 로 찍어 점수화하고 `argmax_φ` 로 고른다.
+
+> **score(φ)** = 그 자세 preview 중 **물체로 분류된** 점들이
+> **최적 작업거리(~225mm) 근처 · FOV 안** 에 얼마나 모여있나 (개수 가중합)
+
+| 단계 | 내용 |
+|---|---|
+| 1 | **C→B 변환** — preview 점군을 base 프레임으로 (멤버십·z_table 이 B 기준) |
+| 2 | **물체 멤버십** (3-AND) — cylinder pre-clip → 턴테이블 hard floor(`z > z_table+8mm`) → probe 로 만든 축대칭 `(r,z)` occupancy lookup (360° 회전대칭화 → 어느 θ 에서도 성립) |
+| 3 | **광축 기저** — 캘리브된 `fwd_C/up_C` 로 정규직교 (hardcoded `+Z_C` 미사용, mis-aim 회피) |
+| 4 | **FOV 판정** — Spider 30°(H)×21°(V), depth>1mm 로 등 뒤 점 제거 |
+| 5 | **Gaussian 거리 가중** — `w(d)=exp(−((d−225)/25)²)`, band[200,250]=1σ |
+
+→ `score = Σ w(depth) · 1_FOV`. 같은 개수라도 **225mm 에 모인 자세가 이긴다.**
+
+**호출 시점** — 정상 시작에는 부르지 않는다(사용자가 맞춘 home 자세로 출발).
+**tracking-lost recovery 흐름에서만** 호출하며, 이때는 후보를 `[-5°, 0°, +5°]` 로
+축소하고 fine search 를 건너뛴다(~30초).
+
+> ⚠ **한계 (single-θ)** — 현재 score 는 θ=0 한 시점 preview 만 본다. 비대칭 물체
+> (손잡이·주둥이)는 θ 마다 best φ 가 다를 수 있는데 360° 동안 로봇은 고정이다.
+> 해결안(미구현): ① probe 객체점을 축 기준 회전 보정해 가상 θ N개 합산
+> ② candidate 마다 짧게 회전하며 평균 ③ top-K multi-pass.
+
+구현: `artec_multipass_scan_session.py::{_elevation_search, _phase1_view_score,
+_in_object_profile, _build_rz_profile}`
+
+Spider v1 광학 상수(`recovery_pose_selector.py`): FOV 30°×21°,
+작동거리 170~350mm(최적 200~250), default standoff 250mm, 3D 해상도 0.1 / 정확도 0.05mm

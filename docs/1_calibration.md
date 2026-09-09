@@ -292,3 +292,18 @@ sim 검증:
 **real:** `python scripts/artec/turntable_frame_init.py` → rim 클릭 → `config/calibration/turntable_frame.yaml`.
 
 > 상태: rim 방법 ✅ (Isaac+PhoXi 검증 0.015°/0.7mm). 구 어레이 방법은 폐기(rim 으로 대체).
+
+---
+
+## 15. 남은 일
+
+| 상태 | 항목 |
+|---|---|
+| 🔬 | **hand-eye 검증 스크립트 미작성** (`artec_hand_eye_validate.py`) — 캘리브에 쓰지 않은 별도 N_test 자세에서 point-consistency(고정점을 여러 자세서 base 로 변환 후 산포) 측정. 목표 <0.5mm |
+| ⚠ | Spider FOV(작동거리 0.2~0.3m)가 좁아 disc rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 클릭. 원 피팅은 3점이면 되나 호가 짧으면 조건수 저하 |
+| ⚠ | `scripts/artec/turntable_frame_init.py` 공유 코어 미사용(§14) — 통일 권장 |
+| ✅ | Isaac rim-클릭 어댑터 완료(`capture_organized`). real Artec 은 동일 계약(intensity, organized_pts, T_CB)만 채우면 `rim_picker` 재사용 |
+
+> `utils/calibration/turntable_frame.py` 는 `fit_circle_3d` · `fit_plane` · `build_T_B_F0` ·
+> `save_turntable_frame_yaml` 에 더해 **`axis_error`**(추정 축 vs 기준 축 오차, sim 검증용)를
+> 제공한다. 2026-09 폐기 코드 정리 때 `turntable_axis.py` 에서 이관됐다.
