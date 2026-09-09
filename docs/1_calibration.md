@@ -160,6 +160,19 @@ sim_harness/MMS_ext_calibration.py
 
 ## 7. 실행
 
+### 실행 경로 두 가지 — 헷갈리기 쉬움
+
+같은 sim 검증인데 **대상에 따라 실행 방식이 다르다.**
+
+| 검증 대상 | 방식 | 진입점 |
+|---|---|---|
+| **hand-eye** `T_E_C` | Isaac GUI **Script Editor** (standalone 불가) | `sim_harness/MMS_ext_calibration.py` |
+| **턴테이블 축** `T_B_F0` | **standalone** 도 가능 (권장) | `scripts/sim/calib_rim_sim.py` + `rim_click_offline.py` |
+| 턴테이블 축 (대안) | Isaac GUI Script Editor | `sim_harness/MMS_ext_calibration2.py` |
+
+> hand-eye 하니스는 `SimulationApp` 을 스스로 만들지 않아 GUI 안에서만 돈다.
+> 턴테이블 쪽은 standalone 스크립트가 따로 구현돼 있다(§13).
+
 ### sim — hand-eye 파이프라인 검증
 
 ChArUco 보드를 USD 평면으로 실제 렌더 → 검출 → solvePnP → `calibrateHandEye` →
@@ -321,8 +334,38 @@ sim 검증:
 
 ### 실행
 
-**sim** — rim 자동추출 → 원 피팅 → GT 비교. §7 과 같은 방식으로 **Isaac GUI 의
-Script Editor** 에서 실행한다(standalone 아님).
+#### sim — standalone (권장)
+
+Isaac python 에는 GUI 툴킷이 없어(cv2 headless) 클릭 창을 못 연다.
+그래서 **캡처와 클릭을 두 단계로 분리**해 두었다.
+
+```bash
+cd "$MMS_ROOT"
+
+# 1) Isaac 에서 rim 캡처 → scripts/sim/log/rim_capture.npz
+env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python scripts/sim/calib_rim_sim.py
+
+# 2) GUI 되는 일반 python 에서 클릭 + 원 피팅 + 저장
+conda activate mms-env
+env -u PYTHONPATH python scripts/sim/rim_click_offline.py
+```
+
+클릭 없이 자동으로 돌리려면 (rim 점을 기하로 자동 추출):
+
+```bash
+# GUI 로 축 시각화까지
+MMS_RIM_AUTO=1 env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python scripts/sim/calib_rim_sim.py
+
+# 헤드리스 — 수치만 (CI·빠른 확인용)
+MMS_ISAAC_HEADLESS=1 MMS_RIM_AUTO=1 \
+  env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python scripts/sim/calib_rim_sim.py
+```
+
+> GT 대비 축 오차가 출력된다. 기준: **0.015° / 0.7mm**
+
+#### sim — Script Editor (대안)
+
+`sim_harness/MMS_ext_calibration2.py` 를 §7 과 같은 방식으로 GUI 안에서 실행한다.
 
 ```python
 exec(open("<MMS_ROOT>/sim_harness/MMS_ext_calibration2.py").read())
@@ -331,10 +374,11 @@ exec(open("<MMS_ROOT>/sim_harness/MMS_ext_calibration2.py").read())
 tail -f ~/isaacsim/standalone_examples/play/MMS/captures_turntable/calib_log.txt
 ```
 
+#### real
+
 ```bash
-# ── real — rim 위 점을 클릭해서 원 피팅 ──
 conda activate mms-env && cd "$MMS_ROOT"
-env -u PYTHONPATH python scripts/artec/turntable_frame_init.py
+env -u PYTHONPATH python scripts/artec/turntable_frame_init.py   # rim 클릭
 # → config/calibration/turntable_frame.yaml
 ```
 

@@ -156,6 +156,8 @@ env -u PYTHONPATH python scripts/artec/main_artec_demo.py
 | 증상 | 원인 · 대응 |
 |---|---|
 | `No module named 'xarm'` | env 오선택 → `conda activate mms-env` |
+| `No module named 'cv2'` | **base 파이썬**으로 실행한 것 (`miniconda3/bin/python`). `conda activate mms-env` 후 `python` |
+| `No module named 'omni.usd'` | `sim_harness/` 하니스를 standalone 으로 실행한 것 → Isaac GUI Script Editor 에서 실행 (`1_calibration.md` §7) |
 | `connect socket failed` | 로봇 미도달 → §0 네트워크 확인 |
 | `scan settings import 불가` | Artec SDK python 바인딩 미빌드 → `artec_SDK/artec0_build_guide.md`. sim 은 정상 동작 |
 | 스캔이 자꾸 끊긴다 | 시작 자세가 나쁘다. 물체를 조준한 상태로 시작하고, 그래도 반복되면 recovery 로그의 elevation 을 확인 (`2_phase1.md` §6) |

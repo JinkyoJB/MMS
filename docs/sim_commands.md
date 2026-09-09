@@ -114,6 +114,15 @@ env -u PYTHONPATH $ISAAC scripts/sim/ik_follow_target.py --rebuild \
 씬 파일은 기준점별로 따로 생성된다 (`v3_scene_IK.usd`, `v3_scene_IK_adapter.usd`, …).
 방법론·함정은 `$ASSET/v3_scene_IK.md`.
 
+### 턴테이블 축 캘리브 검증 (standalone)
+
+```bash
+env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py     # 캡처 → log/rim_capture.npz
+env -u PYTHONPATH python scripts/sim/rim_click_offline.py  # mms-env, 클릭+피팅
+MMS_RIM_AUTO=1 env -u PYTHONPATH $ISAAC scripts/sim/calib_rim_sim.py   # 자동
+```
+> 상세는 `1_calibration.md` §13.
+
 ### 턴테이블 회전
 ```bash
 env -u PYTHONPATH $ISAAC scripts/sim/spin_turntable.py --gui            # 계속 회전
