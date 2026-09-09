@@ -1,14 +1,19 @@
-# Phase 1 — Streaming SLAM (5면 스캐닝) · 로직 흐름 & 코드 지도
+# Phase 1 — 5면 스캐닝 (streaming SLAM)
 
-> 턴테이블이 360° 도는 동안 Spider 가 **연속 스캔**으로 윗면+옆면4(=5면)을 한 바퀴에 취득.
-> 상위 맥락 `docs/main_flow.md` §2. 캘리브는 `docs/1_calibration.md`.
+> 턴테이블이 한 바퀴 도는 동안 Spider 가 연속 스캔으로 윗면과 옆면 4개, 합쳐서 5면을
+> 취득한다. 바닥면은 원판에 닿아 있어 얻을 수 없으므로 Phase 3(뒤집기)의 몫이다.
+>
+> 앞 단계는 `1_calibration.md`, 부족면 보강은 `3_phase2.md` 를 본다.
+>
+> **결과가 이상하면 맨 뒤 〔부록〕 Troubleshooting 을 먼저 본다.** 규약·함정·알려진
+> 미해결 문제를 T1~T8 로 모아두었다.
 
 ---
 
 ## 1. 무엇을 하나
 
-턴테이블 위 대상물이 도는 동안, **로봇(스캐너)은 고정**, 턴테이블이 azimuth 를 커버.
-한 바퀴(360°)로 윗면 + 옆면 4개 = **5면**. 바닥면은 디스크에 닿아 캡처 불가 → Phase 2(flip).
+턴테이블 위의 대상물이 도는 동안 **로봇은 한 자세에 고정된다.** 방위각은 턴테이블이
+전부 커버하므로 로봇이 물체 둘레를 돌 이유가 없다.
 
 ```
    [고정] 스캐너 ──본다──▶ ◐ 대상물 (턴테이블 위, θ 회전)
@@ -16,112 +21,195 @@
                          360° 도는 동안 옆면이 차례로 스캐너 앞을 통과
 ```
 
+로봇이 고르는 자유도는 사실상 **고도각 φ 하나**이고, 물체가 키가 커서 한 자세로 높이를
+다 못 덮을 때만 z 방향으로 **밴드**를 나눠 여러 바퀴를 돈다. 전자는 §3, 후자는 §4 에서
+다룬다.
+
 ---
 
-## 2. 왜 "스트리밍 SLAM" 인가 (Artec ≠ PhoXi)
+## 2. 왜 스트리밍 SLAM 인가 — Artec 과 PhoXi 의 차이
 
 | | PhoXi | Artec Spider |
 |---|---|---|
-| 좌표 기준 | 절대 (T_CO 직접) | 상대 (이전 frame 기준 ICP) |
-| 한 frame 놓치면 | 다음 frame 복구 가능 | **tracking 잃으면 scan 망가짐** |
-| Phase 1 핵심 | 정확한 hand-eye+θ | **OVERLAP 유지** |
-| frame 간격 | 15° step OK | 작은 step(15°도 위험) → **연속 회전** |
+| 좌표 기준 | 절대 (`T_CO` 직접) | 상대 (이전 frame 기준 ICP) |
+| 한 frame 을 놓치면 | 다음 frame 에서 복구된다 | **추적을 잃으면 스캔이 망가진다** |
+| 성패를 가르는 것 | 정확한 hand-eye 와 θ | **frame 간 겹침(overlap)** |
+| frame 간격 | 15° step 도 무방 | 작은 step 도 위험 → **연속 회전** |
 
-→ Artec 은 frame-to-frame 정합이라 **겹침(overlap)** 이 생명. 그래서 띄엄띄엄이 아니라
-**천천히 연속 회전 + max FPS** 로 매 frame 이 직전과 겹치게 한다. 한 번 끊기면 그 시점까지만 살아남음.
+Artec 은 frame-to-frame 정합이라 겹침이 생명이다. 그래서 각도를 띄엄띄엄 옮기지 않고
+**천천히 연속 회전시키면서 최대 FPS 로 찍어** 매 frame 이 직전 frame 과 겹치게 한다.
+한 번 추적이 끊기면 그 시점까지 쌓인 frame 만 살아남는다.
 
-> ★ **시작 자세 = home 그대로** (2026-05-20 rule). 사용자가 사람 눈으로 조준한 EE 자세에서
-> 그대로 360° 회전. 사전 probe/elevation 탐색 안 함(overhead 0). tracking lost 가 나야 비로소
-> recovery 흐름(§6)이 적응 자세를 탐색.
+시작 자세는 **사용자가 눈으로 조준해 둔 home 자세를 그대로 쓴다**(2026-05-20 결정).
+사전 probe 나 elevation 탐색을 하지 않는데, 그 탐색이 모든 스캔에 1~2분을 더하는 데
+비해 잘 조준된 자세면 대개 그냥 성공하기 때문이다. 추적이 끊겨야 비로소 자세가 나쁘다는
+신호이고, 그때만 recovery(§6)가 자세를 다시 고른다.
 
 ---
 
-## 3. 실물 아키텍처 — Spider ↔ Turntable 양방향 피드백
+## 3. 자세 선정 — elevation view-score
 
-`mms_artec/nbv/artec_streaming_scan_session.py` (`ArtecStreamingScanSession.run()`).
+로봇이 고를 자유도는 고도각 φ 하나이므로, 후보 φ 들을 preview 로 찍어 점수화하고
+가장 높은 것을 고른다.
+
+> **score(φ)** = 그 자세의 preview 점 중 **물체로 분류된** 점들이
+> **최적 작업거리(≈225mm) 근처의 FOV 안** 에 얼마나 모여 있는가(개수 가중합).
+
+| 단계 | 하는 일 |
+|---|---|
+| 1 | preview 점군을 카메라 프레임에서 base 프레임으로 옮긴다. 멤버십 판정과 `z_table` 이 모두 base 기준이기 때문이다. |
+| 2 | 물체에 속하는 점만 세 조건의 AND 로 고른다. 실린더로 미리 자르고, 턴테이블 상판을 hard floor(`z > z_table+8mm`)로 쳐내고, probe 로 만든 축대칭 `(r,z)` occupancy 를 조회한다. occupancy 는 360° 회전대칭화되어 있어 어느 θ 에서도 성립한다. |
+| 3 | 광축 기저를 캘리브레이션된 `fwd_C`·`up_C` 로부터 정규직교화해 만든다. 하드코딩된 `+Z_C` 를 쓰지 않는 이유는 스캐너가 조금 삐뚤어 장착돼도 판정이 틀리지 않게 하기 위해서다. |
+| 4 | Spider 의 FOV 30°(수평)×21°(수직) 안인지 본다. `depth > 1mm` 조건으로 카메라 등 뒤의 점을 제거한다. |
+| 5 | 거리에 Gaussian 가중을 준다. `w(d) = exp(−((d−225)/25)²)` 이므로 작동 대역 [200,250]mm 가 1σ 에 해당한다. |
+
+최종 점수는 `score = Σ w(depth) · 1_FOV` 다. 물체 점 개수가 같더라도 **225mm 부근에
+모인 자세가 이긴다.**
+
+**언제 호출되나.** 정상 시작 때는 호출하지 않는다(사용자가 맞춘 home 자세로 출발).
+**tracking-lost recovery 흐름에서만** 호출하며, 그때는 후보를 `[-5°, 0°, +5°]` 로 줄이고
+fine search 를 건너뛰어 30초 안에 끝낸다.
+
+구현은 `artec_multipass_scan_session.py` 의 `_elevation_search`, `_phase1_view_score`,
+`_in_object_profile`, `_build_rz_profile` 이다. 판정에 쓰는 Spider v1 광학 상수는
+`recovery_pose_selector.py` 에 있다 — FOV 30°×21°, 작동거리 170~350mm(최적 200~250),
+기본 standoff 250mm, 3D 해상도 0.1mm, 정확도 0.05mm.
+
+view-score 의 구조적 한계는 부록 T6 을 본다.
+
+---
+
+## 4. 밴드 분할
+
+한 자세로 대상물의 높이를 다 덮지 못하면 z 방향으로 서로 겹치는 **밴드**를 나눠 여러 번
+돈다. 계획은 `phase1_viewpoint.plan_phase1_viewpoints` 가 세운다.
+
+![밴드 분할 계획](figures/phase1_viewpoint/fig4_bands.png)
+
+**분할 여부는 물체의 높이가 아니라 단일 자세의 z-커버율로 정해진다.** standoff 가 물체
+반경에 비례해 결정되므로 **가는 물체일수록** 카메라가 가까이 붙어 시야가 높이를 못 덮는다.
+그래서 293mm 세제(지름 194mm)가 2밴드인데 그보다 낮은 207mm 스프레이캔(지름 68mm)은
+3밴드로 나뉜다. 어떤 밴드로 갈렸는지는 `[phase1] z_cover=` 로그로 확인한다.
+
+밴드는 **안전한 것부터** 돈다. 위 그림에서 minfill 이 큰 band1 → band2 → … 순으로
+스캔하는 이유는, 위험한 밴드를 나중에 돌면 그때까지 쌓인 모델이 추적 복구(relocalization)의
+기준점으로 남아 있기 때문이다.
+
+밴드 경로에서 과거에 터졌던 두 결함은 부록 T3·T4 에, 아직 남아 있는 문제는 T5 에 있다.
+
+---
+
+## 5. 실물 아키텍처 — Spider ↔ 턴테이블 양방향 피드백
+
+`mms_artec/nbv/artec_streaming_scan_session.py` 의 `ArtecStreamingScanSession.run()` 이
+스캐너와 턴테이블을 두 개의 thread 로 물려 돌린다. 둘은 `TrackingState` 하나를 공유하고,
+스캐너 쪽이 추적을 잃으면 그 즉시 `stop_event` 로 턴테이블을 세운다.
 
 ```
-              ┌──────────── TrackingState (공유) ────────────┐
-              │  frames_ok/failed, consecutive_lost,          │
+              ┌──────────── TrackingState (공유) ─────────────┐
+              │  frames_ok/failed, consecutive_lost,           │
               │  last_reg_error, tracking_lost, stop_event     │
-              └──────▲───────────────────────────▲────────────┘
-   frame_callback 갱신│                            │ stop_event 감시
-   ┌─────────────────┴───────┐      ┌─────────────┴──────────────┐
-   │ Main thread (run)        │      │ TurntableController(thread) │
-   │  session.poll_events()   │      │  move_velocity 연속 회전     │
-   │  4 watchdog 검사          │      │  getActualPos polling(10Hz) │
-   │  live viewer 공급         │      │  stop_event→즉시 stop        │
-   │  last-good θ 기록         │      │  drive 통신死 watchdog        │
+              └──────▲───────────────────────────▲─────────────┘
+   frame_callback 갱신│                           │ stop_event 감시
+   ┌─────────────────┴────────┐      ┌────────────┴───────────────┐
+   │ Main thread (run)        │      │ TurntableController(thread)│
+   │  session.poll_events()   │      │  move_velocity 연속 회전    │
+   │  4 watchdog 검사          │      │  getActualPos polling(10Hz)│
+   │  live viewer 공급         │      │  stop_event → 즉시 stop     │
+   │  last-good θ 기록         │      │  drive 통신사망 watchdog     │
    └──────────────────────────┘      └────────────────────────────┘
 ```
 
-### 흐름 (`run()`)
-1. **FPS** = min(target, max). HYBRID registration(geometry+texture).
-2. **ScanSession** 생성: `set_registration_type(HYBRID)`, `set_pipeline(...)`, `initial_state=PREVIEW`,
-   `capture_texture=ALWAYS`. `frame_callback = TrackingState.on_frame`.
-3. **턴테이블 logical 0 reset**(clearpos). 실패(drive alarm) → 빈 결과 즉시 반환.
-4. **Preview → settle → drain** (preview frame 은 카운트 안 함) → 카운터 0.
-5. **start_record + TurntableController 시작**(별도 thread). `vel = 2π/rotation_duration_s`,
-   `target = 360°+overshoot`.
-6. **Main loop**: 매 tick
-   - `session.poll_events()` (SDK 큐 비움 — freeze 방지)
-   - θ = `tt_ctrl.actual_pos_rad`, timeline 기록
-   - **라이브 뷰어 공급**: OK frame 의 `frame_mesh` + **SDK 정합행렬 `ev.transformation`** 을
-     scan-world 로 누적 (θ/hand-eye/yaml **무의존** — 화면 = SDK SLAM 그 자체)
-   - **last-good θ** 갱신 (reg_err≥0 인 마지막 θ — recovery rollback 기준)
-   - **4 watchdog** 검사(§4) → lost 면 turntable 즉시 정지
-   - `tt_ctrl.completed` → 정상 완료 / `aborted` → abort
+### `run()` 의 흐름
+
+1. FPS 를 목표값과 스캐너 최대값 중 작은 쪽으로 정하고, registration 을 HYBRID
+   (geometry + texture)로 놓는다.
+2. ScanSession 을 만든다. `set_registration_type(HYBRID)`, `set_pipeline(...)`,
+   `initial_state=PREVIEW`, `capture_texture=ALWAYS` 를 설정하고
+   `frame_callback` 에 `TrackingState.on_frame` 을 건다.
+3. 턴테이블의 logical 0 을 reset 한다(clearpos). 드라이브 alarm 등으로 실패하면 빈 결과를
+   즉시 반환하고 끝낸다.
+4. Preview 를 띄우고 settle 시킨 뒤 큐를 비운다(drain). Preview frame 은 통계에
+   포함되면 안 되므로 여기서 카운터를 0 으로 되돌린다.
+5. `start_record` 와 동시에 `TurntableController` thread 를 띄운다. 각속도는
+   `2π / rotation_duration_s`(기본 30초에 한 바퀴), 목표각은 `360° + overshoot` 이다.
+6. Main loop 는 매 tick 마다 다음을 한다.
+   - `session.poll_events()` 로 SDK 큐를 비운다. 이걸 거르면 SDK 가 얼어붙는다.
+   - `tt_ctrl.actual_pos_rad` 로 현재 θ 를 읽어 timeline 에 기록한다.
+   - 라이브 뷰어에 OK frame 의 `frame_mesh` 와 **SDK 정합행렬 `ev.transformation`** 을
+     넘겨 scan-world 좌표로 누적시킨다(§7).
+   - `reg_err ≥ 0` 인 마지막 θ 를 **last-good θ** 로 갱신한다. recovery 가 되돌아갈
+     기준점이다.
+   - watchdog 4개(§6)를 검사하고, 하나라도 걸리면 턴테이블을 즉시 정지시킨다.
+   - `tt_ctrl.completed` 면 정상 완료, `aborted` 면 abort 로 빠져나온다.
 
 ### 결과 (`ArtecStreamingScanResult`)
+
 `model`(IModel), `n_frames`, `rotation_actual_deg`, `duration_s`, `fps_actual`,
-`tracking_lost`, `loss_reason`, `frames_ok/failed`, **`last_good_theta_rad`**(recovery rollback 기준).
+`tracking_lost`, `loss_reason`, `frames_ok`/`frames_failed`, 그리고 recovery 의
+rollback 기준이 되는 **`last_good_theta_rad`** 를 담는다.
 
 ---
 
-## 4. TrackingState — 4 watchdog
+## 6. 추적 감시와 자동 recovery
 
-| # | 조건 | 설정키 | 기본 |
+### 4가지 watchdog (`TrackingState`)
+
+| # | 조건 | 설정키 | 기본값 |
 |---|---|---|---|
-| 1 | FrameState 연속 정합/재구성 실패 | `consecutive_loss_threshold` | 8 |
-| 2 | callback stall (N초 무반응) | `stale_threshold_s` | 2.0 |
-| 3 | `registration_error < 0` 연속 (Studio 'tracking lost' 시그널) | `consecutive_reg_err_threshold` | 5 |
-| 4 | `registration_error > max` 연속 (정합 품질 급락) | `consecutive_high_err_threshold`/`max_acceptable_reg_error` | 8 / 1.5 |
+| 1 | FrameState 의 정합/재구성 실패가 연속으로 이어진다 | `consecutive_loss_threshold` | 8 |
+| 2 | callback 이 N초 동안 아무 반응이 없다 | `stale_threshold_s` | 2.0 |
+| 3 | `registration_error < 0` 이 연속된다 (Studio 의 'tracking lost' 시그널) | `consecutive_reg_err_threshold` | 5 |
+| 4 | `registration_error > max` 가 연속된다 (정합 품질 급락) | `consecutive_high_err_threshold` / `max_acceptable_reg_error` | 8 / 1.5 |
 
-- warm-up: scan 직후 `reg_err=-1` 은 SDK sentinel → `reg_err≥0` 한 번 본 뒤(`tracking_established`)부터만 (3)(4) 카운트.
-- `registration=HYBRID` 필수: ICP-only 면 물체 치워도 빈 디스크에 정합 성공해 lost 가 안 뜸
-  (`project_artec_tracking_lost_limitation`). 턴테이블 통신은 **UDP** (TCP 는 sustained polling 시 socket 막힘).
+스캔 직후의 `reg_err = -1` 은 SDK 가 쓰는 sentinel 값이다. 그래서 `reg_err ≥ 0` 을 한 번
+본 뒤(`tracking_established`)부터만 (3)(4)를 센다. warm-up 구간을 lost 로 오인하지 않기
+위한 장치다.
+
+### 자동 recovery
+
+Phase 1 과 2 를 묶어 지휘하는 `ArtecMultiPassScanSession` 이 lost 를 받으면 다음 순서로
+복구한다.
+
+1. 같은 자세에서 최대 **3회**까지 자동 retry 한다. lost 는 "물체가 없다"와 다르므로
+   무한 retry 는 금지다.
+2. **safe-back** — `last_good_theta_rad` 보다 10° 더 뒤로 턴테이블을 되돌린다.
+3. `_adaptive_prescan_position(recovery=True)` 로 probe 를 새로 찍고 축소된 elevation
+   search(§3)를 돌려 로봇 자세를 다시 고른다.
+
+sim 에는 SLAM 이 없으므로 캡처된 점 개수를 프록시로 삼아, 일부러 나쁜 자세를 줘서 lost 를
+유발하는 방식으로 이 흐름을 검증했다.
+
+- `sim_harness/MMS_ext_phase1_recovery1.py` — **빗나감.** 대상물을 측면으로 빗나가게
+  조준해 FOV 밖으로 내보내면 점이 거의 0 이 되어 lost 가 뜬다. recovery 가 물체 점이
+  가장 많은 elevation 을 골라 중심을 다시 조준하고 스캔을 재개한다.
+- `sim_harness/MMS_ext_phase1_recovery2.py` — **윗면 미포착.** el 을 너무 낮춰 옆에서
+  보면 윗면이 grazing 되어 잡히지 않는다. recovery 가 윗면 비율이 최대가 되는 쪽으로
+  elevation 을 올려 윗면을 잡고 재개한다.
+
+둘 다 θ safe-back → 자세 재탐색 → 재개를 거쳐 5면을 완성한다. 형상이 까다로울 필요는
+없다 — 자세가 나쁘면 lost 가 난다.
 
 ---
 
-## 5. 라이브 뷰어 (Spider 전용 — SDK SLAM 거울)
+## 7. 라이브 뷰어 — SDK SLAM 을 그대로 비추는 거울
 
-- 누적 좌표 = **SDK 정합행렬** `FrameEvent.transformation`(sensor→scan-world). θ/yaml/hand-eye **무의존**.
-- viewer 는 IScan 을 그대로 비추는 거울 — SDK 가 IScan 에 넣는 기준(`reg_err≥0`)과 **동일하게만** 필터.
-- 별도 터미널 Filament 뷰어로 표시 (Isaac 확장 GUI 제약과 동일 — `mms_artec/nbv/live_scan_viewer.py`).
+누적 좌표로 **SDK 가 준 정합행렬 `FrameEvent.transformation`**(sensor→scan-world)만 쓴다.
+θ 도, yaml 도, hand-eye 도 개입하지 않는다. 즉 화면에 보이는 것이 곧 SDK SLAM 의 결과
+그 자체이고, 뷰어에 이상하게 보이면 실제 스캔이 이상한 것이다.
 
----
+필터도 SDK 가 IScan 에 frame 을 넣는 기준(`reg_err ≥ 0`)과 **똑같이만** 건다. 뷰어가
+자체 기준으로 더 걸러내면 거울이 아니게 되기 때문이다.
 
-## 6. Tracking-lost 자동 recovery (hook)
-
-`ArtecMultiPassScanSession` 이 Phase 1+2 통합 오케스트레이션. lost 시:
-- 같은 pose 안에서 최대 **3회** 자동 retry (lost ≠ object-presence 라 무한 retry 금지).
-- **safe-back**: `last_good_theta_rad` 보다 10° 더 뒤로 turntable 복귀.
-- **`_adaptive_prescan_position(recovery=True)`**: fresh probe + 축소 elevation search → 새 robot 자세.
-- 상세는 main_flow §6, view-score 는 main_flow §2.
-
-> **sim 검증** (SLAM 없으므로 캡처 점을 프록시로, 나쁜 자세로 trigger → recovery 가 자세 재선정):
-> - `MMS_ext_phase1_recovery1.py` **[빗나감]**: 대상물을 측면으로 빗나가게 조준(FOV 밖)→점≈0→lost.
->   recovery 가 대상물 중심 재조준(elevation 후보 중 **대상물 점 최대**) → 재개.
-> - `MMS_ext_phase1_recovery2.py` **[윗면 미포착]**: 너무 낮은 el(옆에서)→윗면 grazing 미포착(**윗면
->   비율** 낮음)→lost. recovery 가 **elevation 올려(윗면비율 최대)** → 윗면 포착 → 재개.
-> 둘 다 θ safe-back + 자세 재탐색 + 재개 → 5면 완성. (형상이 어려울 필요 없음 — 자세가 나쁘면 lost.)
+표시는 별도 터미널의 Filament 뷰어로 한다(`mms_artec/nbv/live_scan_viewer.py`).
+Isaac 확장 GUI 에서 창을 띄울 수 없는 것과 같은 제약이다.
 
 ---
 
-## 7. sim 검증 — ground-truth 누적 (SLAM 없음)
+## 8. sim 검증 — ground-truth 누적
 
-sim 엔 Artec SLAM 이 없다. 대신 **턴테이블 θ(ground-truth) + 회전축(calibration)** 으로 점군을
-누적해 같은 결과(5면 재구성)를 얻고, view-coverage·누적 로직을 검증한다.
+sim 에는 Artec SLAM 이 없다. 대신 **턴테이블 θ(ground-truth)와 회전축(calibration)** 으로
+점군을 누적해 같은 결과(5면 재구성)를 얻고, 이걸로 view-coverage 와 누적 로직을 검증한다.
 
 ```
 대상물이 θ 회전 (ground-truth)
@@ -129,106 +217,168 @@ sim 엔 Artec SLAM 이 없다. 대신 **턴테이블 θ(ground-truth) + 회전�
    │        대상물 점만 분리 (디스크 위 + 영역 크롭)
    │        축 둘레로 −θ 역회전 → 대상물 기준 프레임(θ=0)
    ▼
-누적 → 5면(윗면+옆면4) 완성 점군
+누적 → 5면(윗면 + 옆면 4) 완성 점군
 ```
 
-- 핵심: `p_obj = Rz(−θ)·(p_world − axis_point) + axis_point` (axis = 턴테이블 회전축, §1_calibration).
-  θ 가 정확(sim ground-truth)하면 모든 옆면이 정확히 겹쳐 쌓인다 = "SLAM 대신 GT 누적".
-- 스크립트: **`sim_harness/MMS_ext_phase1.py`** (Isaac 확장).
-  대상물(box)을 known θ 로 회전(키네마틱) → 캡처 → −θ 누적 → 재구성. real 의 streaming/SLAM 은
-  이 검증된 누적 위에 그대로 올린다.
+핵심 식은 `p_obj = Rz(−θ)·(p_world − axis_point) + axis_point` 이고, axis 는 턴테이블
+회전축(`1_calibration.md`)이다. θ 가 정확하면(sim 에서는 ground-truth 다) 모든 옆면이
+정확히 겹쳐 쌓인다. 이것이 "SLAM 대신 GT 누적"이다.
+
+스크립트는 `sim_harness/MMS_ext_phase1.py`(Isaac 확장)이다. 대상물(box)을 known θ 로
+키네마틱 회전시켜 캡처하고 −θ 로 되돌려 누적한 뒤 재구성한다. 실물의 streaming/SLAM 은
+이렇게 검증된 누적 로직 위에 그대로 올라간다.
 
 ---
 
-## 7.5 밴드 스캔의 함정 — 9종 스윕이 드러낸 것 (2026-08-19)
+## 9. 실행
 
-키 큰 물체는 단일 자세로 z-커버가 안 되면 겹침 밴드로 나눠 스캔한다
-(`phase1_viewpoint.plan_phase1_viewpoints`). 테스트셋 9종 스윕에서 결함 둘이 나왔다:
+### sim — Phase 1 E2E (GUI)
 
-**① 밴드 하나 실패 = 스캔 전체 중단** (`scan_phase_controller.py`, 수정됨)
-밴드 한 대역이 도달 불가면 즉시 finalize 해서 Phase 2·3 이 통째로 사라졌다
-(hand_drill 267k점·spray_can 472k점을 모아놓고 버림 — 스캔 윗부분이 잘려 나감).
-도달 못 한 대역은 부분 결손이고 그걸 메우는 게 Phase 2 의 역할이다.
-→ 실패 밴드는 건너뛰고 계속, **전부** 실패했을 때만 포기.
+```bash
+cd <MMS repo>
+./scripts/sim/run_e2e_gui.sh                        # marble, Phase 1, 플래너
+./scripts/sim/run_e2e_gui.sh spray_can              # testset 물체 (부분이름으로 매칭)
+./scripts/sim/run_e2e_gui.sh detergent 1 planner    # 밴드 분할이 걸리는 사례
+./scripts/sim/run_e2e_gui.sh marble 1 legacy        # 플래너 없이 A/B 비교
+./scripts/sim/run_e2e_gui.sh marble 2 planner 10    # 베이스 +10cm, Phase 1→2
+```
 
-**② 충돌 게이트가 밴드 경로에만 없었다** (`isaac_scan_session.py`, 수정됨)
-자세 선정 경로가 둘(밴드/legacy)인데 충돌 검사가 legacy 에만 있었다. 밴드 경로는
-IK 해가 나오면 충돌을 안 보고 확정 → 충돌 없는 다른 az 를 시도조차 못 하고 이동
-단계에서 거부됐다. 실측: az 0° 는 tool↔link4 **4mm** 차 자가충돌, az 30° 는 통과.
-수정 후 spray_can P1 경계 408→227mm. ("도달 불가 판정은 평가기를 먼저 의심"의
-네 번째 사례 — 같은 판단을 하는 코드가 여러 곳이면 게이트가 전부에 있는지 grep.)
+인자는 `[물체] [phase_mode] [planner|legacy] [ΔH cm]` 순이다. `phase_mode` 는 누적
+실행이라 `1` = 5면, `2` = +NBV 보강, `3` = +바닥면 flip 을 뜻한다. `ΔH > 0` 이면
+`hibase/*_dh<cm>.usd` 오버레이 씬을 한 번 생성해 캐시하며, 원본 `v2.usd` 는 건드리지 않는다.
 
-**밴드 분할 조건은 높이가 아니라 단일 자세 z-커버율이다.** standoff 가 물체
-반경에 비례하므로 **가는 물체일수록** 카메라가 가까워 FOV 가 키를 못 덮는다:
-세제(r97/h293)는 단일, 스프레이캔(r34/h207)은 3밴드. `[phase1] z_cover=` 로그로
-분기 이유를 확인할 수 있다.
+주요 환경변수는 다음과 같다.
 
-⚠ 미해결: `preview_at`(isaac_scan_session:988)과 `_pick_phase1_legacy`(:1080)가
-`_drive()` 반환값을 무시한다 — 이동이 거부돼도 그 자리에서 캡처한다. 프리뷰가
-오염되면 밴드 계획 자체가 틀어질 수 있다(z_cover 경계 사례 0.67·0.71 이 이 탓일
-가능성 미검증).
+| 변수 | 뜻 | 스크립트 기본 |
+|---|---|---|
+| `MMS_SIM_PHASE_MODE` | 1 / 2 / 3 (누적) | 1 |
+| `MMS_SIM_P1_MODE` | `planner`(밴드 플래너) 또는 `legacy` | planner |
+| `MMS_SIM_NTHETA` | 한 바퀴를 몇 개 θ 로 나눠 캡처할지 | 24 |
+| `MMS_SIM_DRIVE_STEPS` | 자세 이동 보간 step 수 | 20 |
+| `MMS_SIM_USD` | 씬 USD 경로 | 스크립트가 계산 |
+| `MMS_SIM_OBJECT_PRIM` | 대상물 prim 경로 (testset 씬) | 스크립트가 계산 |
+| `MMS_ISAAC_HEADLESS` | `1` 이면 GUI 없이 실행 (서버/CI) | 0 |
+
+직접 부를 때는 아래와 같다. `-u` 는 `app.close()` 로 버퍼가 날아가는 것을 막는다.
+
+```bash
+env -u PYTHONPATH \
+  MMS_SIM_PHASE_MODE=1 MMS_SIM_P1_MODE=planner MMS_SIM_NTHETA=24 \
+  ~/miniconda3/envs/env_isaacsim/bin/python -u main_artec.py
+```
+
+### sim — 밴드 계획만 오프라인 검증 (Isaac 불필요)
+
+```bash
+# 1) testset 점군 캐시 (최초 1회)
+~/isaacsim/python.sh scripts/sim/extract_testset_points.py
+# 2) 자세 선정·밴드 분할 검증
+$MMS_PYTHON scripts/sim/validate_phase1_viewpoint.py
+```
+
+씬을 띄우지 않고 캐시된 점군만으로 기존 sphere sampling 대비 maximin 채점 + 밴드
+분할의 최악프레임 fill·z-커버·IK 도달성을 비교하고, tracking-lost 프록시를 주입해
+recovery 재계획도 함께 본다. 결과는 stdout 표와
+`scripts/sim/log/testset_points/validate_results.json` 이다.
+
+### 실물
+
+`main_artec.py` 위쪽의 `BACKEND = "real"` 로 바꾸고 실행한다. Phase 1 관련 설정은 같은
+파일의 `STREAM_SETTINGS`(`ArtecStreamingScanSessionSettings`)에 모여 있고, 한 바퀴에
+걸리는 시간은 `rotation_duration_s = 30.0` 이 기본이다.
+
+```bash
+env -u PYTHONPATH $MMS_PYTHON main_artec.py
+```
+
+> **첫 Spider 실물 테스트는 반드시 `phase_mode = 1` 로 5면부터 확인한다.** Phase 2·3 은
+> 실물에서 아직 검증되지 않았다.
 
 ---
 
-## 8. 코드 지도
+## 10. 코드 지도
 
 ```
 mms_artec/nbv/artec_streaming_scan_session.py   ★ 실물 streaming SLAM
-    ArtecStreamingScanSessionSettings   # rotation_duration_s, registration=HYBRID, 4 watchdog 임계 ...
-    TrackingState (.on_frame, .should_stop, 4 watchdog)
-    TurntableController (별도 thread, move_velocity, getActualPos polling, stop_event)
-    ArtecStreamingScanSession.run() → ArtecStreamingScanResult
-mms_artec/nbv/artec_multipass_scan_session.py   # Phase 1+2 오케스트레이션 + recovery
+    ArtecStreamingScanSessionSettings   # rotation_duration_s, registration=HYBRID, watchdog 임계 …
+    TrackingState                       # .on_frame, .should_stop, watchdog 4종
+    TurntableController                 # 별도 thread, move_velocity, getActualPos polling, stop_event
+    ArtecStreamingScanSession.run()     # → ArtecStreamingScanResult
+mms_artec/nbv/artec_multipass_scan_session.py   # Phase 1+2 오케스트레이션 + recovery + view-score
 mms_artec/nbv/live_scan_viewer.py               # SDK 정합행렬 누적 뷰어
+utils/nbv/phase1_viewpoint.py                   # 밴드 분할·순서 계획
+mms_artec/nbv/recovery_pose_selector.py         # Spider 광학 상수, 자세 후보
 utils/turntable/turntable_interface.py          # 실물 턴테이블 (move_velocity/getActualPos, UDP)
 mms_artec/backends/isaac/isaac_turntable.py     # sim 턴테이블 (RevoluteJoint)
 
-sim_harness/MMS_ext_phase1.py  # sim 검증(GT 누적)
+sim_harness/MMS_ext_phase1.py                   # sim 검증 (GT 누적)
+sim_harness/MMS_ext_phase1_recovery1.py         # sim recovery 검증 — 빗나감
+sim_harness/MMS_ext_phase1_recovery2.py         # sim recovery 검증 — 윗면 미포착
+scripts/sim/run_e2e_gui.sh                      # sim E2E 실행 진입점
+scripts/sim/validate_phase1_viewpoint.py        # 밴드 계획 단독 검증
 ```
 
 ---
 
-## 9. 규약·함정
+# 〔부록〕 Troubleshooting
 
-1. **연속 회전 + max FPS** — overlap 이 생명. 띄엄띄엄 step 금지.
-2. **HYBRID registration 필수** — ICP-only 면 빈 디스크에 정합돼 lost 미탐.
-3. **시작 = home 그대로** — 사전 probe 안 함. lost 시에만 recovery 가 적응 자세 탐색.
-4. **live 누적은 SDK 정합행렬** — θ/yaml/hand-eye 무의존 (화면 = SLAM 결과 그 자체).
-5. **sim 은 SLAM 없음** — GT θ + 축으로 누적(−θ 역회전). real 은 그 위에 SLAM 만 얹음.
-6. **last-good θ** = reg_err≥0 마지막 θ — recovery safe-back rollback 기준.
-7. **턴테이블 UDP** (TCP socket 막힘), 별도 thread + stop_event 로 즉시 정지.
+### T1. 물체를 치웠는데도 tracking lost 가 안 뜬다
 
----
+`registration` 이 ICP-only 로 설정된 경우다. 물체가 없어도 **빈 턴테이블 원판에 정합이
+성공해 버려서** lost 판정이 나지 않는다. `set_registration_type(HYBRID)`(geometry+texture)를
+반드시 쓴다. 관련 기록은 `project_artec_tracking_lost_limitation`.
 
-## 10. Elevation view-score — 어느 고도각이 좋은가
+### T2. 스캔 도중 턴테이블 통신이 멎는다
 
-턴테이블이 방위각을 커버하므로 로봇이 고를 자유도는 **고도각 φ 하나**다.
-후보 φ 들을 preview 로 찍어 점수화하고 `argmax_φ` 로 고른다.
+턴테이블은 **UDP** 로 통신해야 한다. TCP 로 붙이면 `getActualPos` 를 10Hz 로 계속 두드리는
+sustained polling 구간에서 socket 이 막힌다. `utils/turntable/turntable_interface.py` 참조.
 
-> **score(φ)** = 그 자세 preview 중 **물체로 분류된** 점들이
-> **최적 작업거리(~225mm) 근처 · FOV 안** 에 얼마나 모여있나 (개수 가중합)
+### T3. 밴드 하나가 실패했는데 스캔 전체가 끝나버린다 (수정됨)
 
-| 단계 | 내용 |
-|---|---|
-| 1 | **C→B 변환** — preview 점군을 base 프레임으로 (멤버십·z_table 이 B 기준) |
-| 2 | **물체 멤버십** (3-AND) — cylinder pre-clip → 턴테이블 hard floor(`z > z_table+8mm`) → probe 로 만든 축대칭 `(r,z)` occupancy lookup (360° 회전대칭화 → 어느 θ 에서도 성립) |
-| 3 | **광축 기저** — 캘리브된 `fwd_C/up_C` 로 정규직교 (hardcoded `+Z_C` 미사용, mis-aim 회피) |
-| 4 | **FOV 판정** — Spider 30°(H)×21°(V), depth>1mm 로 등 뒤 점 제거 |
-| 5 | **Gaussian 거리 가중** — `w(d)=exp(−((d−225)/25)²)`, band[200,250]=1σ |
+`scan_phase_controller.py` 가 밴드 한 대역이 도달 불가면 즉시 finalize 해서 Phase 2·3 이
+통째로 사라졌다. hand drill 267k점, spray can 472k점을 모아놓고 버린 사례가 있다(스캔
+윗부분이 잘려 나감). 도달하지 못한 대역은 부분 결손일 뿐이고 그걸 메우는 것이 Phase 2 의
+역할이므로, 지금은 **실패한 밴드는 건너뛰고 계속 진행하며 전부 실패했을 때만 포기**한다.
 
-→ `score = Σ w(depth) · 1_FOV`. 같은 개수라도 **225mm 에 모인 자세가 이긴다.**
+### T4. 충돌 없는 다른 방위각이 있는데도 "도달 불가" 가 뜬다 (수정됨)
 
-**호출 시점** — 정상 시작에는 부르지 않는다(사용자가 맞춘 home 자세로 출발).
-**tracking-lost recovery 흐름에서만** 호출하며, 이때는 후보를 `[-5°, 0°, +5°]` 로
-축소하고 fine search 를 건너뛴다(~30초).
+자세 선정 경로가 밴드와 legacy 둘인데 **충돌 검사가 legacy 에만 있었다**
+(`isaac_scan_session.py`). 밴드 경로는 IK 해가 나오면 충돌을 보지 않고 확정해 버려서,
+충돌 없는 다른 az 를 시도조차 못 하고 이동 단계에서 거부됐다. 실측으로 az 0° 는
+tool↔link4 가 **4mm** 차로 자가충돌이고 az 30° 는 통과였다. 수정 후 spray can 의
+Phase 1 경계가 408mm → 227mm 로 줄었다.
 
-> ⚠ **한계 (single-θ)** — 현재 score 는 θ=0 한 시점 preview 만 본다. 비대칭 물체
-> (손잡이·주둥이)는 θ 마다 best φ 가 다를 수 있는데 360° 동안 로봇은 고정이다.
-> 해결안(미구현): ① probe 객체점을 축 기준 회전 보정해 가상 θ N개 합산
-> ② candidate 마다 짧게 회전하며 평균 ③ top-K multi-pass.
+> 이것은 "도달 불가 판정이 나오면 평가기를 먼저 의심하라"의 네 번째 사례다.
+> **같은 판단을 하는 코드가 여러 곳에 있으면 게이트가 전부에 들어갔는지 grep 으로 확인한다.**
 
-구현: `artec_multipass_scan_session.py::{_elevation_search, _phase1_view_score,
-_in_object_profile, _build_rz_profile}`
+### T5. 〔미해결〕 이동이 거부돼도 그 자리에서 프리뷰를 찍는다
 
-Spider v1 광학 상수(`recovery_pose_selector.py`): FOV 30°×21°,
-작동거리 170~350mm(최적 200~250), default standoff 250mm, 3D 해상도 0.1 / 정확도 0.05mm
+`isaac_scan_session.py` 의 `preview_at`(:988)과 `_pick_phase1_legacy`(:1080)가 `_drive()`
+반환값을 무시한다. 이동이 거부돼도 원래 자리에서 캡처하므로 프리뷰가 오염될 수 있고,
+그러면 밴드 계획 자체가 틀어진다. z_cover 경계 사례(0.67, 0.71)가 이 탓일 가능성이 있으나
+검증되지 않았다.
+
+### T6. 〔한계〕 view-score 는 θ 한 시점만 본다
+
+현재 score 는 θ=0 의 preview 하나만 평가한다. 손잡이나 주둥이가 달린 비대칭 물체는 θ 마다
+최적 φ 가 다를 수 있는데 360° 동안 로봇은 고정이므로, 한 시점 기준으로 고른 φ 가 다른
+구간에서 나쁠 수 있다. 미구현 해결안은 세 가지다 — ① probe 로 얻은 물체점을 축 기준으로
+회전 보정해 가상의 θ N개를 합산, ② 후보마다 짧게 회전시켜 평균, ③ top-K 를 뽑아 multi-pass.
+
+### T7. 스캔 시작 직후 lost 로 오판된다
+
+`reg_err = -1` 은 SDK 의 sentinel 이지 실패가 아니다. `reg_err ≥ 0` 을 한 번 본 뒤부터만
+watchdog (3)(4)를 세도록 `tracking_established` 플래그가 걸려 있다. 이 플래그를 건드리면
+warm-up 구간이 곧바로 lost 로 잡힌다.
+
+### T8. 지켜야 할 규약 몇 가지
+
+- **연속 회전 + 최대 FPS.** 겹침이 생명이므로 각도를 띄엄띄엄 옮기지 않는다.
+- **시작 자세는 home 그대로.** 사전 probe 를 넣지 않는다. lost 가 났을 때만 recovery 가
+  자세를 탐색한다.
+- **라이브 뷰어 누적은 SDK 정합행렬만 쓴다.** θ·yaml·hand-eye 를 섞으면 뷰어가 SLAM 의
+  거울이 아니게 되어 디버깅 가치가 사라진다.
+- **sim 에는 SLAM 이 없다.** GT θ 와 축으로 누적할 뿐이고, 실물은 그 위에 SLAM 만 얹는다.
+  sim 이 잘 된다고 실물 정합이 잘 된다는 뜻은 아니다.
+- **last-good θ** 는 `reg_err ≥ 0` 인 마지막 θ 이며 recovery safe-back 의 유일한 기준이다.
+- **턴테이블 정지는 stop_event 로 즉시** 이뤄져야 한다. 별도 thread 가 이를 감시한다.
