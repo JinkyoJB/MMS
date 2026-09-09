@@ -188,110 +188,132 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 
 
 
-## 1. Auto-calibration — Hand-eye T_E_C + 턴테이블 축 T_B_F0  ✅
+## 1. Calibration — `T_E_C`(hand-eye) + `T_B_F0`(턴테이블 축)  ✅
 
-세 상수 트랜스폼을 구해 저장한다. 셋 다 "기계를 옮기거나 센서를 교체하면 다시 잡는다".
+**왜 필요한가** — "저 지점을 보려면 로봇을 어디로 보내야 하나"를 계산하려면, 스캐너가
+본 것과 로봇이 아는 것이 같은 좌표계 위에 있어야 한다. 그 연결고리가 아래 두 상수다.
 
-| 트랜스폼 | 의미 | 성격 | 저장 |
+| 트랜스폼 | 의미 | 다시 잡을 때 | 저장 |
 |---|---|---|---|
-| `T_E_C` | EE → 카메라 (hand-eye) | 정적 — 센서 교체·재설치 시 | `config/sensor_frames.yaml` (Artec, 2026-04-29 고정) |
-| `T_B_F0` | base → 턴테이블 축(θ=0) | 설치 — 기계 재조립 시 | `config/calibration/turntable_frame.yaml` |
-| `T_O_F0` | 내부 글로벌 → 턴테이블 | 런타임 — 매 세션 시작 시 체인 계산 | 세션 메모리만 |
+| `T_E_C` | EE → 카메라 | 센서 교체·재장착 | `config/sensor_frames.yaml::T_EC_artec` |
+| `T_B_F0` | base → 턴테이블 축(θ=0) | 기계 이설·재조립 | `config/calibration/turntable_frame.yaml` |
 
-### 1.0 Hand-eye T_E_C — eye-in-hand 정적 보정
+(`T_O_F0` = 내부 글로벌 → 턴테이블. 매 세션 체인 계산, 저장 안 함)
 
-카메라가 EE에 rigid 고정(eye-in-hand). 로봇을 N개 자세로 움직이며 고정 타깃을 촬영,
-**Robot-World + Hand-eye** (`AX = ZB`) 동시 해. 체인: `T_B_tgt = T_B_E^(i) · T_E_C · T_C_tgt^(i)` (∀i).
+> ⚠ **`turntable_frame.yaml`(2026-04-23)은 Artec 장착 이전 값** → stale 의심.
+> Phase 2 hint·NBV·recovery·충돌회피가 전부 여기 의존하므로 정밀도 의심 시 **재캘리브 1순위**.
 
-> **★ 핸드헬드인데 hand-eye가 성립하는 이유 — 단일캡처 C vs SLAM W (혼동 주의)**
-> Artec Spider 는 두 모드가 있다. ① **단일 캡처**(`capture()`→`IFrameMesh`,
-> `artec_client.py:112`)는 점군을 **센서 자신의 고정 광학 프레임 C**(geometry camera,
-> 하드웨어에 rigid)로 반환 — PhoXi 한 샷과 본질 동일, 시간에 무관하게 불변.
-> ② **스트리밍 SLAM**(`ScanSession`)은 **첫 시간-프레임** 카메라 위치를 원점으로 잡은
-> 임의 scan-world **W** 에 frame-to-frame 정합을 누적 → 매 프레임 `frame_transformation`
-> (C→W)이 다르고 드리프트한다. SDK 문서의 *"첫 프레임을 원점으로"* 는 ②에만 해당.
-> **hand-eye 는 ①만 사용**하고 ②의 SLAM 변환은 절대 안 쓴다 (`capture_points_base`,
-> `artec_client.py:191`: "first-frame 추적 transform 은 쓰지 않는다" — 카메라 위치는
-> SLAM 이 아니라 로봇 FK + T_EC 가 알려준다). → SLAM 의 임의 원점·드리프트가
-> calibration 에 미치는 영향 = 0. (cf. §2 streaming 은 ② 위에서 동작, §8 라이브뷰도 ②.)
+---
 
-- 솔버: `AX=ZB` (`cv2.calibrateHandEye` / `calibrateRobotWorldHandEye`).
-  N≥3 (실용 15~25), 자세 간 회전 ≥30° 필요. X=`T_E_C`(목표), Z=`T_B_tgt`(부산물).
-- 센서별 `T_C_tgt` 취득: PhoXi=Photoneo `RecognizeMarkers`(A4-REV-23A 보드),
-  **Artec=ChArUco(texture image) 검출 + `cv2.solvePnP`** (첫 시도 UV→3D nearest-vertex 는
-  양자화 ~1mm/자세가 hand-eye 에 증폭돼 잔차 25mm → solvePnP 로 sub-pixel, 3.55mm 로 수렴).
-  Spider 좁은 FOV 탓에 **작은 5×3 보드(100×60mm)** 사용(A4 7×5 는 FOV 밖).
-- ✅ **Artec hand-eye 완료** (2026-04-29): ChArUco+solvePnP, `cv2.calibrateHandEye` 5-method 중
-  PARK 채택 → **t_err 3.55mm / r_err 1.30°**, `config/sensor_frames.yaml::T_EC_artec` 적용.
-  구현: `utils/calibration/{hand_eye_calibrator,artec_charuco_detector}.py`,
-  `scripts/artec_{intrinsic,hand_eye}_calib.py`.
-- 검증: point-consistency error (고정점 P를 여러 자세서 base로 변환 후 산포). 목표 <0.5mm.
-- 🧪 **sim 선검증** (Isaac): 실기 적용 전 ground-truth 를 아는 가상환경에서 파이프라인 자체를
-  먼저 확인. ChArUco 보드를 **USD 텍스처 평면으로 실제 렌더** → 카메라가 찍고 cv2.aruco 검출 →
-  solvePnP → calibrateHandEye → **USD 에서 읽은 GT T_E_C 와 t_err/r_err 비교**.
-  스크립트: `standalone_examples/play/MMS/MMS_ext_calibration.py` (Isaac extension 모드, `MMS_ext.py` 기반).
-  ChArUco 보드는 얇은 박스 rigid body 로 턴테이블 위에 **중력 낙하·안착**, 마블은 비활성.
-  > ★ **모든 연산·로봇제어는 실물과 공유** (sim 중복 구현 금지): sim 하니스는 USD/Isaac 환경
-  > 코드만 갖고, 나머지는 MMS 모듈을 **파일경로로 로드해 그대로 사용**:
-  > `artec_charuco_detector.py::ArtecCharucoDetector`(검출+solvePnP), `hand_eye_calibrator.py::
-  > HandEyeCalibrator`(AX=XB), `handeye_geometry.py`(SE3 수학+look-at+`generate_hemisphere_poses`,
-  > numpy 전용 자기완결), `ik_provider.py::RobotIK`(pluggable IK). 주의: Isaac 의 `utils` 패키지명
-  > 충돌 → 파일경로 로드, `@dataclass`는 `sys.modules` 등록 필요, 옮길 모듈은 레포 내부 import 없는
-  > 자기완결이어야 함(`xarm7_kinematics` 패턴). sim 전용 = USD 셋업·렌더·GT 비교뿐.
-  > ★ **T_EC 규약 = E→C = EE-in-camera** (`compute_T_CB`: x_C=T_EC·x_E; HandEyeCalibrator 반환과 동일).
-  > sim GT = `inv(T_W_C)@T_W_E`, OpenCV→USD flip 은 **왼쪽곱** `T_EC_usd = FLIP @ T_EC_ocv`
-  > (T_EC 는 카메라가 출력측이라 §위 camera-in-EE 와 flip 방향이 반대 — 합성검증 t_err 0.0mm).
-  > ⚠ **카메라 프레임 규약 함정**: USD/Isaac 카메라는 광축 **-Z·+Y up**, OpenCV(solvePnP)는
-  > **+Z·+Y down**. 둘은 `R_FLIP=diag(1,-1,-1)` 차이. solvePnP 로 푼 T_E_C 는 OpenCV 프레임
-  > 이므로 USD GT 와 비교 시 `T_E_C_usd = T_E_C_ocv @ FLIP` 보정 필수(빼먹으면 정상인데도 큰 오차로 보임).
-  > ★ **IK = 자체 해석 운동학** (`utils/robot/xarm7_kinematics.py`, 수치 DLS, 공칭 DH·USD 정합).
-  > 결정(2026-06): **xArm SDK IK 미사용**. SDK IK(`get_inverse_kinematics`→`arm_cmd.get_ik`,
-  > `@xarm_is_connected`)는 **컨트롤러 통신이라 하드웨어 연결 필요 → 불안정**. real·sim 모두
-  > 오프라인·안정한 해석 IK 를 쓴다(real: `XArmInterface.ik/fk` 도 해석, 모션 명령만 SDK
-  > `set_servo_angle`). `RobotIK(use_sdk=False)` 기본. SDK IK 는 zero-gap 검증용 opt-in.
-  > PhysX 자코비안 크롤은 폐기(또아리 발생) →
-  > **artec home(`IsaacXArm.HOME_JOINTS_DEG["artec"]`, 충돌무) seed + 관절공간 구동**.
+### 1.1 Hand-eye `T_E_C`
 
-> ⚠ Artec hand-eye(2026-04-29)는 양호하나 **turntable_frame.yaml(2026-04-23)은 Artec
-> pivot 이전 값** → stale 의심(§알려진 한계). 정밀도 의심 시 재캘리브 1순위.
+카메라가 EE에 rigid 고정(eye-in-hand). 보드를 고정해 두고 로봇을 N개 자세로 옮기며
+촬영하면 매 자세에서 아래 체인이 성립한다.
 
-> 상세: **`docs/1_calibration.md`** (hand-eye 로직 흐름 + 코드 지도 + 규약·함정).
+```
+T_B_tgt = T_B_E(i) · T_E_C · T_C_tgt(i)      (∀i, 좌변은 항상 같은 값)
+└ 고정 ┘  └ 로봇 FK ┘ └ 미지 ┘ └ 보드 검출 ┘
+```
 
-### 1.1 턴테이블 축 T_B_F0 — 설치 보정
+미지 2개(`T_E_C`, `T_B_tgt`)가 모든 자세에서 동일해야 하므로, 자세를 충분히·다양하게
+모으면 유일하게 풀린다 → `AX = ZB` (`cv2.calibrateHandEye`).
 
-하드웨어팀이 턴테이블/로봇을 옮기면 T_B_F0(로봇 base 기준 턴테이블 축·평면)가 무효화됨.
-**버튼 하나로 다시 잡는** 루틴. **방법은 rim 점 피팅 하나로 통일**.
+| 항목 | 값 |
+|---|---|
+| 필요 자세 | N≥3 (실용 15~25), **자세 간 회전 ≥30°** |
+| 보드 검출 | ChArUco(texture image) → `cv2.solvePnP` |
+| 보드 크기 | **5×3, 100×60mm** — Spider FOV가 좁아 A4 7×5는 화면 밖 |
+| 솔버 | 5-method 중 **PARK** 채택 |
+| **결과 (2026-04-29)** | **t_err 3.55mm / r_err 1.30°** |
 
-원리: *회전판에 고정된 점은 원을 그린다 → 원의 법선=축방향, 중심=축 위 점.*
+> **왜 solvePnP인가** — 첫 시도는 UV→3D nearest-vertex였는데, 자세당 ~1mm 양자화 오차가
+> hand-eye에서 증폭돼 잔차 25mm가 나왔다. solvePnP로 sub-pixel 정밀도를 확보해 3.55mm로 수렴.
 
-| 방법 | 설명 | 상태 |
+**파일** — `utils/calibration/{hand_eye_calibrator,artec_charuco_detector}.py`,
+`scripts/artec_{intrinsic,hand_eye}_calib.py`
+
+**sim 선검증** — ChArUco 보드를 USD 텍스처 평면으로 실제 렌더 → 검출 → solvePnP →
+calibrateHandEye → USD에서 읽은 GT와 비교. 실기 적용 전 파이프라인 자체를 확인한다.
+검출·솔버·IK는 **실물과 같은 모듈을 파일경로로 로드해 그대로 쓴다**(sim 중복 구현 금지).
+스크립트: `standalone_examples/play/MMS/MMS_ext_calibration.py`
+
+#### ⚠ 함정 2가지
+
+**① 핸드헬드 스캐너인데 hand-eye가 성립하나?** — 성립한다. Artec은 두 모드가 있다.
+
+| 모드 | 좌표 기준 | hand-eye에 쓰나 |
 |---|---|---|
-| **rim 점 피팅** | disc rim 을 스캐너로 보고 rim 위 점 취득(real=클릭 / sim=자동추출) → 3D 원 피팅 → 축·평면 | ✅ PhoXi+Isaac (검증 0.015°/0.7mm) |
-| ~~3구 자동~~ | ~~반경 아는 구 어레이 회전~~ | ❌ **폐기** (실물 fixture 비용 큼, rim 으로 대체) |
+| **단일 캡처** (`capture()`) | 센서 고정 광학 프레임 C. 하드웨어에 rigid, 시간 무관 | **○ 이것만 쓴다** |
+| 스트리밍 SLAM (`ScanSession`) | 첫 프레임 기준 임의 scan-world W. 드리프트함 | ✗ 절대 안 씀 |
 
-### 핵심 통찰
-- **카메라 위치는 로봇이 알려준다**: 점군을 `센서 → T_EC(손-눈)·FK → 로봇 base` 로 변환.
-  **Artec first-frame 추적(SLAM)은 calibration에 쓰지 않는다** (임의기준·드리프트). →
-  `sensor.capture_points_base(robot, T_EC)`.
-- **축 ≠ 표면**: rim 원은 축(방향+XY)을 준다. 충돌회피 + 대상물 기준 높이를 위해 disc
-  **표면 평면**을 따로 잡아 축선과 만나는 점을 F0 원점으로 삼는다(`system.disc_surface_frame`,
-  또는 rim center/normal 을 바로 `build_T_B_F0`). 표면점=F0 원점, 평면법선 교차검증.
+카메라 위치는 SLAM이 아니라 **로봇 FK + T_EC**가 알려준다
+(`artec_client.py::capture_points_base`). → SLAM 드리프트의 영향 = 0.
+(SDK 문서의 "첫 프레임을 원점으로"는 스트리밍에만 해당)
 
-### 파일
-- `utils/calibration/turntable_frame.py` — `fit_circle_3d`, `fit_plane`, `build_T_B_F0`, `save_turntable_frame_yaml` (수학, 센서무관) ★ 공유 코어
-- `utils/calibration/rim_picker.py` — OpenCV 클릭 UI + Open3D 뷰 (센서무관)
-- `scripts/artec/turntable_frame_init.py` / `scripts/phoxi/turntable_frame_init.py` — 실물 rim 클릭 진입점
-- `standalone_examples/play/MMS/MMS_ext_calibration2.py` — sim 검증(rim 자동추출 → fit → GT 비교)
+**② USD와 OpenCV의 카메라 프레임 규약이 다르다**
 
-### 남은 일
-- ✅ Isaac rim-클릭 어댑터 완료(`capture_organized`). real Artec 는 동일 계약(intensity,
-  organized_pts, T_CB)만 채우면 `rim_picker` 그대로 재사용.
-- ⚠ Spider 의 좁은 FOV(작동거리 0.2~0.3m) 탓에 디스크 rim 전체가 한 화면에 안 들어올 수
-  있음 → 보이는 호(arc)에서 점 클릭(원피팅은 3점이면 가능하나 호가 짧으면 조건수↓).
-- 🔬 hand-eye 검증 스크립트(`artec_hand_eye_validate.py`) — 별도 N_test 자세서 point-consistency 측정(미작성).
-- ⚠ `scripts/artec/turntable_frame_init.py` 가 공유 코어 대신 자체 `fit_circle_3d`/`_RimPicker` 중복 — 통일 권장.
+```
+USD/Isaac 카메라 :  광축 -Z, +Y up
+OpenCV(solvePnP) :  광축 +Z, +Y down       차이 = R_FLIP = diag(1,-1,-1)
+```
 
-> 상세: **`docs/1_calibration.md`** (Part 1 hand-eye + Part 2 turntable).
+solvePnP로 푼 `T_E_C`는 OpenCV 프레임이므로 USD GT와 비교하려면 flip 보정이 필요하다.
+**빼먹으면 정상인데도 큰 오차로 보여** 원인 추적에 시간을 버린다.
+
+- `T_EC` 규약 = **E→C** (`x_C = T_EC · x_E`)
+- sim GT = `inv(T_W_C) @ T_W_E`
+- 보정은 **왼쪽곱**: `T_EC_usd = FLIP @ T_EC_ocv` (합성검증 t_err 0.0mm)
+  — T_EC는 카메라가 출력측이라 camera-in-EE와 flip 방향이 반대다
+
+---
+
+### 1.2 턴테이블 축 `T_B_F0`
+
+턴테이블이나 로봇을 옮기면 무효화된다. **버튼 하나로 다시 잡는** 루틴이며,
+방법은 **rim 점 피팅 하나로 통일**했다.
+
+> 원리: *회전판에 고정된 점은 원을 그린다 → 원의 법선 = 축 방향, 중심 = 축 위의 점*
+
+disc rim이 그 자체로 축 둘레의 원이므로, rim 위 점들을 모아 3D 원을 피팅하면 축이 나온다.
+점 취득은 real=사용자 클릭, sim=자동 추출. **검증 결과 0.015° / 0.7mm** (PhoXi+Isaac).
+
+> **축 ≠ 표면** — rim 원은 축의 방향과 위치만 준다. 충돌 회피와 대상물 높이 기준을 위해
+> disc **표면 평면**을 따로 잡아, 축선과 만나는 점을 F0 원점으로 삼는다
+> (`system.disc_surface_frame`). 평면 법선은 축 방향과 교차검증한다.
+
+> ~~3구 fixture 자동 방식~~ — 실물 제작 비용 문제로 폐기, 2026-09 코드 제거.
+
+**파일**
+- `utils/calibration/turntable_frame.py` — `fit_circle_3d`, `fit_plane`, `build_T_B_F0`,
+  `save_turntable_frame_yaml`, `axis_error` ★ 공유 코어 (수학, 센서 무관)
+- `utils/calibration/rim_picker.py` — OpenCV 클릭 UI + Open3D 뷰
+- `scripts/{artec,phoxi}/turntable_frame_init.py` — 실물 rim 클릭 진입점
+- `scripts/sim/calib_rim_sim.py` — sim 검증 (자동 추출 → 피팅 → GT 비교)
+
+---
+
+### 1.3 공통 원칙
+
+**카메라 위치는 로봇이 알려준다.** 점군은 항상 `센서 → T_EC·FK → 로봇 base` 경로로
+변환한다(`sensor.capture_points_base`). Artec SLAM은 스캔 데이터를 이어 붙이는 데만 쓰고,
+캘리브·자세 계획에는 쓰지 않는다 — 임의 기준이고 드리프트하기 때문이다.
+
+**IK는 자체 해석 운동학**(`utils/robot/xarm7_kinematics.py`, 수치 DLS, 공칭 DH·USD 정합).
+> 결정(2026-06): **xArm SDK IK 미사용**. SDK IK(`get_inverse_kinematics`)는 컨트롤러
+> 통신이라 하드웨어 연결이 필요 → 불안정. real·sim 모두 오프라인 해석 IK를 쓰고,
+> real도 모션 명령만 SDK(`set_servo_angle`)로 보낸다. `RobotIK(use_sdk=False)` 기본.
+> PhysX 자코비안 크롤은 또아리 발생으로 폐기 → artec home seed + 관절공간 구동.
+
+### 1.4 남은 일
+
+| 상태 | 항목 |
+|---|---|
+| 🔬 | hand-eye 검증 스크립트(`artec_hand_eye_validate.py`) 미작성 — 별도 N_test 자세에서 point-consistency 측정(목표 <0.5mm) |
+| ⚠ | Spider FOV가 좁아 disc rim 전체가 한 화면에 안 들어올 수 있음 → 보이는 호(arc)에서 클릭. 원 피팅은 3점이면 되나 호가 짧으면 조건수 저하 |
+| ⚠ | `scripts/artec/turntable_frame_init.py`가 공유 코어 대신 자체 `fit_circle_3d`/`_RimPicker` 중복 → 통일 권장 |
+| ✅ | Isaac rim-클릭 어댑터 완료(`capture_organized`). real Artec은 동일 계약(intensity, organized_pts, T_CB)만 채우면 `rim_picker` 재사용 |
+
+> 상세: **`docs/1_calibration.md`** (Part 1 hand-eye + Part 2 turntable — 로직 흐름·코드 지도·함정)
 
 ## 2. 5면 스캐닝 — Phase 1 streaming SLAM + view planning  ✅🔬
 
