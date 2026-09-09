@@ -1023,7 +1023,11 @@ class IsaacScanSession:
                                     el_prev, azd, d, seed)
                 if q is None:
                     continue
-                self._drive(q)
+                # ★ 이동이 거부되면 **그 자리에서 찍지 않고** 다음 az 를 시도한다.
+                #   예전에는 _drive() 반환값을 버려서, 충돌로 못 간 자세의 프리뷰를
+                #   원래 자리에서 찍고 그걸 계획 입력으로 썼다(밴드 계획 오염).
+                if not self._drive(q):
+                    continue
                 pc_b = self.scanner.capture_points_base(
                     self.robot, self.mms._T_EC, settle=CAPTURE_SETTLE)
                 if pc_b is None or len(pc_b) == 0:
@@ -1037,27 +1041,15 @@ class IsaacScanSession:
                                              axis_xy, disc_top)
             return np.zeros((0, 3))
 
-        # 실루엣 2방향 = 턴테이블 0°/90° (real 동일: 로봇 대신 물체를 돌림).
-        # 90° 점군은 encoder 각(-θ)으로 역회전해 물체 프레임 통일.
-        acc = []
-        for theta in (0.0, math.pi / 2):
+        def move_tt(theta):
             self.turntable.move_abs(float(theta), float(np.radians(30.0)))
             self.turntable.wait_motion_done()
-            tz, prev_top = disc_top + 0.05, -np.inf
-            for _ in range(4):                       # 조준높이 상승 루프
-                for d in d_steps:                    # 거리 2스텝 = 표면반경 0~18cm 커버
-                    obj = preview_at(tz, d)
-                    if len(obj):
-                        acc.append(_rot_about_axis(obj, self.axis_w,
-                                                   self.axis_dir_w, -theta))
-                top = max((a[:, 2].max() for a in acc), default=tz)
-                if top - prev_top < 0.01:            # 상단이 안 늘면 종료 (GT 불요)
-                    break
-                prev_top, tz = top, top + 0.03
-        self.turntable.move_abs(0.0, float(np.radians(30.0)))
-        self.turntable.wait_motion_done()
 
-        pts = np.vstack(acc) if acc else np.zeros((0, 3))
+        # 실루엣 수집 루프는 **real 과 같은 공용 코드**(p1.collect_planning_points).
+        pts = p1.collect_planning_points(
+            preview_at, move_tt, self.axis_w, self.axis_dir_w,
+            d_steps=d_steps,
+            log=lambda m: print(f"[isaac_scan] {m}"))
         pts = p1.voxel_downsample(pts, sensor.voxel_m)
         if len(pts) < 100:
             print(f"[isaac_scan] P1 preview 점 부족({len(pts)}) — 플래너 불가")
@@ -1068,31 +1060,12 @@ class IsaacScanSession:
         plan = p1.plan_phase1_viewpoints(pts, nrm, axis_xy, sensor, els=P1_ELS)
         print(f"[isaac_scan] P1 플랜: {plan.note} risk={plan.tracking_risk} "
               f"(preview {len(pts)}pt)")
-        qs = []
-        for vp, ev in zip(plan.poses, plan.evals):
-            q = None
-            for azd in VIEW_AZIS_DEG:                # 계획 자세도 az 는 도달성으로
-                q, _ = self._view_q(np.array([axis_xy[0], axis_xy[1], vp.target_z]),
-                                    vp.el_deg, azd, vp.standoff, seed)
-                # ★ 충돌 게이트 — legacy 경로(_pick_phase1_legacy)에만 있고 밴드 경로에는
-                #   빠져 있었다. IK 해가 나오면 충돌 여부를 안 보고 break 해서, 충돌 없는
-                #   다른 az 를 **한 번도 시도하지 않았다**. 그 결과 최상단 밴드가
-                #   'tool↔link4 자가충돌'로 이동 단계에서 거부되고 패스가 통째로 날아갔다
-                #   (실측 2026-08-19: hand_drill·spray_can 밴드 3/3).
-                if q is not None and self._cm is not None:
-                    ok, why = self._cm.is_pose_safe(q)
-                    if not ok:
-                        print(f"[isaac_scan]   band tz={vp.target_z:.3f} "
-                              f"az={azd:.0f}° 충돌({why}) — 다음 az 시도")
-                        q = None
-                if q is not None:
-                    print(f"[isaac_scan]   자세 el={vp.el_deg:.0f}° s={vp.standoff:.3f} "
-                          f"tz={vp.target_z:.3f} az={azd:.0f}° "
-                          f"minfill={ev.min_fill_cm2:.0f}cm² IK ok")
-                    break
-            if q is not None:
-                qs.append(q)
-        return qs or None
+        # az 스윕 + 충돌 게이트도 **real 과 같은 공용 코드**(p1.solve_plan_poses).
+        return p1.solve_plan_poses(
+            plan, axis_xy, VIEW_AZIS_DEG,
+            solve_q=lambda tgt, el, az, so: self._view_q(tgt, el, az, so, seed)[0],
+            is_safe=(self._cm.is_pose_safe if self._cm is not None else None),
+            log=lambda m: print(f"[isaac_scan] {m}"))
 
     # ── Phase 1 시점선정: legacy (GT bbox azimuth sweep, fallback) ────────
     def _pick_phase1_legacy(self, seed):
@@ -1677,9 +1650,5 @@ def _pca_normals(pts, c_ref, k=12):
     return out
 
 
-def _rot_about_axis(pts, axis_pt, axis_dir, ang):
-    a = np.asarray(axis_dir, float); a = a / (np.linalg.norm(a) + 1e-12)
-    c, s = math.cos(ang), math.sin(ang)
-    K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
-    R = np.eye(3) * c + np.outer(a, a) * (1 - c) + K * s
-    return (np.asarray(pts) - axis_pt) @ R.T + axis_pt
+# 공용 코어 위임 (real 과 같은 구현을 쓰기 위해 utils/nbv/phase1_viewpoint 소유).
+_rot_about_axis = p1.rot_about_axis

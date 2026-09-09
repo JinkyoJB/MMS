@@ -180,6 +180,20 @@ class ArtecMultiPassScanSessionSettings:
     adaptive_min_preview_verts: int = 1500       # preview 유효 최소 정점
     adaptive_robot_speed_deg_s: float = 30.0   # 2026-08-19: 15→30 (2배)
 
+    # ── Phase 1 자세 선정 (sim·real 공용 플래너) ───────────────────────
+    # 2026-09-09: real 을 sim 과 같은 코드로 통일. 그전까지 real 의 시작 자세는
+    # home 고정(2026-05-20 rule)이었고, sim 에만 전회전 maximin 채점기가 있었다 —
+    # sim 에서 검증한 자세 선정이 실물에 전혀 적용되지 않는 상태였다.
+    # 계획 = utils/nbv/phase1_viewpoint.plan_phase1_viewpoints (sim 과 동일 함수).
+    # 실패(preview 부족·IK 없음·예외)하면 조용히 home 고정으로 되돌아간다.
+    phase1_planner_enabled: bool = True
+    phase1_els_deg: tuple = (30.0, 40.0, 50.0, 60.0, 70.0)  # sim MMS_SIM_P1_ELS 와 동일
+    phase1_view_azis_deg: tuple = (0.0, 30.0, -30.0)        # sim VIEW_AZIS_DEG 와 동일
+    phase1_preview_el_deg: float = 30.0                     # 계획용 preview 고도각
+    phase1_preview_dists_m: tuple = (0.30, 0.38)            # 축거리 2스텝
+    phase1_preview_turntable_vel_rad_s: float = float(np.radians(30.0))
+    phase1_min_plan_points: int = 100                       # 미만이면 플래너 포기
+
     # ── 고도각(elevation) 탐색 공통 파라미터 ───────────────────────────
     # recovery 호출 시의 elevation search 범위·기본 offsets. 재조준은
     # hardcoded +Z 가정의 look_at 이 아니라 probe preview 로 경험적 캘리브된
@@ -1168,9 +1182,10 @@ class ArtecMultiPassScanSession:
         현재 robot 자세에서 PREVIEW 로 물체 크기/위치 추정 → 스캐너(EE)를
         최적 작업거리·고도각으로 이동.
 
-        2026-05-20 rule: scan 첫 시작에서는 호출되지 않음. tracking-lost
-        recovery 흐름에서만 호출 (`recovery=True`). recovery 시 elevation
-        후보 수를 축소(`recovery_elevation_offsets_deg` + fine skip)해 시간 단축.
+        호출 시점: **tracking-lost recovery 전용**(`recovery=True`). 스캔 시작
+        자세는 이 함수가 아니라 `pick_phase1_pose` → `_pick_phase1_planner`
+        (sim 과 같은 공용 전회전 채점기)가 정한다. recovery 시에는 elevation
+        후보를 축소(`recovery_elevation_offsets_deg` + fine skip)해 시간을 줄인다.
 
         실패/예외는 모두 삼키고 home 유지. Returns True iff robot 이동 완료.
         docs/artec_scanning_pipeline.md §3.0 / §6.
@@ -1231,9 +1246,10 @@ class ArtecMultiPassScanSession:
         return self.s.nbv_K_max
 
     def run(self) -> ArtecMultiPassScanResult:
-        # 2026-05-20 rule: scan 첫 시작은 robot=home 그대로. 사전 probe/elevation
-        # 호출 없음. tracking-lost 시 _attempt_recovery 가 비로소
-        # _adaptive_prescan_position(recovery=True) 를 발동. (docs §3 / §6)
+        # 시작 자세: pick_phase1_pose 가 공용 플래너로 고른다(2026-09-09, sim 과 통일).
+        # 플래너 실패 시에만 예전 동작인 home 고정(AT_CURRENT)으로 폴백한다.
+        # tracking-lost 시에는 _attempt_recovery 가
+        # _adaptive_prescan_position(recovery=True) 를 발동. (docs 2_phase1 §3 / §6)
         #
         # 구조 (2026-07-01): Phase 1→2→3 순서/NBV 루프는 공용
         # utils/nbv/scan_phase_controller.run_scan_phases 가 소유. 여기 run() 은
@@ -1267,8 +1283,126 @@ class ArtecMultiPassScanSession:
                 return False
         return True
 
+    # ── Phase 1 자세 선정 (sim 과 같은 공용 플래너) ─────────────────────
+    def _turntable_frame(self):
+        """턴테이블 캘리브(T_BF0) → (axis_pt(3,) base, axis_dir(3,)). 없으면 None."""
+        tt = getattr(self.mms, "turntable_transform", None)
+        T_BF0 = getattr(tt, "T_BF0", None) if tt is not None else None
+        if T_BF0 is None:
+            return None
+        T_BF0 = np.asarray(T_BF0, float)
+        return T_BF0[:3, 3].copy(), T_BF0[:3, 2].copy()
+
+    def _move_turntable_abs(self, theta_rad: float) -> None:
+        """계획용 실루엣 회전 — 절대각 이동 후 완료 대기 (실패는 삼킨다)."""
+        try:
+            self.turntable.move_abs(float(theta_rad),
+                                    float(self.s.phase1_preview_turntable_vel_rad_s))
+            if hasattr(self.turntable, "wait_motion_done"):
+                self.turntable.wait_motion_done(timeout_s=20.0)
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [p1plan] ⚠ 턴테이블 이동 실패({type(e).__name__}: {e})")
+
+    def _preview_object_points_B(self, axis_pt, tz: float, d: float):
+        """조준높이 tz·축거리 d 로 구동 후 preview 캡처 → base 프레임 물체 점군.
+
+        sim `_pick_phase1_planner.preview_at` 의 real 판. 캡처 수단만 다르고
+        (Isaac 카메라 ↔ Artec preview) 크롭·self-filter 는 같은 공용 함수를 쓴다.
+        """
+        from utils.nbv import phase1_viewpoint as p1
+        from utils.collision.robot_collision import (
+            capsules_from_joints, DEFAULT_LINK_RADII)
+        s = self.s
+        sensor = getattr(self.mms, "sensor", None)
+        if sensor is None or not hasattr(sensor, "capture_frame"):
+            return np.zeros((0, 3))
+        axis_xy = np.asarray(axis_pt, float)[:2]
+        target = np.array([axis_xy[0], axis_xy[1], float(tz)], float)
+        try:
+            q_seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        except Exception:                                       # noqa: BLE001
+            return np.zeros((0, 3))
+        for azd in s.phase1_view_azis_deg:      # 도달 azimuth 스윕 (커버리지 무관)
+            q = self._axis_view_q(target, s.phase1_preview_el_deg,
+                                  float(azd), float(d), q_seed)
+            if q is None:
+                continue
+            if self._move_robot_to_q(q, s.adaptive_robot_speed_deg_s) != 0:
+                continue                        # 충돌 거부/구동 실패 → 다음 az
+            self._recapture_T_BC("p1plan")
+            vC = self._capture_preview_verts(sensor, s.adaptive_min_preview_verts)
+            if vC is None:
+                return np.zeros((0, 3))
+            T_CB = np.asarray(self._T_CB, float)
+            xB = (vC / 1000.0) @ T_CB[:3, :3].T + T_CB[:3, 3]
+            # ★ 로봇 자기점 제거 — 프레임에 걸린 링크/스캐너 점이 크롭 실린더를
+            #   오염해 밴드 수를 폭주시킨다 (sim 과 동일 처리).
+            try:
+                q_now = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+                xB = p1.filter_robot_points(
+                    xB, capsules_from_joints(q_now, DEFAULT_LINK_RADII,
+                                             T_EC=self._T_EC))
+            except Exception:                                   # noqa: BLE001
+                pass
+            return p1.crop_object_points(xB, axis_xy, float(axis_pt[2]))
+        return np.zeros((0, 3))
+
+    def _pick_phase1_planner(self):
+        """계획용 preview → 기하 크롭 → plan_phase1_viewpoints → az 스윕 IK.
+
+        sim(`isaac_scan_session._pick_phase1_planner`)과 **같은 공용 함수**를 부른다
+        (`p1.collect_planning_points` / `plan_phase1_viewpoints` / `solve_plan_poses`).
+        다른 것은 preview 캡처 수단과 IK 콜백뿐이다. 실패하면 None → home 고정.
+        """
+        from utils.nbv import phase1_viewpoint as p1
+        s = self.s
+        frame = self._turntable_frame()
+        if frame is None:
+            print("  [p1plan] turntable_transform/T_BF0 없음 — home 고정")
+            return None
+        axis_pt, axis_dir = frame
+        axis_xy = axis_pt[:2]
+        sensor_model = p1.SensorModel()
+
+        pts = p1.collect_planning_points(
+            lambda tz, d: self._preview_object_points_B(axis_pt, tz, d),
+            self._move_turntable_abs, axis_pt, axis_dir,
+            d_steps=tuple(s.phase1_preview_dists_m),
+            log=lambda m: print(f"  [p1plan] {m}"))
+        pts = p1.voxel_downsample(pts, sensor_model.voxel_m)
+        if len(pts) < s.phase1_min_plan_points:
+            print(f"  [p1plan] preview 점 부족({len(pts)}) — home 고정")
+            return None
+
+        nrm = p1.estimate_outward_normals(pts, axis_xy)
+        plan = p1.plan_phase1_viewpoints(pts, nrm, axis_xy, sensor_model,
+                                         els=tuple(s.phase1_els_deg))
+        print(f"  [p1plan] 플랜: {plan.note} risk={plan.tracking_risk} "
+              f"(preview {len(pts)}pt)")
+        try:
+            q_seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        except Exception:                                       # noqa: BLE001
+            return None
+        cm = self._collision_gate()
+        return p1.solve_plan_poses(
+            plan, axis_xy, tuple(s.phase1_view_azis_deg),
+            solve_q=lambda tgt, el, az, so: self._axis_view_q(tgt, el, az, so, q_seed),
+            is_safe=(cm.is_pose_safe if cm is not None else None),
+            log=lambda m: print(f"  [p1plan] {m}"))
+
     def pick_phase1_pose(self):
-        # real: 스캔 첫 시작은 robot=home 그대로 → 구동 없이 현재 포즈에서 캡처.
+        """Phase 1 시작 자세. 플래너가 성공하면 그 자세(밴드면 리스트),
+        실패하면 AT_CURRENT(= home 고정, 2026-05-20 이전 동작)."""
+        if not self.s.phase1_planner_enabled:
+            return AT_CURRENT
+        try:
+            qs = self._pick_phase1_planner()
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [p1plan] ⚠ 예외({type(e).__name__}: {e}) — home 고정")
+            qs = None
+        if qs:
+            print(f"  [p1plan] ✓ Phase 1 자세 {len(qs)}개 확정")
+            return qs
         return AT_CURRENT
 
     def go_home(self) -> None:
@@ -1280,14 +1414,27 @@ class ArtecMultiPassScanSession:
             print(f"  [phase] ⚠ go_home 실패({e}) — 자세 확인 필요")
 
     def capture_rotation(self, pose, label: str, phase: int) -> bool:
-        """real 캡처 (턴테이블 전회전). 두 경로 모두 보존:
-          - pose=AT_CURRENT (Phase 1/3): 현재 고정 포즈에서 streaming +
-            cleanup/hint/master 병합 + tracking-lost recovery (_do_one_rotation
-            재시도 루프). 반환 False=중단.
-          - pose=q (Phase 2 NBV): 로봇을 q 로 구동 후 streaming + camera-motion
-            T_pre 병합 (_capture_nbv_pose). 반환 False=캡처 실패(루프 종료).
+        """real 캡처 (턴테이블 전회전). 세 경로:
+          - phase=1 + pose=q: Phase 1 플래너가 고른 자세로 **구동한 뒤**
+            아래 AT_CURRENT 경로와 동일하게 진행 (밴드면 대역마다 1회).
+            이동이 거부되면 False — 컨트롤러가 그 밴드만 건너뛴다.
+          - pose=AT_CURRENT (Phase 1 fallback / Phase 3): 현재 고정 포즈에서
+            streaming + cleanup/hint/master 병합 + tracking-lost recovery
+            (_do_one_rotation 재시도 루프). 반환 False=중단.
+          - phase=2 + pose=q (NBV): 로봇을 q 로 구동 후 streaming +
+            camera-motion T_pre 병합 (_capture_nbv_pose). False=캡처 실패.
         """
         st = self._st
+        if phase == 1 and pose is not AT_CURRENT:
+            # Phase 1 플래너가 고른 자세(밴드면 대역마다 1회). 로봇을 그 자세로
+            # 옮긴 뒤부터는 AT_CURRENT 와 완전히 같은 경로 — streaming + cleanup +
+            # hint + master 병합 + tracking-lost recovery.
+            code = self._move_robot_to_q(pose, self.s.adaptive_robot_speed_deg_s)
+            if code != 0:
+                print(f"  [p1plan] ✘ 자세 이동 실패(code={code}) — 이 밴드 건너뜀")
+                return False
+            self._recapture_T_BC("p1plan")
+            pose = AT_CURRENT
         if pose is AT_CURRENT:
             while st.n_pass < self.s.max_passes:
                 status = self._do_one_rotation(st)

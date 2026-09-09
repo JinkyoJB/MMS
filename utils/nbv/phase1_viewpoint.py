@@ -18,8 +18,9 @@ azimuth) 대비 강건화 포인트:
   4) tracking-lost recovery = **같은 채점기 + overlap 항** (재정착하려면
      이미 스캔된 면이 보여야 함) 으로 재계획.
 
-sim/real 공용: 입력은 점군(np) + 캘리브 상수뿐. sim 은 GT mesh 점군,
-real 은 home 정적 캡처(0°/90°) 2장을 넣는다. IK/충돌은 backend 몫.
+sim/real 공용: 입력은 점군(np) + 캘리브 상수뿐. 점군을 모으는 실행 루프도
+`collect_planning_points` 로 공용화돼 있어(2026-09-09) sim·real 이 턴테이블
+0°/90° 실루엣 + 조준높이 상승이라는 같은 전략을 쓴다. IK/충돌은 backend 몫.
 카메라 규약 = USD look-at (광축 -Z, up=world+z) — real 이식 시 광축 규약만
 backend 에서 맞춘다.
 """
@@ -276,6 +277,96 @@ def simulate_planning_captures(pts_obj, nrm_obj, axis_xy, disc_top_z,
             prev_top = top
             tz = top + 0.03                    # 다음 조준: 현재 상단 위 (겹침)
     return seen
+
+
+# ── 계획용 preview 수집 / 계획 자세 IK 해결 (sim·real 공용 실행 루프) ─────────
+# sim(isaac_scan_session) 과 real(artec_multipass_scan_session) 이 **같은 코드**를
+# 쓰도록 백엔드 의존 부분만 콜백으로 뺐다. 예전에는 이 루프가 sim 에만 있었고
+# real 은 home 고정이라, sim 에서 검증한 자세 선정이 실물에 전혀 적용되지 않았다.
+
+def rot_about_axis(pts, axis_pt, axis_dir, ang):
+    """임의 축(axis_pt, axis_dir) 둘레로 점군을 ang(rad) 회전. sim·real 공용."""
+    a = np.asarray(axis_dir, float)
+    a = a / (np.linalg.norm(a) + 1e-12)
+    c, sn = math.cos(ang), math.sin(ang)
+    K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+    R = np.eye(3) * c + np.outer(a, a) * (1 - c) + K * sn
+    return (np.asarray(pts, float) - np.asarray(axis_pt, float)) @ R.T \
+        + np.asarray(axis_pt, float)
+
+
+def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
+                            d_steps=(0.30, 0.38), thetas=(0.0, math.pi / 2),
+                            max_heights: int = 4, rise_m: float = 0.03,
+                            start_off_m: float = 0.05, top_eps_m: float = 0.01,
+                            log=None):
+    """계획용 preview 를 모아 물체 프레임(θ=0) 점군으로 돌려준다.
+
+    `simulate_planning_captures` 가 sim 안에서 모사하던 전략을 **실제 장비로**
+    수행하는 루프다. 백엔드는 두 콜백만 제공한다.
+      preview_at(tz, d) -> (N,3)  조준높이 tz·축거리 d 로 구동 후 캡처하고
+                                  물체 점만 크롭해 돌려준다(작업 프레임).
+      move_turntable(theta_rad)   턴테이블을 절대각으로 돌리고 완료까지 대기.
+
+    실루엣을 2방향(턴테이블 0°/90°)에서 얻는 이유는 로봇을 크게 돌리지 않고도
+    비대칭 물체의 폭을 보기 위해서다. 90° 점군은 -θ 로 역회전해 물체 프레임으로
+    통일한다. 조준높이는 "새 캡처가 상단을 더 못 늘리면 종료"로 올리므로 물체
+    높이에 대한 사전지식(GT)이 필요없다.
+    """
+    axis_pt = np.asarray(axis_pt, float)
+    acc = []
+    for theta in thetas:
+        move_turntable(float(theta))
+        tz, prev_top = float(axis_pt[2]) + start_off_m, -np.inf
+        for _ in range(max_heights):
+            for d in d_steps:
+                obj = preview_at(float(tz), float(d))
+                if obj is not None and len(obj):
+                    acc.append(rot_about_axis(obj, axis_pt, axis_dir, -theta))
+            top = max((a[:, 2].max() for a in acc), default=tz)
+            if top - prev_top < top_eps_m:      # 상단이 안 늘면 종료 (GT 불요)
+                break
+            prev_top, tz = top, top + rise_m
+    move_turntable(0.0)
+    pts = np.vstack(acc) if acc else np.zeros((0, 3))
+    if log:
+        log(f"계획용 preview {len(pts)}pt ({len(acc)} 캡처)")
+    return pts
+
+
+def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None):
+    """계획 자세(el, standoff, target_z)마다 az 를 스윕해 도달·충돌 통과하는 q 선택.
+
+    방위각은 관측 조건을 바꾸지 않고(턴테이블이 회전을 담당) **도달성과 충돌만**
+    좌우하므로 여기서 스윕한다. 충돌 게이트를 이 루프에 두는 것이 핵심이다 —
+    예전에는 IK 해가 나오면 충돌을 안 보고 확정해서, 충돌 없는 다른 az 를 한 번도
+    시도하지 못하고 이동 단계에서 거부돼 밴드가 통째로 날아갔다.
+
+      solve_q(target_xyz, el_deg, az_deg, standoff) -> q or None
+      is_safe(q) -> (ok: bool, why: str)            None 이면 충돌검사 생략
+    """
+    qs = []
+    for vp, ev in zip(plan.poses, plan.evals):
+        target = np.array([axis_xy[0], axis_xy[1], vp.target_z], float)
+        q = None
+        for azd in azis_deg:
+            q = solve_q(target, vp.el_deg, azd, vp.standoff)
+            if q is not None and is_safe is not None:
+                ok, why = is_safe(q)
+                if not ok:
+                    if log:
+                        log(f"  band tz={vp.target_z:.3f} az={azd:.0f}° "
+                            f"충돌({why}) — 다음 az 시도")
+                    q = None
+            if q is not None:
+                if log:
+                    log(f"  자세 el={vp.el_deg:.0f}° s={vp.standoff:.3f} "
+                        f"tz={vp.target_z:.3f} az={azd:.0f}° "
+                        f"minfill={ev.min_fill_cm2:.0f}cm² IK ok")
+                break
+        if q is not None:
+            qs.append(q)
+    return qs or None
 
 
 # ── 계획 (단일 자세 → 부족하면 겹침 밴드 분할) ────────────────────────────────

@@ -61,8 +61,10 @@ class ScanBackend(Protocol):
 
     # ── Phase 1 ─────────────────────────────────────────────────────────
     def pick_phase1_pose(self) -> Any:
-        """데이터가 잘 잡히는 Phase 1 로봇 포즈. sim=azimuth sweep 으로 선택,
-        real=AT_CURRENT(home 고정). 이후 이 포즈로 capture_rotation."""
+        """데이터가 잘 잡히는 Phase 1 로봇 포즈. sim·real 모두 공용 플래너
+        (`utils/nbv/phase1_viewpoint.plan_phase1_viewpoints`)가 고르며, 키 큰
+        물체면 **포즈 리스트**(겹침 z-밴드, safe-first 순서)를 돌려준다.
+        플래너가 실패하면 AT_CURRENT(현재 자세 고정)로 폴백한다."""
         ...
 
     # ── Phase 2 (NBV hole-fill) ─────────────────────────────────────────

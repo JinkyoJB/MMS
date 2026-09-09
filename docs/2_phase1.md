@@ -41,9 +41,9 @@ Artec Spider 는 한 frame 의 좌표를 **직전 frame 에 정합해서** 얻�
 이 성질 때문에 Phase 1 에는 추적 상태를 실시간으로 감시하는 watchdog 과, 끊겼을 때
 되돌아갈 지점(last-good θ), 그리고 자동 복구 절차를 구현하였다(§6).
 
-시작 자세는 한 바퀴 전체를 감당할 수 있는 것으로 골라야 한다. 그 선정 알고리즘이
-§3 이고, 그래도 도중에 추적이 끊기면 **recovery 로직**(자동으로 되돌아가 자세를 다시
-고르는 복구 절차, §6)이 개입한다.
+시작 자세는 한 바퀴 전체를 감당할 수 있는 것으로 골라야 한다. 그 선정 알고리즘이 §3
+이고 sim·real 이 같은 코드를 쓴다. 그래도 도중에 추적이 끊기면 **recovery 로직**(자동으로
+되돌아가 자세를 다시 고르는 복구 절차, §6)이 개입한다.
 
 ---
 
@@ -98,16 +98,40 @@ standoff 후보에 near 쪽으로 치우친 값이 하나 들어 있는 이유�
 최악 프레임이 `FILL_MIN_CM2 = 6cm²` 에 못 미치면 계획을 그대로 반환하되
 `tracking_risk = True` 로 표시한다. 계획을 막지는 않고 경고만 남긴다.
 
-### 3.4 sim 과 real 의 현재 차이
+### 3.4 계획용 preview 를 모으는 방법
 
-| | 시작 자세를 어떻게 정하나 |
-|---|---|
-| **sim** | 위 채점기가 고른다. `_pick_phase1_planner` 가 el=30°(`MMS_SIM_PREVIEW_EL`)에서 preview 를 찍어 점군을 만든 뒤 `plan_phase1_viewpoints` 를 호출한다. |
-| **real** | **아직 home 자세로 그대로 출발한다**(2026-05-20 결정). 시작 시 probe 나 elevation 탐색을 하지 않고, 추적이 끊겼을 때만 recovery 로직(§6)이 자세를 다시 고른다. |
+채점기에 넣을 점군은 GT 없이 실제 캡처로 모은다(`collect_planning_points`). 로봇을 크게
+돌리지 않고 **턴테이블을 0°/90° 로 돌려 실루엣 두 방향**을 얻고, 90° 점군은 −θ 로
+역회전시켜 물체 프레임으로 통일한다.
 
-`plan_phase1_viewpoints` 는 입력이 점군과 캘리브 상수뿐이라 real 에 그대로 붙일 수 있게
-설계돼 있다. 남은 일은 home 정적 캡처(0°/90° 두 장)를 점군으로 넣는 것과 광축 규약을
-백엔드에서 맞추는 것뿐이며, **아직 실물에서 검증되지 않았다**(부록 T9).
+조준높이 `tz` 는 디스크 위 5cm 에서 시작해 "새 캡처가 상단을 더 못 늘리면 종료"라는 규칙으로
+올린다(최대 4회, +3cm). 물체 높이를 미리 알 필요가 없다. 각 높이에서 축거리를 0.30m 와
+0.38m 두 스텝으로 찍는데, 작동거리 창이 0.20~0.30m 이므로 이 두 스텝이면 표면 반경
+0~18cm 를 전부 커버한다. 어느 스텝에 잡히는지가 곧 반경 측정이다.
+
+캡처한 점군은 로봇 자기 점을 먼저 지우고(`filter_robot_points`) 기하 크롭한다. 링크나
+스캐너가 프레임에 걸리면 크롭 실린더를 오염시켜 밴드 수가 폭주한다(2026-07-08 세제
+13밴드 사건).
+
+### 3.5 sim 과 real
+
+**같은 코드다.** `collect_planning_points` → `plan_phase1_viewpoints` → `solve_plan_poses`
+세 함수를 두 백엔드가 그대로 부르고, 백엔드가 주입하는 것은 콜백 세 개뿐이다.
+
+| 콜백 | sim | real |
+|---|---|---|
+| preview 캡처 | Isaac 카메라 (`capture_points_base`) | Artec preview (`_capture_preview_verts`) |
+| 자세 IK | `_view_q` (USD 광축 규약) | `_axis_view_q` (OpenCV 광축 규약) |
+| 충돌 게이트 | `CollisionModel.is_pose_safe` | 같은 모듈, 같은 캐시 |
+
+작업 프레임만 다르다 — sim 은 world, real 은 base 다. 채점기는 프레임을 가리지 않으므로
+백엔드가 일관되게 넣기만 하면 된다.
+
+플래너가 실패하면(턴테이블 캘리브 없음·preview 점 부족·IK 전부 실패) real 은 조용히
+home 고정(`AT_CURRENT`)으로 되돌아간다. 즉 예전 동작이 폴백으로 남아 있다.
+`phase1_planner_enabled = False` 로 끄면 항상 home 에서 출발한다.
+
+**real 은 아직 실물에서 검증되지 않았다**(부록 T9).
 
 ---
 
@@ -357,8 +381,11 @@ recovery 로직의 재계획도 함께 본다. 결과는 stdout 표와
 env -u PYTHONPATH $MMS_PYTHON main_artec.py
 ```
 
+Phase 1 시작 자세는 §3 플래너가 고른다. 끄고 home 에서 출발시키려면
+`ArtecMultiPassScanSessionSettings(phase1_planner_enabled=False)` 로 준다.
+
 > **첫 Spider 실물 테스트는 반드시 `phase_mode = 1` 로 5면부터 확인한다.** Phase 2·3 은
-> 실물에서 아직 검증되지 않았다.
+> 실물에서 아직 검증되지 않았고, 자세 선정도 실물 검증 전이다(T9).
 
 ---
 
@@ -372,7 +399,12 @@ mms_artec/nbv/artec_streaming_scan_session.py   ★ 실물 streaming SLAM
     ArtecStreamingScanSession.run()     # → ArtecStreamingScanResult
 mms_artec/nbv/artec_multipass_scan_session.py   # Phase 1+2 오케스트레이션 + recovery 로직 + view-score
 mms_artec/nbv/live_scan_viewer.py               # SDK 정합행렬 누적 뷰어
-utils/nbv/phase1_viewpoint.py                   # ★ §3 maximin 채점 + §4 밴드 분할·순서 (sim/real 공용)
+utils/nbv/phase1_viewpoint.py                   ★ 자세 선정 전부 (sim·real 공용)
+    collect_planning_points()           # §3.4 preview 수집 루프 (백엔드 콜백 2개)
+    plan_phase1_viewpoints()            # §3 maximin 채점 + §4 밴드 분할·순서
+    solve_plan_poses()                  # 계획 자세 → az 스윕 IK + 충돌 게이트
+    crop_object_points / filter_robot_points   # 기하 크롭 · 로봇 자기점 제거
+utils/nbv/scan_phase_controller.py              # Phase 1→2→3 순서 (밴드 실패 허용)
 mms_artec/nbv/recovery_pose_selector.py         # 복구용 Spider 광학 상수, 자세 후보
 utils/turntable/turntable_interface.py          # 실물 턴테이블 (move_velocity/getActualPos, UDP)
 mms_artec/backends/isaac/isaac_turntable.py     # sim 턴테이블 (RevoluteJoint)
@@ -417,12 +449,17 @@ Phase 1 경계가 408mm → 227mm 로 줄었다.
 > 이것은 "도달 불가 판정이 나오면 평가기를 먼저 의심하라"의 네 번째 사례다.
 > **같은 판단을 하는 코드가 여러 곳에 있으면 게이트가 전부에 들어갔는지 grep 으로 확인한다.**
 
-### T5. 〔미해결〕 이동이 거부돼도 그 자리에서 프리뷰를 찍는다
+### T5. 이동이 거부돼도 그 자리에서 프리뷰를 찍었다 (수정됨)
 
-`isaac_scan_session.py` 의 `preview_at`(:988)과 `_pick_phase1_legacy`(:1080)가 `_drive()`
-반환값을 무시한다. 이동이 거부돼도 원래 자리에서 캡처하므로 프리뷰가 오염될 수 있고,
-그러면 밴드 계획 자체가 틀어진다. z_cover 경계 사례(0.67, 0.71)가 이 탓일 가능성이 있으나
-검증되지 않았다.
+계획용 `preview_at` 이 `_drive()` 반환값을 버려서, 충돌로 못 간 자세의 프리뷰를 **원래
+자리에서** 찍고 그걸 계획 입력으로 썼다. 지금은 이동이 거부되면 그 az 를 건너뛰고 다음
+az 를 시도한다.
+
+실측 효과(marble, 2026-09-09): 유효 캡처 2장 → 4장, 선택된 standoff 283mm → 313mm.
+계획이 실제로 오염되고 있었다는 뜻이다.
+
+`_pick_phase1_legacy` 도 `self._drive(chosen)` 반환값을 무시하지만, 실제 스캔 직전
+`_scan_pass` 가 같은 자세로 다시 이동하며 게이트를 걸므로 결과에는 영향이 없다.
 
 ### T6. 〔한계〕 복구용 view-score 는 θ 한 시점만 본다
 
@@ -444,8 +481,8 @@ warm-up 구간이 곧바로 lost 로 잡힌다.
 ### T8. 지켜야 할 규약 몇 가지
 
 - **연속 회전 + 최대 FPS.** 겹침이 생명이므로 각도를 띄엄띄엄 옮기지 않는다.
-- **시작 자세는 sim 과 real 이 다르다.** sim 은 §3 채점기가 고르고, real 은 아직 home 에서
-  출발한다. real 에서 시작 자세를 바꾸려면 §3.4 와 T9 를 먼저 읽는다.
+- **시작 자세는 sim·real 이 같은 코드로 고른다.** 한쪽만 고치면 갈라진다. 자세 선정을
+  손볼 때는 백엔드가 아니라 `utils/nbv/phase1_viewpoint.py` 를 고친다.
 - **라이브 뷰어 누적은 SDK 정합행렬만 쓴다.** θ·yaml·hand-eye 를 섞으면 뷰어가 SLAM 의
   거울이 아니게 되어 디버깅 가치가 사라진다.
 - **sim 에는 SLAM 이 없다.** GT θ 와 축으로 누적할 뿐이고, 실물은 그 위에 SLAM 만 얹는다.
@@ -453,17 +490,19 @@ warm-up 구간이 곧바로 lost 로 잡힌다.
 - **last-good θ** 는 `reg_err ≥ 0` 인 마지막 θ 이며 recovery 로직 safe-back 의 유일한 기준이다.
 - **턴테이블 정지는 stop_event 로 즉시** 이뤄져야 한다. 별도 thread 가 이를 감시한다.
 
-### T9. 〔미검증〕 real 의 시작 자세 선정이 아직 안 붙어 있다
+### T9. 〔미검증〕 real 의 자세 선정은 실물에서 아직 안 돌려봤다
 
-§3 의 `plan_phase1_viewpoints` 는 sim 에서만 돌고 있고, real 은 2026-05-20 결정에 따라
-home 자세로 그대로 출발한다. 채점기 자체는 입력이 점군과 캘리브 상수뿐인 공용 코어라
-백엔드 의존이 없지만, 실물에 붙이려면 두 가지가 남아 있다.
+코드는 붙어 있다(2026-09-09, sim 과 같은 공용 함수). 검증된 것은 sim 실행뿐이고 실물
+Spider·xArm 으로는 한 번도 돌리지 않았다. 첫 실물 시도 때 다음을 확인한다.
 
-1. **점군 공급** — sim 은 preview 로 점군을 만든다. real 은 home 에서 0°/90° 두 장을
-   정적 캡처해 넣는 방식으로 설계돼 있다(`simulate_planning_captures` 의 real 대응).
-2. **광축 규약** — 채점기는 USD look-at 규약(광축 −Z, up = world +Z)을 쓴다. real 백엔드에서
-   Artec 광축 규약으로 맞춰 줘야 한다.
+1. **`fill_target`(12cm²)과 `fill_min`(6cm²)은 sim 기준값이다.** 실물 SLAM 이 실제로
+   버티는 최소 가시면적에 맞춰 다시 잡아야 한다. 그대로 쓰면 `tracking_risk` 경고가
+   과다하거나 과소하게 뜬다.
+2. **계획용 preview 가 로봇을 여러 번 움직인다.** 축거리 2스텝 × 조준높이 최대 4단 ×
+   턴테이블 2방향이므로 최대 16회 이동이다. 이동마다 충돌 게이트를 통과하지만, 첫
+   실물 시도는 사람이 비상정지 옆에서 지켜볼 것.
+3. **턴테이블 캘리브(`T_BF0`)가 없으면 플래너가 그냥 포기하고 home 고정으로 간다.**
+   `[p1plan] turntable_transform/T_BF0 없음` 로그가 뜨면 캘리브부터 한다.
 
-`fill_target`(12cm²)과 `fill_min`(6cm²)은 sim 기준값이므로, 실물 SLAM 이 실제로 버티는
-최소 가시면적에 맞춰 다시 잡아야 한다. 이 값을 그대로 쓰면 real 에서 `tracking_risk`
-경고가 과다하거나 과소하게 뜬다.
+문제가 생기면 `phase1_planner_enabled = False` 로 끄고 예전 동작(home 고정)으로 돌아갈 수
+있다. Phase 1 자체는 그래도 돈다.
