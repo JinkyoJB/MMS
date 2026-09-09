@@ -1,26 +1,31 @@
 """
-extract_testset_points.py — testset 10종 점군 + 씬 상수 캐시 (Isaac headless 1회).
+extract_testset_points.py — testset 점군 + 씬 상수 캐시 (Isaac headless 1회).
 
-composed USD 9종(/World/ScanTarget/TestObject) + v2 marble 에서 물체 표면 점군
-(world, 면적비례 샘플 + 2mm voxel)을 npz 로, v2 에서 씬 상수(axis_w, disc_top,
-T_WB, T_EC)를 json 으로 저장. 이후 Phase1 viewpoint 검증은 Isaac 없이
-오프라인(numpy)으로 빠르게 반복한다.
+물체별 **v3 씬**(`v3_ts_*.usd`, prim=/World/ScanTarget/TestObject)에서 물체 표면
+점군(world, 면적비례 샘플 + 2mm voxel)을 npz 로, 기본 v3 씬(`v3_scene.usd`)에서
+씬 상수(axis_w, disc_top, T_WB, T_EC)를 json 으로 저장한다. 이후 Phase1 viewpoint
+검증은 Isaac 없이 오프라인(numpy)으로 빠르게 반복한다.
+
+★ 구 `testset/composed/*_on_turntable.usd` 는 **v2 레이아웃**이라 카메라·턴테이블
+  prim 경로가 달라 씬 상수가 어긋난다. v3 씬만 쓴다.
 
 실행:  ~/isaacsim/python.sh scripts/sim/extract_testset_points.py
 출력:  scripts/sim/log/testset_points/{name}.npz + scene.json + summary.txt
 (Kit 이 stdout 을 가릴 수 있어 summary.txt 로도 기록)
 """
 import os
+import sys
 import json
 import glob
 
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from mms_paths import ASSET_V2_DIR, V3_SCENE                    # noqa: E402
+
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "log", "testset_points")
-V2_USD = asset("frame_xarm7_spider_turntable/v2.usd")
-import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from mms_paths import asset, testset_dir
-
-COMPOSED_GLOB = os.path.join(testset_dir(), "composed", "*_on_turntable.usd")
+SCENE_USD = V3_SCENE                       # 씬 상수 기준 (기본 v3 씬)
+TS_GLOB = os.path.join(ASSET_V2_DIR, "v3_ts_*.usd")
 
 ROBOT_PRIM = "/World/xarm7"
 EE_PRIM = "/World/xarm7/link7"
@@ -29,7 +34,7 @@ from mms_artec.backends.isaac import isaac_world as _IW  # noqa: E402
 
 CAM_PRIM = _IW.CAMERA_PRIM            # 정본 참조
 TT_MESH = _IW.DISC_PRIM
-MARBLE_PRIM = _IW.OBJECT_PRIM
+MARBLE_PRIM = _IW.OBJECT_PRIM         # (구 v2 marble — 현재 job 목록엔 없음)
 TESTOBJ_PRIM = "/World/ScanTarget/TestObject"
 
 N_SAMPLE = 200_000        # 면적비례 표면 샘플 수 (voxel 전)
@@ -112,8 +117,8 @@ def main():
         _, idx = np.unique(keys, axis=0, return_index=True)
         return pts[np.sort(idx)]
 
-    # ── 씬 상수 (v2) ─────────────────────────────────────────────────────
-    st = Usd.Stage.Open(V2_USD)
+    # ── 씬 상수 (v3 기본 씬) ─────────────────────────────────────────────
+    st = Usd.Stage.Open(SCENE_USD)
     xc = UsdGeom.XformCache(Usd.TimeCode.Default())
     bc = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render"],
                            useExtentsHint=True)
@@ -130,9 +135,11 @@ def main():
     log(f"[scene] axis=({axis_w[0]:.4f},{axis_w[1]:.4f}) disc_top={axis_w[2]:.4f}")
 
     # ── 물체별 점군 ──────────────────────────────────────────────────────
-    jobs = [(os.path.basename(p).replace("_on_turntable.usd", ""), p,
-             TESTOBJ_PRIM) for p in sorted(glob.glob(COMPOSED_GLOB))]
-    jobs.append(("solid_marble", V2_USD, MARBLE_PRIM))
+    jobs = [(os.path.basename(p)[len("v3_ts_"):-len(".usd")], p, TESTOBJ_PRIM)
+            for p in sorted(glob.glob(TS_GLOB))]
+    if not jobs:
+        log(f"⚠ v3 씬이 없다: {TS_GLOB}")
+        log("  → build_scene_v3.py --out v3_ts_<이름>.usd --object <testset>/<이름>.usd")
 
     for name, usd, root in jobs:
         stg = Usd.Stage.Open(usd)

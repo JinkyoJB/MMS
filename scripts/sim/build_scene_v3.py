@@ -702,8 +702,16 @@ def main() -> None:
     shift_turntable(stage, args.turntable_dx)
 
     # (6) 스캔 대상
+    # ★ 참조는 **씬 파일 기준 상대경로**로 넣는다. 예전에는 abspath 를 박아서
+    #   다른 머신(또는 인수인계 폴더로 옮긴 뒤)에서 물체가 빈 채로 열렸다.
+    #   USD 는 상대 참조를 레이어 위치 기준으로 푼다 — 폴더 구조만 유지되면 된다.
     if args.object and args.object.lower() != "none":
-        add_scan_target(stage, os.path.abspath(args.object))
+        obj_abs = os.path.abspath(args.object)
+        try:
+            obj_ref = os.path.relpath(obj_abs, os.path.dirname(out_path))
+        except ValueError:                  # 다른 드라이브 등 — 상대화 불가
+            obj_ref = obj_abs
+        add_scan_target(stage, obj_ref)
 
     # (7) 환경 — 조명·바닥
     add_environment(stage, ground=not args.no_ground, lights=not args.no_lights)

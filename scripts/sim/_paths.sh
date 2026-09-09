@@ -18,9 +18,43 @@ mms_asset_root() {
   return 1
 }
 
-# testset USD 트리 (Isaac standalone 아래)
+# v3 씬 디렉터리 (v3_scene.usd + 물체별 v3_ts_*.usd)
+mms_v3_dir() {
+  local r; r=$(mms_asset_root) || return 1
+  echo "$r/frame_xarm7_spider_turntable_v2"
+}
+
+# 기본 씬 = v3_scene.usd
+mms_v3_scene() {
+  local d; d=$(mms_v3_dir) || return 1
+  echo "$d/v3_scene.usd"
+}
+
+# 물체별 v3 씬. 부분이름 매칭 (mms_v3_ts spray_can → v3_ts_0101_spray_can.usd)
+#
+# ★ 구 `testset/composed/*_on_turntable.usd` 는 **v2 레이아웃**이라 카메라·턴테이블
+#   prim 을 못 찾고 스캔 없이 30초 만에 끝난다(실측 2026-08-19). v3 씬만 쓸 것.
+#   없으면 만든다:
+#     build_scene_v3.py --out v3_ts_<이름>.usd --object "$(mms_testset_dir)/<이름>.usd"
+mms_v3_ts() {
+  local d hit; d=$(mms_v3_dir) || return 1
+  hit=$(ls "$d"/v3_ts_*"$1"*.usd 2>/dev/null | head -1)
+  [ -n "$hit" ] && { echo "$hit"; return 0; }
+  echo "✘ v3 씬을 못 찾음: $d/v3_ts_*$1*.usd" >&2
+  echo "  → build_scene_v3.py --out v3_ts_<이름>.usd --object <testset>/<이름>.usd" >&2
+  return 1
+}
+
+# 대상물 USD 트리 (v3 씬을 만들 때의 --object 원본)
 mms_testset_dir() {
-  echo "${MMS_TESTSET_DIR:-$HOME/isaacsim/standalone_examples/play/MMS/testset}"
+  local r d
+  if [ -n "${MMS_TESTSET_DIR:-}" ]; then echo "$MMS_TESTSET_DIR"; return 0; fi
+  r=$(mms_asset_root) || return 1
+  for d in "$(dirname "$r")/testset" "$r/testset" \
+           "$HOME/isaacsim/standalone_examples/play/MMS/testset"; do
+    [ -d "$d" ] && { echo "$d"; return 0; }
+  done
+  echo "$(dirname "$r")/testset"
 }
 
 # Isaac Sim 파이썬

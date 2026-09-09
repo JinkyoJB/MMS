@@ -29,7 +29,7 @@ source scripts/sim/_paths.sh && mms_asset_root          # 셸 쪽
 자산을 다른 곳에 두었다면:
 ```bash
 export MMS_ASSET_ROOT=/경로/2_3Dassets
-export MMS_TESTSET_DIR=/경로/testset      # testset USD 트리 (기본 ~/isaacsim/standalone_examples/play/MMS/testset)
+export MMS_TESTSET_DIR=/경로/testset      # 대상물 USD 트리 (기본: 자산 루트 옆 2_데이터/testset)
 export MMS_PYTHON=/경로/python            # Isaac 파이썬 (기본 ~/miniconda3/envs/env_isaacsim/bin/python)
 ```
 
@@ -170,16 +170,27 @@ MMS_SIM_OBJECT_PRIM=<prim>
 
 ### testset 순회 (v3)
 ```bash
-# 물체별 v3 씬 생성 (1회) — step2usd 환경
-env -u PYTHONPATH $U2 scripts/sim/build_scene_v3.py --dir $ASSET \
-    --out v3_ts_<이름>.usd --object ~/isaacsim/standalone_examples/play/MMS/testset/<이름>.usd
+source scripts/sim/_paths.sh
+mms_v3_scene            # 기본 씬 (v3_scene.usd)
+mms_v3_ts spray_can     # 물체별 씬 (부분이름 매칭)
+mms_testset_dir         # 대상물 USD 트리
 
+# 물체별 v3 씬 생성 (1회) — step2usd 환경
+env -u PYTHONPATH $U2 scripts/sim/build_scene_v3.py --dir "$(mms_v3_dir)" \
+    --out v3_ts_<이름>.usd --object "$(mms_testset_dir)/<이름>.usd"
+
+# Phase 1 만 가볍게 9종 순회
+scripts/sim/e2e_sweep.sh
 # 9종 전체 Phase 1→2→3 스윕 (물체당 ~5분, summary.tsv 생성)
 scripts/sim/testset_sweep.sh              # 전체
 scripts/sim/testset_sweep.sh 0146_mug     # 특정 물체만
 ```
-> 구 `e2e_sweep.sh`/`composed/*.usd` 는 **v2 레이아웃**이라 턴테이블 prim 을 못 찾고
-> 30초 만에 빈 결과로 끝난다(실측 2026-08-19). v3_ts_* 씬을 쓸 것.
+> 씬은 **v3 만** 쓴다. 구 `v2.usd` / `composed/*_on_turntable.usd` 는 카메라·턴테이블
+> prim 경로가 달라 스캔 없이 30초 만에 끝난다(실측 2026-08-19). 그 씬들을 만드는
+> `place_testset_object.py` 도 함께 사용 중단이다.
+>
+> 대상물 참조는 씬 파일 기준 **상대경로**로 들어간다(2026-09-09). 폴더 구조
+> (`2_3Dassets/...` ↔ `testset/`)만 유지하면 다른 머신에서도 열린다.
 
 ### GT 평가·렌더 (스윕 후)
 ```bash

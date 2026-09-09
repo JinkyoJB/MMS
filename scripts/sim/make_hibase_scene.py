@@ -1,14 +1,14 @@
 """
 make_hibase_scene.py — 로봇 베이스를 ΔH 올린 오버레이 씬 생성 (원본 비파괴).
 
-베이스 높이 조건부 실험용: 원본 씬(v2 또는 composed testset 씬)을 subLayer 로
+베이스 높이 조건부 실험용: 원본 씬(v3_scene.usd 또는 물체별 v3_ts_*.usd)을 subLayer 로
 깔고 /World/xarm7 의 translate z 만 +ΔH 오버라이드한 새 USD 를 만든다.
 real 도 동일 높이로 개조 예정 — sim 선행 검증 (2026-07-08, ΔH 스윕 참조).
 
 실행:
-  ~/isaacsim/python.sh scripts/sim/make_hibase_scene.py --dh-cm 10            # v2
+  ~/isaacsim/python.sh scripts/sim/make_hibase_scene.py --dh-cm 10   # 기본 v3 씬
   ~/isaacsim/python.sh scripts/sim/make_hibase_scene.py --dh-cm 15 \
-      --scene .../composed/0146_mug_on_turntable.usd
+      --scene .../frame_xarm7_spider_turntable_v2/v3_ts_0146_mug.usd
 출력: <씬폴더>/hibase/<씬이름>_dh<cm>.usd  (stdout 마지막 줄 = 경로)
 """
 import os
@@ -17,14 +17,15 @@ import argparse
 import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 from mms_paths import asset, testset_dir
 
-V2 = asset("frame_xarm7_spider_turntable/v2.usd")
+DEFAULT_SCENE = asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
 ROBOT = "/World/xarm7"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dh-cm", type=float, required=True, help="베이스 상승량 (cm)")
-    ap.add_argument("--scene", default=V2, help="원본 씬 (기본 v2.usd)")
+    ap.add_argument("--scene", default=DEFAULT_SCENE,
+                    help="원본 씬 (기본 v3_scene.usd)")
     args = ap.parse_args()
 
     scene = os.path.abspath(args.scene)

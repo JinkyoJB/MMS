@@ -6,7 +6,7 @@
 > 앞 단계는 `1_calibration.md`, 부족면 보강은 `3_phase2.md` 를 본다.
 >
 > **결과가 이상하면 맨 뒤 〔부록〕 Troubleshooting 을 먼저 본다.** 규약·함정·알려진
-> 미해결 문제를 T1~T9 로 모아두었다.
+> 미해결 문제를 T1~T10 으로 모아두었다.
 
 ---
 
@@ -324,16 +324,28 @@ sim 에는 Artec SLAM 이 없다. 대신 **턴테이블 θ(ground-truth)와 회�
 
 ```bash
 cd <MMS repo>
-./scripts/sim/run_e2e_gui.sh                        # marble, Phase 1, 플래너
-./scripts/sim/run_e2e_gui.sh spray_can              # testset 물체 (부분이름으로 매칭)
-./scripts/sim/run_e2e_gui.sh detergent 1 planner    # 밴드 분할이 걸리는 사례
-./scripts/sim/run_e2e_gui.sh marble 1 legacy        # 플래너 없이 A/B 비교
-./scripts/sim/run_e2e_gui.sh marble 2 planner 10    # 베이스 +10cm, Phase 1→2
+./scripts/sim/run_e2e_gui.sh                        # 기본 씬(v3_scene.usd), Phase 1
+./scripts/sim/run_e2e_gui.sh spray_can              # 물체별 v3 씬 (부분이름 매칭, 3밴드)
+./scripts/sim/run_e2e_gui.sh detergent 1 planner    # 밴드 분할이 걸리는 또 다른 사례
+./scripts/sim/run_e2e_gui.sh mug 1 legacy           # 플래너 없이 A/B 비교
+./scripts/sim/run_e2e_gui.sh mug 2 planner 10       # 베이스 +10cm, Phase 1→2
 ```
 
 인자는 `[물체] [phase_mode] [planner|legacy] [ΔH cm]` 순이다. `phase_mode` 는 누적
 실행이라 `1` = 5면, `2` = +NBV 보강, `3` = +바닥면 flip 을 뜻한다. `ΔH > 0` 이면
-`hibase/*_dh<cm>.usd` 오버레이 씬을 한 번 생성해 캐시하며, 원본 `v2.usd` 는 건드리지 않는다.
+`hibase/*_dh<cm>.usd` 오버레이 씬을 한 번 생성해 캐시하며 원본 씬은 건드리지 않는다.
+
+**씬은 v3 만 쓴다.** 기본 씬은 `2_3Dassets/frame_xarm7_spider_turntable_v2/v3_scene.usd`
+이고 물체별 씬은 같은 폴더의 `v3_ts_<이름>.usd` 다. 새 물체를 추가하려면 대상물 USD 를
+`2_데이터/testset/` 에 넣고 씬을 한 번 만든다.
+
+```bash
+env -u PYTHONPATH $MMS_PYTHON scripts/sim/build_scene_v3.py \
+    --out v3_ts_<이름>.usd --object "$(mms_testset_dir)/<이름>.usd"
+```
+
+> 구 `testset/composed/*_on_turntable.usd` 는 **v2 레이아웃**이라 카메라·턴테이블
+> prim 을 못 찾고 스캔 없이 30초 만에 끝난다(실측 2026-08-19). 부록 T10 을 본다.
 
 주요 환경변수는 다음과 같다.
 
@@ -360,7 +372,7 @@ env -u PYTHONPATH \
 ### sim — 밴드 계획만 오프라인 검증 (Isaac 불필요)
 
 ```bash
-# 1) testset 점군 캐시 (최초 1회)
+# 1) v3 씬에서 점군 캐시 (최초 1회)
 ~/isaacsim/python.sh scripts/sim/extract_testset_points.py
 # 2) 자세 선정·밴드 분할 검증
 $MMS_PYTHON scripts/sim/validate_phase1_viewpoint.py
@@ -506,3 +518,23 @@ Spider·xArm 으로는 한 번도 돌리지 않았다. 첫 실물 시도 때 다
 
 문제가 생기면 `phase1_planner_enabled = False` 로 끄고 예전 동작(home 고정)으로 돌아갈 수
 있다. Phase 1 자체는 그래도 돈다.
+
+### T10. 스캔이 30초 만에 빈 결과로 끝난다 — 구 v2 씬을 쓴 것이다
+
+로그에 `camera prim not found` / `turntable prim not found` 가 뜨고 스캔 없이 종료되면
+씬이 v2 레이아웃이다. 2026-08-11 하드웨어 교체로 씬이 v3 로 넘어가면서 카메라와
+턴테이블 prim 경로가 바뀌었는데, 구 씬은 그 경로를 갖고 있지 않다.
+
+쓰면 안 되는 것 — `frame_xarm7_spider_turntable/v2.usd`,
+`testset/composed/*_on_turntable.usd`, 그리고 이것들을 만드는 `place_testset_object.py`.
+
+써야 하는 것 — `frame_xarm7_spider_turntable_v2/v3_scene.usd`(기본)와
+`v3_ts_<이름>.usd`(물체별). 경로 해석은 `mms_paths.scene_for()` 또는 셸의
+`mms_v3_scene` / `mms_v3_ts` 가 해 준다.
+
+씬이 열리는데 **물체만 안 보인다면** 대상물 참조가 깨진 것이다. 2026-08-19 생성분은
+대상물을 `/home/keti/isaacsim/...` 절대경로로 참조해서 다른 머신에서는 빈 턴테이블만
+나왔다. 2026-09-09 에 `build_scene_v3.py` 가 **씬 파일 기준 상대경로**
+(`../../testset/<이름>`)로 넣도록 고치고 10개 씬을 전부 다시 만들었으므로, 인수인계 폴더
+구조(`2_데이터/2_3Dassets/...` ↔ `2_데이터/testset/`)만 유지하면 어느 머신에서도 열린다.
+구 절대참조본은 `_bak_absref_20260909/` 에 남겨 두었다.

@@ -1,6 +1,14 @@
 """
 place_testset_object.py — testset USD 를 턴테이블 위에 올려 배치/미리보기.
 
+⚠ **구 v2 전용 (사용 중단).** 이 스크립트가 만드는 `composed/*_on_turntable.usd`
+  는 v2 레이아웃이라 v3 파이프라인에서 카메라·턴테이블 prim 을 못 찾고 스캔 없이
+  30초 만에 끝난다(실측 2026-08-19). v3 씬은 build_scene_v3.py 로 만든다:
+
+      build_scene_v3.py --out v3_ts_<이름>.usd --object <testset>/<이름>.usd
+
+  아래 설명은 v2 시절 기록으로 남긴다.
+
 목적
 ----
 `play/MMS/testset/*.usd` 의 다양한 사물을 베이스 씬(v2.usd: xArm+턴테이블) 의

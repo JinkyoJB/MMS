@@ -176,8 +176,10 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
     (NVIDIA 번들 런처 `~/isaacsim/python.sh` 도 동작 — 별도 설치본이라 conda deactivate 필요)
   - ⚠ 셸에 ROS `PYTHONPATH` 가 잡혀 있으면 python3.10 패키지가 섞인다 → `env -u PYTHONPATH` 필수.
 - sim 씬(USD): `mms_artec/backends/isaac/isaac_world.py::DEFAULT_USD_PATH`
-  (`2_3Dassets/frame_xarm7_spider_turntable/v2.usd` = xArm+턴테이블+마블).
-  환경변수 `MMS_SIM_USD` 로 override — testset 물체 씬은 `MMS_SIM_OBJECT_PRIM` 도 같이 준다.
+  (`2_3Dassets/frame_xarm7_spider_turntable_v2/v3_scene.usd` = xArm+턴테이블+대상물).
+  물체별 씬은 같은 폴더의 `v3_ts_<이름>.usd`, 생성은 `scripts/sim/build_scene_v3.py`.
+  환경변수 `MMS_SIM_USD` 로 override — 물체 씬은 `MMS_SIM_OBJECT_PRIM` 도 같이 준다.
+  ⚠ 구 `v2.usd` / `testset/composed/*.usd` 는 카메라·턴테이블 prim 경로가 달라 못 쓴다.
 - 백엔드 상세: `mms_artec/backends/README.md`
 
 ---

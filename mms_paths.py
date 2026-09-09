@@ -72,22 +72,61 @@ def asset(*parts: str) -> str:
     return str(asset_root().joinpath(*parts))
 
 
+#: testset(스캔 대상물) USD 후보 — 자산 루트 옆 → 구 Isaac standalone 트리
+_TESTSET_CANDIDATES = (
+    lambda: asset_root().parent / "testset",       # 인수인계 배치 (2_데이터/testset)
+    lambda: asset_root() / "testset",              # 자산 루트 안에 둔 경우
+    lambda: Path(os.path.expanduser(
+        "~/isaacsim/standalone_examples/play/MMS/testset")),   # 구 개발 배치
+)
+
+
 def testset_dir() -> str:
-    """testset USD 트리 (Isaac standalone 아래). ``MMS_TESTSET_DIR`` 로 override."""
-    return os.environ.get(
-        "MMS_TESTSET_DIR",
-        os.path.expanduser("~/isaacsim/standalone_examples/play/MMS/testset"),
-    )
+    """대상물 USD 트리. ``MMS_TESTSET_DIR`` 로 override."""
+    env = os.environ.get("MMS_TESTSET_DIR")
+    if env:
+        return str(Path(env).expanduser())
+    for cand in _TESTSET_CANDIDATES:
+        d = cand()
+        if d.is_dir():
+            return str(d)
+    return str(_TESTSET_CANDIDATES[0]())
+
+
+def scene_for(obj: str | None = None) -> str:
+    """씬 USD 경로. obj=None 이면 기본 씬(v3_scene.usd), 이름을 주면 그 물체의
+    v3 씬(v3_ts_<이름>.usd)을 돌려준다.
+
+    ★ 구 ``testset/composed/*_on_turntable.usd`` 는 **v2 레이아웃**이라 카메라·
+      턴테이블 prim 을 못 찾고 스캔 없이 30초 만에 끝난다(실측 2026-08-19).
+      v3 씬만 쓸 것. 없으면 build_scene_v3.py 로 만든다:
+          build_scene_v3.py --out v3_ts_<이름>.usd --object <testset>/<이름>.usd
+    """
+    if not obj:
+        return V3_SCENE
+    stem = obj[len("v3_ts_"):] if obj.startswith("v3_ts_") else obj
+    stem = stem[:-len(".usd")] if stem.endswith(".usd") else stem
+    d = Path(ASSET_V2_DIR)
+    exact = d / f"v3_ts_{stem}.usd"
+    if exact.is_file():
+        return str(exact)
+    hits = sorted(d.glob(f"v3_ts_*{stem}*.usd"))      # 부분이름 매칭
+    return str(hits[0]) if hits else str(exact)
 
 
 #: 자주 쓰는 씬
 V3_SCENE = asset("frame_xarm7_spider_turntable_v2", "v3_scene.usd")
-V2_USD = asset("frame_xarm7_spider_turntable", "v2.usd")
 ASSET_V2_DIR = asset("frame_xarm7_spider_turntable_v2")
+#: 구 레이아웃 (v3 이전). 남겨두지만 새 코드에서 쓰지 말 것 — v3 와 카메라·
+#: 턴테이블 prim 경로가 다르다.
+V2_USD = asset("frame_xarm7_spider_turntable", "v2.usd")
 
 
 if __name__ == "__main__":
     print(f"asset_root   = {asset_root()}")
     print(f"V3_SCENE     = {V3_SCENE}   (exists={Path(V3_SCENE).exists()})")
-    print(f"V2_USD       = {V2_USD}   (exists={Path(V2_USD).exists()})")
     print(f"testset_dir  = {testset_dir()}")
+    for n in ("0146_mug", "spray_can"):
+        sc = scene_for(n)
+        print(f"scene_for({n:<12}) = {sc}   (exists={Path(sc).exists()})")
+    print(f"V2_USD(구)   = {V2_USD}   (exists={Path(V2_USD).exists()})")
