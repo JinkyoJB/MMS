@@ -306,6 +306,15 @@ class ArtecMultiPassScanSessionSettings:
     # relocalization: True 면 캡처가 기존 master 에 재고정 시도(§3.4.1). 미구현 경로는
     # camera-motion T_pre fallback(R3)로 자동 대체. 실기 검증 후 R1/R2 배선(§6.5).
     nbv_use_relocalization: bool = True
+    # gap 직접 겨냥(plan_frontier) — 로봇이 편한 방위. 턴테이블이 gap 을 여기로 가져온다.
+    # 넓히면 겨냥 성공률은 오르지만 팔이 물체를 감싸 충돌 위험이 커진다(docs/4_collision §5).
+    nbv_frontier_az_pref_deg: tuple = (0.0, 30.0, -30.0)
+    nbv_frontier_enabled: bool = True        # False = 축-고도각만 (2026-09-10 이전 동작)
+    # gap 과 무관하게 최소 한 번은 시도할 관측 고도각. 오목 물체 내부는 미관측이라
+    # 메시에 없고 → 경계(gap)로도 안 잡혀 el_need 가 올라갈 근거가 없다(닭·달걀).
+    # 실측(sim): el 55° 한 자세 + 전회전으로 컵 내벽·내부바닥 100% 커버.
+    nbv_ensure_els_deg: tuple = (55.0,)
+    nbv_view_azis_deg: tuple = (0.0, 30.0, -30.0)   # 축-고도각 방위 후보
 
     def __post_init__(self):
         if self.streaming_settings is None:
@@ -2132,6 +2141,8 @@ class ArtecMultiPassScanSession:
             # visited 를 pass 사이에 유지해야 하므로 세션에 1회만 만든다.
             self._nbv = NbvPlanner(joint_weights=DEFAULT_JOINT_WEIGHTS,
                                    el_floor_deg=self.s.nbv_el_floor_deg,
+                                   view_azis_deg=tuple(self.s.nbv_view_azis_deg),
+                                   ensure_els=tuple(self.s.nbv_ensure_els_deg),
                                    log=lambda m: print(f"  [nbv] {m}"))
 
         def solve_pose(el, az, rolls):
@@ -2150,6 +2161,49 @@ class ArtecMultiPassScanSession:
                 world, q0, q1, T_EC=self._T_EC, n_steps=self.s.nbv_swept_steps)
             return (not col), (why or "")
 
+        # ── ① 보장 고도각 — 오목 내부는 미관측이라 gap 으로 안 잡힌다(닭·달걀).
+        #    아직 안 가본 ensure_el 이 있으면 그 축-고도각 자세를 먼저 쓴다.
+        need = [e for e in self._nbv.ensure_els
+                if not any(abs(float(v[0]) - float(e)) < 1e-6
+                           for v in self._nbv.visited)]
+        if need:
+            res0 = self._nbv.plan(gaps, q_cur, solve_pose, swept)
+            if res0 is not None:
+                self._next_theta = None            # 전회전 (기존 동작)
+                return res0[0]
+
+        # ── ② gap 직접 겨냥 (주경로) ────────────────────────────────────
+        #    축-고도각은 카메라가 늘 턴테이블 축을 봐서 gap 위치를 통째로 버린다
+        #    (gap 정보가 '법선 고도각 중앙값' 하나로 압축). 손잡이·컵 내벽 같은
+        #    국소 결손은 원리적으로 못 겨냥한다 → 표면점 p 를 정면으로 본다.
+        #    2026-09-10: sim 에만 있던 경로를 real 에 배선. 규약만 OpenCV 로 바뀐다.
+        from utils.robot import view_pose as _vp
+        from utils.robot import xarm7_kinematics as _kin
+
+        def solve_lookat(eye, tgt):
+            return _vp.solve_look_at_q(
+                _kin, eye, tgt, q_cur, self._T_EC,
+                T_WB=None,                          # look_target 이 이미 base 프레임
+                convention=_vp.CAM_OPENCV,
+                rolls_deg=(getattr(self.s, "view_rolls_deg", None)
+                           or _vp.DEFAULT_ROLLS_DEG))
+
+        fr = None
+        if self.s.nbv_frontier_enabled:
+            fr = self._nbv.plan_frontier(
+                gaps, q_cur, solve_lookat, swept,
+                standoff_m=self.s.nbv_distance_mm / 1000.0,
+                axis_xy=T_BF0[:2, 3],
+                az_pref_deg=tuple(self.s.nbv_frontier_az_pref_deg))
+        if fr is not None:
+            # 턴테이블을 이 θ 로 보내면 gap 이 로봇 편한 방위에 온다.
+            # 캡처는 아직 전회전이라(§docs 3_phase2 T6) 시작각으로만 쓴다 —
+            # 회전 시작 시점에 gap 이 정면이라 추적이 가장 안정적일 때 찍힌다.
+            self._next_theta = float(fr[3])
+            return fr[0]
+
+        # ── ③ 폴백: 축-고도각 (턴테이블 회전과 궁합이 좋은 광역 스윕) ─────
+        self._next_theta = None
         res = self._nbv.plan(gaps, q_cur, solve_pose, swept)
         return None if res is None else res[0]
 
@@ -2250,6 +2304,25 @@ class ArtecMultiPassScanSession:
         T_EB_after = self.robot.get_ee_pose_mat()
         T_BC_nbv = self._T_EC @ np.linalg.inv(T_EB_after)
         T_pre = self._T_BC @ np.linalg.inv(T_BC_nbv)       # camera-motion (case ③)
+
+        # gap 겨냥 자세면 계획된 θ 로 턴테이블을 먼저 보낸다. 그 각에서 gap 이
+        # 로봇 정면에 오도록 자세를 푼 것이므로, 회전을 그 지점에서 시작해야
+        # 추적이 가장 안정적인 초반에 목표 gap 이 찍힌다.
+        th = getattr(self, "_next_theta", None)
+        if th is not None:
+            try:
+                self.turntable.stop()
+                self.turntable.check_drive_err()
+                self.turntable.set_servo_on(True)
+                self.turntable.move_abs(
+                    float(th), float(self.s.probe_turntable_vel_rad_s))
+                if hasattr(self.turntable, "wait_motion_done"):
+                    self.turntable.wait_motion_done(timeout_s=20.0)
+                print(f"  [nbv] gap 겨냥 θ={np.degrees(th) % 360:.0f}° 로 이동")
+            except Exception as e:                          # noqa: BLE001
+                print(f"  [nbv] ⚠ θ 이동 실패({type(e).__name__}: {e}) — 현재 각에서 진행")
+            finally:
+                self._next_theta = None
 
         st = self.s.streaming_settings
         orig_reset = st.reset_to_zero_first
