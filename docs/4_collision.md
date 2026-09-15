@@ -434,10 +434,47 @@ Phase 2 후보 필터의 캡슐 world 는 과대평가(안전 방향)라 그대�
 3. `/tmp/runguard.sh <RSS_GB> <명령…>` — 초과 시 프로세스만 죽인다.
    `ulimit -v` 는 CUDA 가상주소 예약을 깨뜨리므로 **Isaac 에 쓰지 말 것**
 
-### T7. 〔미완〕 `hardware_layer` 도달성 확인만 SDK IK 다
-`utils/control/hardware_layer.py:303` 이 아직 `arm.get_inverse_kinematics` 를 부른다.
-계획 경로가 아니라 확인용이라 위험도는 낮지만, **같은 질문에 두 솔버가 다른 답을 낼 수
-있으므로** `kin.ik` 로 통일하는 게 맞다.
+### T7. ⚠ IK 를 "통일"해도 두 솔버는 여전히 다른 자세를 낸다
+
+2026-06 에 **계획 경로**는 해석 IK 로 통일했고 그건 지금도 유지된다
+(`ik_provider.py`, `xarm_interface.py`, `artec_multipass_scan_session.py:2069`).
+그런데 **통일의 범위와 한계**를 둘 다 오해하기 쉽다.
+
+**① 범위 — 캘리브 스크립트는 통일 대상이 아니었다.** 아직 SDK IK 를 부르는 곳:
+
+```
+scripts/artec/hand_eye_calib.py:210      scripts/phoxi/hand_eye_calib.py:177
+scripts/artec/intrinsic_calib.py:157     scripts/phoxi/make_poses.py:171
+utils/control/hardware_layer.py:303      utils/control/theta_planner.py:126
+```
+
+**② 한계 — FK 를 맞춰도 IK 는 안 맞는다.** 이게 더 중요하다.
+7축은 **같은 TCP 를 만드는 팔 형상이 무한히 많다**(여유자유도). 두 솔버가 서로 다른
+팔꿈치·손목 분기를 고르면 손끝은 같아도 **팔은 전혀 다른 곳을 지난다.**
+
+2026-09-15 실측 — FK 재교정(1mm/0.18°) **이후**에도:
+
+| | Δq 최대 | 해석 FK 오차 | 컨트롤러 FK 오차 | 같은 TCP? |
+|---|---|---|---|---|
+| hemi_00 | **207°** | 1.61mm | 0.00mm | **예** |
+| hemi_02 | **251°** | 1.61mm | 0.00mm | **예** |
+| hemi_04 | **140°** | 1.53mm | 0.00mm | **예** |
+
+**사고** — 캘리브 자세를 `ee_pose` 로 저장했더니 `hand_eye_calib` 이 그걸
+컨트롤러 IK 로 **다시 풀어서** 갔다. 해석 IK q 로 통과시킨 충돌 검사가 무의미해졌고,
+첫 자세 이동에서 턴테이블과 충돌 직전까지 갔다(비상정지). 8개 중 3개가 위험했다 —
+1개는 자세 자체가 거부 대상, 2개는 경로 중간에 `mid(link6)`.
+
+**해법은 "IK 를 통일"이 아니라 "IK 를 다시 풀지 않는 것"이다.**
+검증한 **관절각을 그대로 저장하고 그대로 실행**하면 시드·솔버에 의존하지 않는다
+(`gen_calib_poses.py` → yaml `joints` 키 → `set_servo_angle`).
+
+> 같이 드러난 것 — `is_pose_safe` 만으로는 부족하다. 자세는 안전한데 **가는 길**이
+> 막힌 경우가 있다. 자세마다 home 을 경유한다면 `is_path_safe(HOME, q)` 를 봐야 한다.
+>
+> 그리고 `kin.ik` 는 해를 관절 한계로 **clip 한 뒤에도 ok=True 를 돌려준다.**
+> 한계에 정확히 얹힌 자세가 통과하므로(실측 16개 중 4개가 여유 0.00°) 호출부가
+> 여유를 따로 확인해야 한다 — 컨트롤러가 `set_servo_angle code 10` 으로 거부한다.
 
 ### T8. 검증할 때 지킬 것
 - 대조군을 두고 **A/B** 로 본다(env 스위치). "고쳤더니 좋아졌다"를 한 번의 실행으로

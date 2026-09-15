@@ -38,6 +38,7 @@ sys.path.insert(0, str(_ROOT))
 
 from mms_artec.utils.calibration.handeye_geometry import generate_hemisphere_poses
 from utils.collision import collision_model as cmod
+from utils.robot import view_pose as vp
 from utils.robot import xarm7_kinematics as kin
 from utils.transforms import load_transform
 
@@ -160,6 +161,10 @@ def main() -> int:
     ap.add_argument("--hint-xy", nargs=2, type=float, metavar=("X", "Y"),
                     help="원판 탐색 힌트 (base, m)")
     ap.add_argument("--standoff", type=float, default=STANDOFF_M)
+    ap.add_argument("--max-poses", type=int, default=20,
+                    help="최대 자세 수 (넘으면 고르게 솎는다)")
+    ap.add_argument("--min-joint-margin", type=float, default=5.0,
+                    help="관절 한계까지 최소 여유 (deg). 한계에 붙은 해를 버린다")
     ap.add_argument("--write", action="store_true", help="yaml 저장 (없으면 미리보기)")
     ap.add_argument("--out", default=str(OUT_YAML))
     args = ap.parse_args()
@@ -180,40 +185,78 @@ def main() -> int:
         print(f"[gen] 셀 모델 기준 {np.round(center,3).tolist()}")
     print(f"[gen] 법선 {np.round(normal,3).tolist()}   standoff {args.standoff:.3f}m")
 
-    poses_T = generate_hemisphere_poses(
-        center, normal, T_EC,
-        distance_m=args.standoff, polars_deg=list(POLARS_DEG),
-        azis_deg=list(AZIS_DEG), rolls_deg=list(ROLLS_DEG),
-        dist_jitter=list(DIST_JITTER))
+    # ★ 규약 변환이 반드시 필요하다. `generate_hemisphere_poses` 는 내부에서
+    #   `look_at_camera`(**USD 규약**: 광축 = 카메라 −Z)로 카메라를 세운 뒤 T_EC 를
+    #   곱한다. 그런데 `T_EC_artec` 는 hand-eye 와 짝인 **OpenCV 규약**(광축 = +Z)이다.
+    #   그대로 넣으면 실제 카메라가 타깃을 **정확히 180° 등지고** 선다(실측 확인).
+    #   sim 은 T_EC_gt 가 USD 규약이라 이 문제가 없었다 — real 로 올리며 드러난 것.
+    #   두 규약 차이는 카메라 로컬 Y축 180° 회전 하나뿐이다(`4_collision.md` §3).
+    T_EC_usd = vp.FLIP_USD_TO_CV @ T_EC
+    # `generate_hemisphere_poses` 는 roll·거리를 `k % len` 으로 **순환**시킨다 —
+    # (polar, az) 하나당 roll 이 하나뿐이다. 게이트에서 절반 넘게 걸러지면 남는 게
+    # 12개 미만이 되므로(실측 25→11), roll·거리마다 따로 불러 후보를 곱한다.
+    # roll 다양성은 AX=ZB 가 잘 풀리는 데 그 자체로 도움이 된다.
+    poses_T = []
+    for roll in ROLLS_DEG:
+        for dj in DIST_JITTER:
+            poses_T += generate_hemisphere_poses(
+                center, normal, T_EC_usd,
+                distance_m=args.standoff, polars_deg=list(POLARS_DEG),
+                azis_deg=list(AZIS_DEG), rolls_deg=[roll], dist_jitter=[dj])
     print(f"[gen] 후보 {len(poses_T)}개 생성 — IK·충돌 게이트로 거른다")
 
     cm = cmod.get_default()
     if cm is None:
         print("  ⚠ 충돌 모델 없음 — IK 만으로 거른다")
 
-    seed = np.radians([0.0, -18.4, 0.0, 70.6, 0.0, 60.0, -45.0])   # artec home
-    kept, n_ik, n_col = [], 0, 0
+    HOME = np.radians([0.0, -18.4, 0.0, 70.6, 0.0, 60.0, -45.0])   # artec home
+    kept, n_ik, n_col, n_path, n_lim = [], 0, 0, 0, 0
     for i, T in enumerate(poses_T):
         p6 = np.concatenate([T[:3, 3] * 1000.0, kin.R_to_euler_xyz(T[:3, :3])])
-        q, ok = kin.ik(p6, seed=seed)
+        q, ok = kin.ik(p6, seed=HOME)
         if not ok:
             n_ik += 1
             continue
+        q = np.asarray(q, float)
+        # ★ 관절 한계에 **붙은** 해를 버린다. `kin.ik` 는 해를 JOINT_LOWER/UPPER 로
+        #   clip 한 뒤에도 ok=True 를 돌려주므로, 한계에 정확히 얹힌 자세가 통과한다
+        #   (실측: 16개 중 4개가 여유 0.00°). 그런 자세는 컨트롤러가 거부하거나
+        #   (`set_servo_angle` code 10) 서보가 안착할 여유가 없다.
+        margin = float(np.minimum(q - kin.JOINT_LOWER, kin.JOINT_UPPER - q).min())
+        if margin < np.radians(args.min_joint_margin):
+            n_lim += 1
+            continue
         if cm is not None:
-            safe, _why = cm.is_pose_safe(np.asarray(q, float))
+            safe, _why = cm.is_pose_safe(q)
             if not safe:
                 n_col += 1
                 continue
+            # ★ 자세만 안전해도 **가는 길**에서 부딪힌다. hand_eye_calib 은 자세마다
+            #   home 을 경유하므로(via_home) home→자세 구간을 검사해야 한다.
+            #   2026-09-15 실물에서 이 검사가 없어 첫 자세 이동 중 턴테이블과
+            #   충돌 직전까지 갔다(비상정지). hemi_02·hemi_05 는 mid(link6) 로 걸린다.
+            okp, _whyp, _n = cm.is_path_safe(HOME, q)
+            if not okp:
+                n_path += 1
+                continue
         kept.append((f"hemi_{len(kept):02d}",
                      [round(float(v), 2) for v in
-                      np.concatenate([p6[:3], np.degrees(p6[3:6])])]))
+                      np.concatenate([p6[:3], np.degrees(p6[3:6])])],
+                     [round(float(v), 4) for v in np.degrees(q)]))
 
-    print(f"[gen] 유효 {len(kept)}개  (IK 실패 {n_ik} · 충돌 {n_col})")
+    print(f"[gen] 유효 {len(kept)}개  "
+          f"(IK 실패 {n_ik} · 관절한계 {n_lim} · 자세충돌 {n_col} · 경로충돌 {n_path})")
+    # 너무 많으면 고르게 솎는다 — 한 방향에 몰리지 않게 순서대로 건너뛴다.
+    if len(kept) > args.max_poses:
+        step = len(kept) / args.max_poses
+        kept = [kept[int(i * step)] for i in range(args.max_poses)]
+        kept = [(f"hemi_{i:02d}", ee, q) for i, (_n, ee, q) in enumerate(kept)]
+        print(f"[gen] {args.max_poses}개로 솎음")
     if len(kept) < 12:
         print("  ⚠ 12개 미만 — hand-eye 가 잘 안 풀린다. standoff·기준점을 바꿔 볼 것")
 
-    for name, ee in kept:
-        print(f"    {name}  {ee}")
+    for name, ee, q in kept:
+        print(f"    {name}  ee={ee}")
 
     if not args.write:
         print("\n[gen] 미리보기만 했다. 저장하려면 --write")
@@ -227,8 +270,14 @@ def main() -> int:
         bak = out.with_suffix(".yaml.bak")
         bak.write_text(out.read_text(encoding="utf-8"), encoding="utf-8")
         print(f"[gen] 기존 파일 백업 → {bak.name}")
+    # ★ **joints 를 쓴다.** ee_pose 만 쓰면 hand_eye_calib 이 그걸
+    #   `arm.get_inverse_kinematics`(**컨트롤러 IK**)로 다시 풀어서 간다. 7축이라
+    #   같은 TCP 에 해가 무한히 많고, 실측에서 해석 IK 와 **118~263° 다른 자세**가
+    #   나왔다 — 즉 여기서 검증한 자세와 로봇이 실제로 가는 자세가 달랐다.
+    #   joints 키가 있으면 `_run_scripted` 가 그대로 set_servo_angle 한다.
+    #   ee_pose 는 참고용으로 같이 남긴다(사람이 읽기 위해).
     out.write_text(yaml.dump(
-        {"poses": [{"name": n, "ee_pose": ee} for n, ee in kept]},
+        {"poses": [{"name": n, "joints": q, "ee_pose": ee} for n, ee, q in kept]},
         default_flow_style=None, allow_unicode=True), encoding="utf-8")
     print(f"[gen] 저장: {out}  ({len(kept)} 자세)")
     return 0
