@@ -125,25 +125,56 @@ def find_disc(npz: Path, hint_xy=None, band=(0.55, 1.05)):
 
 
 def board_from_view(T_EC):
-    """지금 로봇이 보고 있는 ChArUco 를 검출해 보드 중심·법선(base) 추정. 폴백 경로."""
+    """지금 로봇이 보고 있는 ChArUco 를 검출해 **보드 중심·법선(base)** 을 돌려준다.
+
+    셀 모델의 원판 중심을 겨누면 보드가 거기 없을 수 있다 — 보드를 원판 한복판에
+    정확히 놓지 않았거나, 구 `T_EC` 의 회전 오차(5°면 250mm 에서 22mm)가 얹히면
+    Spider 의 좁은 FOV(0.25m 에서 134×100mm) 밖으로 보드가 잘려 나간다.
+    2026-09-15 실측: 20자세 중 18자세가 `charuco 부족` 으로 버려졌고, 거리는
+    평균 262mm 로 정상이었다 — 즉 **거리가 아니라 조준**의 문제였다.
+
+    ★ 여기서 추정한 중심을 **같은 T_EC 로** 다시 겨누므로, T_EC 의 계통 오차는
+      1차적으로 상쇄된다. T_EC 가 낡아도 이 경로가 동작하는 이유다.
+
+    호출 전에 보드가 화면 **중앙에** 오도록 로봇을 맞춰 둘 것.
+    """
+    import cv2
     from mms_artec.sensor.artec_client import ArtecClient, ArtecConfig
-    from utils.calibration.artec_charuco_detector import ArtecCharucoDetector
+    from mms_artec.utils.calibration.artec_charuco_detector import (
+        ArtecCharucoDetector, CharucoBoardSpec)
     from utils.robot.xarm_interface import XArmInterface
     from utils.transforms import compute_T_CB
 
-    robot = XArmInterface("192.168.1.210")
+    intr_path = _ROOT / "config" / "calibration" / "artec_intrinsic.yaml"
+    intrinsic = None
+    if intr_path.exists():
+        d = yaml.safe_load(intr_path.read_text(encoding="utf-8")) or {}
+        intrinsic = {"K": d["K"], "dist": d.get("dist", [0] * 5),
+                     "image_size": d.get("image_size")}
+    spec = CharucoBoardSpec(5, 3, 20.0, 15.0, cv2.aruco.DICT_4X4_50)   # spider 프리셋
+    detector = ArtecCharucoDetector(spec, intrinsic=intrinsic)
+
+    robot = XArmInterface(ip="192.168.1.210")
     sensor = ArtecClient(ArtecConfig(serial_number=None, capture_texture=True))
     try:
         sensor.initialize()
         T_EB = robot.get_ee_pose_mat()
-        det = ArtecCharucoDetector()
-        T_MC = det.detect_board_pose(sensor)          # mm, C frame
-        if T_MC is None:
-            raise RuntimeError("ChArUco 미검출 — 보드가 보이게 조준할 것")
+        fmh = sensor.capture_frame(capture_texture=True)
+        if fmh is None or not fmh.has_image() or not fmh.is_textured():
+            raise RuntimeError("텍스처 캡처 실패")
+        det = detector.detect(fmh.image(), fmh.vertices(), fmh.uv())
+        if det is None:
+            raise RuntimeError("ChArUco 미검출 — 보드가 화면 중앙에 오도록 조준할 것")
+        print(f"  [from-view] corners={det.n_corners}  "
+              f"t_MC=({det.T_MC[0,3]:.0f},{det.T_MC[1,3]:.0f},{det.T_MC[2,3]:.0f})mm")
         T_CB = compute_T_CB(T_EB, T_EC)
-        c_B = (T_CB @ np.append(T_MC[:3, 3] / 1000.0, 1.0))[:3]
-        n_B = T_CB[:3, :3] @ T_MC[:3, 2]
-        return c_B, n_B / np.linalg.norm(n_B)
+        c_B = (T_CB @ np.append(det.T_MC[:3, 3] / 1000.0, 1.0))[:3]
+        n_B = T_CB[:3, :3] @ det.T_MC[:3, 2]
+        n_B = n_B / np.linalg.norm(n_B)
+        # 법선은 로봇 쪽(=base 원점 방향)을 향해야 카메라가 내려다본다.
+        if float(n_B @ (np.zeros(3) - c_B)) < 0:
+            n_B = -n_B
+        return c_B, n_B
     finally:
         try:
             sensor.shutdown()

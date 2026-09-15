@@ -204,6 +204,35 @@ python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 --write   # ③ �
 
 어느 것인지 모르겠으면 씬을 눈으로 본다: `$ISAAC scripts\sim\view_scene.py v2`
 
+#### ⚠ `charuco 부족` 이 대부분이면 — 조준 기준점이 틀렸다
+
+셀 모델의 **원판 중심**을 겨누는데 보드가 거기 없으면, Spider 의 좁은 FOV
+(0.25m 에서 134×100mm)에서 보드가 잘려 나간다. 보드를 원판 한복판에 정확히
+놓지 않았거나, 구 `T_EC` 의 회전 오차(5°면 250mm 에서 22mm)가 얹히면 그렇다.
+
+2026-09-15 실측 — 20자세 중 **18자세가 `charuco 부족`**:
+
+```
+[hemi_00] charuco 부족 (aruco=2, charuco=0) — skip
+[hemi_12] aruco=7  charuco corners=8            ← 중앙에 온 것만 성공
+```
+
+**거리는 정상이었다.** `debug_intrinsic_artec/*.png` 의 마커 픽셀 크기로 역산하니
+평균 **262mm**(의도 250mm) — 즉 거리가 아니라 **조준**의 문제다.
+
+→ **실제 보드를 기준으로 다시 만든다:**
+
+```powershell
+# 1) 보드가 화면 중앙에 오도록 조준 (웹 UI 수동 모드, §2). 끝나면 탭 닫기
+# 2) 그 자세에서 검출해 보드 중심을 직접 잡는다
+python scripts\artec\gen_calib_poses.py --from-view --write
+```
+
+여기서 추정한 중심을 **같은 `T_EC` 로** 다시 겨누므로 `T_EC` 의 계통 오차가
+1차적으로 상쇄된다 — `T_EC` 가 낡아도 이 경로가 동작하는 이유다.
+
+보드 위치를 자로 재서 알고 있으면 `--center X Y Z` 로 직접 줘도 된다.
+
 > 기존 yaml 은 `.yaml.bak` 으로 백업된다.
 
 ### ② hand-eye 를 돌릴 때
@@ -299,6 +328,8 @@ python main_artec.py          # BACKEND = "real" 확인
 | `charuco 부족 (aruco=0…) — skip` 이 많다 | 자세 목록이 지금 배치와 안 맞는다 → `--interactive` 로 다시 딴다 (§3) |
 | `⚠ 최소 8 frame 필요. 종료.` | 위와 같은 원인. **이 경우 exit 1 로 멈춘다** — 예전엔 조용히 통과해 다음 단계가 낡은 값을 썼다 |
 | hand-eye 가 intrinsic 날짜를 묻는다 | 90일 넘은 intrinsic 이다. 스캐너를 바꿨으면 **`N` 을 눌러 중단**하고 intrinsic 부터 |
+| `charuco 부족` 이 대부분 | **조준 기준점이 실제 보드와 다르다** → `--from-view` 로 다시 생성 (§3). 거리부터 의심하지 말 것 — `debug_intrinsic_artec/*.png` 로 확인된다 |
+| 캡처 이미지를 보고 싶다 | `debug_intrinsic_artec/<pose>.png` (intrinsic) · `debug_calib_artec/<pose>_raw.png`, `_aruco.png` (hand-eye). 자세마다 저장된다 |
 | 보드를 못 찾는다 | 인쇄 배율(§2) · 조명 반사 · 작동거리 250mm 벗어남 |
 | hand-eye 오차가 크다 | 자세 간 회전이 작다 → **30° 이상** 확보. 자세 수를 15개 이상으로 |
 | 특정 자세만 계속 실패 | IK 시드 문제일 수 있다 — `1_calibration.md` T1 |
