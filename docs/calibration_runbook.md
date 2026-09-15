@@ -168,21 +168,34 @@ python scripts\artec\turntable_calib.py      # ③ T_B_F0 (rim 클릭)
 ⚠ 최소 8 frame 필요. 종료.
 ```
 
-**자세를 다시 딴다** — 로봇을 손으로 끌어다 잡는다:
+**자세를 다시 만든다** — 손으로 잡을 필요 없이 자동 생성된다.
 
 ```powershell
-python scripts\artec\hand_eye_calib.py --interactive
+python scripts\artec\gen_calib_poses.py                        # ① 원판 후보 확인
+python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 # ② 미리보기
+python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 --write   # ③ 저장
 ```
 
-- 로봇이 **teach mode**(중력보상)로 들어간다 — 팔을 손으로 밀 수 있다
-- 보드가 잘 보이는 자세로 옮기고 `Enter` → ChArUco 가 검출되면 yaml 에 `manual_NN` 추가
-- `q` + `Enter` 로 종료
-- **12개 이상**, 자세 간 회전 **30° 이상**, 거리·각도를 고루 섞는다
+**충돌 셀 모델**(`4_collision.md` §6)에서 턴테이블 원판을 찾아 그 위 반구에 자세를
+깔고, 해석 IK + 충돌 게이트로 거른다. sim 이 쓰는 생성기와 **같은 코드**다.
 
-> ⚠ 이건 SDK 로 teach mode 를 켜는 것이라 **웹 UI 탭이 닫혀 있어야** 한다 (§2 ②).
->
-> 기존 yaml 에 이어서 추가된다(번호가 이어짐). 배치가 크게 바뀌었으면 옛 자세는
-> 계속 실패하므로 **yaml 을 비우고 새로 따는 편이 낫다** — 옛 파일은 이름을 바꿔 남겨둔다.
+- 로봇도 스캐너도 필요 없다 — **오프라인**에서 만든다
+- `T_EC` 에 의존하지 않는다(겨누는 용도로만 쓴다) → 지금 구하려는 값과 순환이 없다
+- 반구: polar 0/15/30/45 × 8방위 = 25후보 → 게이트 통과 **14~15개**
+
+①에서 후보 목록이 나온다. **자동으로 고르지 않는다** — 셀 점군은 부재 이름이 전부
+`mesh` 라(§6.1) 무엇이 턴테이블인지 데이터만으로 구별할 수 없다. 실제로 자동 선택이
+**키보드**를 집은 적이 있다.
+
+```
+  원판 후보 (base 프레임):
+    --hint-xy -0.257 0.006   상면 z=0.778  r95=143mm  점 125,013
+    --hint-xy  0.838 -0.022  상면 z=0.694  r95= 75mm  점 10,444   ← 턴테이블
+```
+
+어느 것인지 모르겠으면 씬을 눈으로 본다: `$ISAAC scripts\sim\view_scene.py v2`
+
+> 기존 yaml 은 `.yaml.bak` 으로 백업된다.
 
 ### ② hand-eye 를 돌릴 때
 

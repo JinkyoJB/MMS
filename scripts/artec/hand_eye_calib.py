@@ -11,19 +11,17 @@ xArm7 + Artec Spider Hand-Eye 캘리브레이션 (`docs/5_artec_hand_eye.md` 참
 - Procrustes 로 T_M_C 산출
 - HandEyeCalibrator (cv2.calibrateHandEye 5-method 시도) 가 T_E_C 산출
 
-실행 모드
---------
-1) `--poses <yaml>` 가 존재하면 yaml 의 포즈로 자동 순회 (PhoXi 방식과 동일)
-2) 그 외 / `--interactive` → 사용자가 manual mode 로 로봇을 움직이고 Enter 로 캡처
-                          (감지 성공 자세는 yaml 에 기록)
+실행
+----
+yaml 의 포즈를 자동 순회한다. **자세는 미리 생성해 둔다** —
+teach mode(손으로 끌어 기록)는 2026-09-15 제거했다. 셀 모델 기준 반구 생성으로
+대체했으므로 사람이 자세를 하나씩 잡을 필요가 없다.
 
-Usage
------
-  # 보드 인쇄 후 (1회): scripts/artec_make_charuco.py
-  # 첫 실행 - manual 모드 (poses yaml 없음)
-  python scripts/artec_hand_eye_calib.py
-  # 이후: 같은 yaml 로 재실행
-  python scripts/artec_hand_eye_calib.py --poses config/calibration/artec_calibration_poses.yaml
+  python scripts/artec/gen_calib_poses.py                      # 원판 후보 확인
+  python scripts/artec/gen_calib_poses.py --hint-xy X Y --write
+  python scripts/artec/hand_eye_calib.py                       # 순회 → T_EC
+
+절차 전체는 `docs/calibration_runbook.md`.
 """
 
 from __future__ import annotations
@@ -168,46 +166,6 @@ def _save_debug(name: str, det) -> None:
     cv2.imwrite(str(DEBUG_DIR / f"{name}_detect.png"), det.debug_image)
 
 
-def _append_pose_yaml(yaml_path: Path, name: str, pose6_mm_deg) -> None:
-    """yaml 의 poses 리스트에 하나 추가 (이미 있으면 skip)."""
-    yaml_path.parent.mkdir(parents=True, exist_ok=True)
-    if yaml_path.exists():
-        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-    else:
-        data = {}
-    poses = data.get("poses", []) or []
-    if any(p.get("name") == name for p in poses):
-        return
-    poses.append({
-        "name": name,
-        "ee_pose": [round(float(v), 2) for v in pose6_mm_deg],
-    })
-    data["poses"] = poses
-    yaml_path.write_text(
-        yaml.dump(data, default_flow_style=None, allow_unicode=True),
-        encoding="utf-8",
-    )
-
-
-def _next_manual_idx(yaml_path: Path) -> int:
-    """yaml 의 기존 'manual_NN' 중 가장 큰 NN+1 을 반환 (없으면 0)."""
-    if not yaml_path.exists():
-        return 0
-    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-    poses = data.get("poses", []) or []
-    max_n = -1
-    for p in poses:
-        n = str(p.get("name", ""))
-        if n.startswith("manual_"):
-            try:
-                idx = int(n.split("_", 1)[1])
-                if idx > max_n:
-                    max_n = idx
-            except ValueError:
-                pass
-    return max_n + 1
-
-
 # ─── 모드 1: yaml 의 포즈로 자동 순회 ──────────────────────────────────
 
 def _run_scripted(
@@ -289,69 +247,6 @@ def _run_scripted(
         calibrator.add_sample(T_EB, det.T_MC)
 
 
-# ─── 모드 2: interactive — 사용자가 manual move ─────────────────────────
-
-def _run_interactive(
-    poses_yaml: Path,
-    robot: XArmInterface,
-    sensor: ArtecClient,
-    detector: ArtecCharucoDetector,
-    calibrator: HandEyeCalibrator,
-    target_n: int = 12,
-) -> None:
-    """
-    사용자가 robot 을 manual mode 로 직접 움직이며 Enter 로 캡처.
-    감지 성공한 자세는 `poses_yaml` 에 기록.
-    """
-    # 기존 yaml 의 manual_NN 다음 번호부터 시작 — 재실행 시 collision 회피
-    start_idx = _next_manual_idx(poses_yaml)
-    if start_idx > 0:
-        print(f"\n[interactive] yaml 에 기존 자세 {start_idx}개 있음 — "
-              f"이번 세션은 manual_{start_idx:02d} 부터 추가")
-    print("\n[interactive] manual mode — 사용자가 직접 로봇을 움직이세요.")
-    print("  Enter      : 현재 자세에서 캡처 + ChArUco 검출 시도")
-    print("  q + Enter  : 종료 (현재까지 샘플로 calibrate 시도)")
-    print(f"  목표 샘플 수: {target_n} (이번 세션 추가)\n")
-
-    # manual mode (gravity-comp). xArm SDK: set_mode(2) = teach mode.
-    try:
-        robot.arm.motion_enable(enable=True)
-        robot.arm.set_mode(2)
-        robot.arm.set_state(0)
-    except Exception as e:
-        print(f"  [warn] manual mode 진입 실패: {e}")
-
-    saved = 0
-    while True:
-        cmd = input(f"\n  [{saved}/{target_n}] Enter 캡처 / q 종료 > ").strip().lower()
-        if cmd == "q":
-            break
-
-        T_EB = _read_T_EB(robot)
-        fmh = _capture_artec_frame(sensor)
-        idx = start_idx + saved
-        name = f"manual_{idx:02d}"
-        det = _detect_and_log(detector, fmh, name)
-        _save_debug(name, det)
-        if det is None:
-            continue
-
-        # 검출 성공 → calibrator 에 추가 + yaml 에 기록
-        calibrator.add_sample(T_EB, det.T_MC)
-        pose6 = robot.get_pose(is_radian=False)
-        _append_pose_yaml(poses_yaml, name, pose6)
-        saved += 1
-        if saved >= target_n:
-            break
-
-    # 다시 position mode 로
-    try:
-        robot.arm.set_mode(0)
-        robot.arm.set_state(0)
-    except Exception:
-        pass
-
-
 # ─── main ─────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -362,11 +257,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Artec hand-eye 캘리브레이션")
     parser.add_argument("--poses", type=str, default=str(DEFAULT_POSES_YAML),
-                        help="포즈 yaml 경로 (없으면 interactive 모드)")
-    parser.add_argument("--interactive", action="store_true",
-                        help="yaml 존재해도 interactive 모드 강제")
-    parser.add_argument("--target-n", type=int, default=12,
-                        help="interactive 모드 목표 샘플 수")
+                        help="포즈 yaml 경로. 만들려면 scripts/artec/gen_calib_poses.py")
     parser.add_argument("--board", type=str, default=DEFAULT_BOARD_NAME,
                         choices=list(BOARD_PRESETS.keys()),
                         help="보드 프리셋 (spider 권장)")
@@ -397,7 +288,12 @@ def main() -> None:
     args = parser.parse_args()
 
     poses_yaml = Path(args.poses)
-    use_interactive = args.interactive or not poses_yaml.exists()
+    if not poses_yaml.exists():
+        print(f"⚠ 포즈 yaml 이 없다: {poses_yaml}")
+        print("  자세를 먼저 생성할 것:")
+        print("    python scripts/artec/gen_calib_poses.py            # 후보 확인")
+        print("    python scripts/artec/gen_calib_poses.py --hint-xy X Y --write")
+        return 1
 
     base = BOARD_PRESETS[args.board]
     board_spec = CharucoBoardSpec(
@@ -453,7 +349,7 @@ def main() -> None:
     print(f"  poses yaml     : {poses_yaml}  (exists={poses_yaml.exists()})")
     print(f"  output yaml    : {OUTPUT_YAML}")
     print(f"  debug dir      : {DEBUG_DIR}")
-    print(f"  mode           : {'interactive' if use_interactive else 'scripted'}")
+    print(f"  poses          : {len(yaml.safe_load(poses_yaml.read_text(encoding='utf-8')).get('poses', []))} 개")
 
     robot = XArmInterface(ip=ROBOT_IP)
     sensor = ArtecClient(ArtecConfig(
@@ -484,18 +380,12 @@ def main() -> None:
     input()
 
     try:
-        if use_interactive:
-            _run_interactive(
-                poses_yaml, robot, sensor, detector, calibrator,
-                target_n=args.target_n,
-            )
-        else:
-            _run_scripted(
-                poses_yaml, robot, sensor, detector, calibrator,
-                via_home=not args.no_via_home,
-                sensor_name="artec",
-                start_from=int(args.start_from),
-            )
+        _run_scripted(
+            poses_yaml, robot, sensor, detector, calibrator,
+            via_home=not args.no_via_home,
+            sensor_name="artec",
+            start_from=int(args.start_from),
+        )
     finally:
         sensor.shutdown()
         robot.disconnect()
