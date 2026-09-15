@@ -1,0 +1,31 @@
+# 줄바꿈 정규화 — 저장소에는 항상 LF 로 저장한다.
+#
+# 왜: Windows 에서 편집하면 도구에 따라 CRLF 로 파일 전체가 다시 써진다.
+#     그러면 한 줄만 고쳐도 diff 가 파일 전체로 부풀어 리뷰가 불가능해진다.
+#     (실제로 README.md 가 530 줄 변경으로 잡힌 적이 있다.)
+* text=auto eol=lf
+
+# 셸 스크립트는 반드시 LF (CRLF 면 bash 가 '\r' 를 명령 일부로 읽어 깨진다)
+*.sh    text eol=lf
+
+# Windows 전용 스크립트는 CRLF 유지
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# 바이너리 — 절대 변환하지 않는다
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.svg   text eol=lf
+*.pdf   binary
+*.npz   binary
+*.usd   binary
+*.usda  text eol=lf
+*.usdc  binary
+*.dll   binary
+*.lib   binary
+*.pyd   binary
+*.so    binary
+*.exe   binary
+*.sproj binary
