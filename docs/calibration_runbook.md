@@ -82,7 +82,7 @@ python scripts\artec\check_calibration.py
 ### 배치와 조준 — 웹 UI 수동 모드가 가장 빠르다
 
 보드를 **턴테이블 원판 위에** 올린 뒤, **보드와 원판 가장자리(rim)가 한 화면에**
-들어오고 작동거리가 **약 250mm**(Spider 스윗스팟 200~300mm)가 되게 맞춘다.
+들어오고 작동거리가 **약 320mm** 가 되게 맞춘다 — 거리를 이렇게 잡는 이유는 §3 거리표.
 
 좌표를 계산해 넣는 것보다 **팔을 손으로 끌어다 맞추는 쪽이 빠르다.**
 
@@ -263,7 +263,7 @@ python scripts\artec\gen_calib_poses.py --from-view --write
 | 350mm | 188×140mm | 44 × 40mm | 73 |
 
 ```powershell
-python scriptsrtec\gen_calib_poses.py --from-view --standoff 0.35 --write
+python scripts\artec\gen_calib_poses.py --from-view --standoff 0.35 --write
 ```
 
 거리를 올려도 **도달성 손해는 거의 없다**(유효 93→73, 필요한 건 20개).
