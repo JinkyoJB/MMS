@@ -50,8 +50,9 @@ python scripts\artec\check_calibration.py
 
 1. 작업 반경에 사람·케이블·공구 없는지 **눈으로**
 2. **비상정지 버튼이 손에 닿는 곳에**
-3. **로봇 웹 UI(`http://192.168.1.210:18333`) 탭을 닫는다** — 열려 있으면 컨트롤러 mode/state 를 웹이 바꿔서 SDK 명령이 무시된다
-4. 장비 3종 살아 있는지: `python scripts\check_devices.py`
+3. 장비 3종 살아 있는지: `python scripts\check_devices.py`
+
+> 웹 UI 는 **조준에 쓰고 나서 닫는다** — 순서가 있다. 아래 〈배치와 조준〉 참고.
 
 ### ChArUco 보드
 
@@ -63,16 +64,47 @@ python scripts\artec\check_calibration.py
 
 평평한 판에 **주름·들뜸 없이** 붙인다. 휘면 각도 오차가 그대로 들어간다.
 
-### 배치와 조준
+### 배치와 조준 — 웹 UI 수동 모드가 가장 빠르다
 
-1. 보드를 **턴테이블 원판 위에** 올린다
-2. 로봇을 움직여 **보드와 원판 가장자리(rim)가 한 화면에** 들어오게 한다
-3. 작동거리 **약 250mm** (Spider 스윗스팟 200~300mm)
+보드를 **턴테이블 원판 위에** 올린 뒤, **보드와 원판 가장자리(rim)가 한 화면에**
+들어오고 작동거리가 **약 250mm**(Spider 스윗스팟 200~300mm)가 되게 맞춘다.
+
+좌표를 계산해 넣는 것보다 **팔을 손으로 끌어다 맞추는 쪽이 빠르다.**
+
+#### ① 웹 UI 수동 모드로 조준
+
+```
+http://192.168.1.210:18333
+```
+
+UFACTORY 가 컨트롤러에 내장한 웹 앱이다. 브라우저만 있으면 되고 설치가 필요 없다.
+
+1. **Manual Mode(수동 모드)** 를 켠다 — 중력보상이 걸려 팔을 손으로 밀 수 있다
+2. 스캐너를 잡고 **보드 + rim 이 같이 보이는 자리**로 가져간다
+3. 거리는 눈대중 25cm 로 충분하다 — 캘리브가 자세를 다시 순회한다
+4. 맞으면 **수동 모드를 끈다**
+
+> ⚠ 수동 모드에서는 팔이 자유롭게 움직인다. 손을 떼기 전에 자세가 유지되는지
+> 확인할 것 — 툴 무게(스캐너 체인 265mm)로 처질 수 있다.
+
+#### ② ★ 브라우저 탭을 닫는다
+
+**빼먹으면 이후 스크립트가 통째로 안 먹는다.** 웹 UI 가 열려 있으면 컨트롤러의
+mode/state 를 웹 쪽이 계속 바꿔서, SDK 로 보낸 명령이 무시되거나 예상 밖으로 동작한다
+(`robot_control.md` §1). 캘리브·`main_artec.py` 를 돌릴 때는 **탭을 닫아 둔다.**
+
+#### ③ 확인·미세조정은 스크립트로
 
 ```powershell
-python scripts\robot\home.py                      # 기준 자세로
+python scripts\robot\status.py                    # 현재 TCP·에러 (안 움직임)
 python scripts\robot\jog.py --dz 20 --dry-run     # 먼저 확인
 python scripts\robot\jog.py --dz 20               # 실행
+```
+
+수동 모드를 못 쓰는 상황이면 `home.py` 로 기준 자세를 잡고 `jog.py` 로 옮긴다.
+
+```powershell
+python scripts\robot\home.py
 ```
 
 > 보드를 원판 위에 두는 이유 — ②와 ③을 **같은 조준 자세에서 이어서** 할 수 있어
@@ -203,7 +235,8 @@ python main_artec.py          # BACKEND = "real" 확인
 | 로봇이 "도달 불가" | `--dry-run` 으로 확인, 조준 자세를 다시 잡는다 |
 | `cv2.calibrateHandEye` 없음 | OpenCV 5.x 다 → `pip install "opencv-python<5"` (`install.md` §2) |
 | 콘솔 글자 깨짐 | `$env:PYTHONIOENCODING="utf-8"` |
-| 로봇이 명령을 무시한다 | 웹 UI 탭이 열려 있다 (§2) |
+| 로봇이 명령을 무시한다 | **웹 UI 탭이 열려 있다** — 조준 끝났으면 닫는다 (§2 ②) |
+| 수동 모드에서 팔이 안 밀린다 | 수동 모드가 안 켜졌거나 `error_code != 0` → `python scripts\robot\recover.py` |
 
 ---
 
