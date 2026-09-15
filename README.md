@@ -97,6 +97,25 @@ bash setup/setup_envs.sh          # mms-env / env_isaacsim / step2usd 생성 + �
 | `env_isaacsim` | isaac 백엔드 (Isaac Sim 5.1). **numpy 1.x** — 섞으면 ABI 오류 |
 | `step2usd` | STEP→USD 전용. Isaac 불필요라 빠름 |
 
+**자산(USD) 내려받기** — 새 머신에서 최초 1회
+
+씬 USD·텍스처는 GitHub 100 MB 파일 제한을 넘어 git 에 넣지 않는다. 릴리스로 받는다.
+
+```bash
+gh release download assets-v1 -R JinkyoJB/MMS -p 'mms-assets-v1.tar.zst'
+sha256sum -c <<< "04c84f45590d91871d9f737d5cd6ba85701b8a546e6ade3228246c7b18d84a1c  mms-assets-v1.tar.zst"
+
+mkdir -p ~/mms-assets
+tar -I zstd -xf mms-assets-v1.tar.zst -C ~/mms-assets --strip-components=1
+export MMS_ASSET_ROOT=~/mms-assets/2_3Dassets      # .bashrc 에 넣어 두면 편하다
+```
+
+⚠ `2_3Dassets` 와 `testset` 은 **형제 디렉터리**여야 한다. v3 씬이 `../../testset/...` 로
+대상물을 참조하므로 이 배치가 깨지면 텍스처가 통째로 사라진다.
+
+압축 344 MB / 해제 738 MB. `MMS_ASSET_ROOT` 없이도 `mms_paths.py` 가 알려진 배치를
+순서대로 탐색한다(`docs/sim_commands.md`). 자산을 갱신하면 새 태그로 릴리스를 올린다.
+
 **주의 3가지**
 
 | # | 내용 |
