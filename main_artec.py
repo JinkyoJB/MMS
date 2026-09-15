@@ -24,7 +24,7 @@ from mms_artec.sensor.artec_config import ArtecConfig   # 바인딩 비의존(�
 # ── 백엔드 선택 ───────────────────────────────────────────────────────
 #   "real"  → 실물 xArm + 턴테이블 + Artec 스캐너 (Windows)
 #   "isaac" → Isaac Sim 시뮬레이션 (옆에 실물 없이 개발)
-BACKEND = "isaac"
+BACKEND = "real"
 # ★ 여기(BACKEND)는 **사람이 바꾸는 스위치**일 뿐이다. CFG 를 만든 뒤부터는
 #   진실의 출처가 `CFG.backend` 하나다 — 코드에서 백엔드를 분기할 때는
 #   반드시 CFG.backend 를 쓸 것(둘을 섞으면 나중에 갈라진다).
