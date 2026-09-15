@@ -123,7 +123,7 @@ static py::array_t<float> frame_mesh_vertices(py::capsule cap)
 {
     base::IArrayPoint3F* arr = get_frame_mesh(cap)->getPoints();
     int n = arr ? arr->getSize() : 0;
-    auto out = py::array_t<float>({(py::ssize_t)n, (py::ssize_t)3});
+    auto out = py::array_t<float>(std::vector<py::ssize_t>{(py::ssize_t)n, (py::ssize_t)3});
     if (n > 0)
         std::memcpy(out.mutable_data(), arr->getPointer(), n * sizeof(base::Point3F));
     return out;
@@ -133,7 +133,7 @@ static py::array_t<int32_t> frame_mesh_faces(py::capsule cap)
 {
     base::IArrayIndexTriplet* arr = get_frame_mesh(cap)->getTriangles();
     int n = arr ? arr->getSize() : 0;
-    auto out = py::array_t<int32_t>({(py::ssize_t)n, (py::ssize_t)3});
+    auto out = py::array_t<int32_t>(std::vector<py::ssize_t>{(py::ssize_t)n, (py::ssize_t)3});
     if (n > 0)
     {
         const base::IndexTriplet* src = arr->getPointer();
@@ -153,7 +153,7 @@ static py::object frame_mesh_uv(py::capsule cap)
     base::IArrayUVCoordinates* arr = get_frame_mesh(cap)->getUVCoordinates();
     if (!arr || arr->getSize() == 0) return py::none();
     int n = arr->getSize();
-    auto out = py::array_t<float>({(py::ssize_t)n, (py::ssize_t)2});
+    auto out = py::array_t<float>(std::vector<py::ssize_t>{(py::ssize_t)n, (py::ssize_t)2});
     const base::UVCoordinates* src = arr->getPointer();
     float* dst = out.mutable_data();
     for (int i = 0; i < n; ++i)
@@ -259,7 +259,7 @@ static base::Matrix4x4D np_to_mat4d(py::array_t<double, py::array::c_style | py:
 
 static py::array_t<double> mat4d_to_np(const base::Matrix4x4D& m)
 {
-    auto out = py::array_t<double>({(py::ssize_t)4, (py::ssize_t)4});
+    auto out = py::array_t<double>(std::vector<py::ssize_t>{(py::ssize_t)4, (py::ssize_t)4});
     auto buf = out.mutable_unchecked<2>();
     for (int i = 0; i < 4; ++i)
         for (int j = 0; j < 4; ++j)
@@ -323,10 +323,10 @@ static base::ICompositeMesh* get_first_composite(py::capsule cap)
 static py::array_t<float> model_final_vertices(py::capsule cap)
 {
     base::ICompositeMesh* cm = get_first_composite(cap);
-    if (!cm) return py::array_t<float>({(py::ssize_t)0, (py::ssize_t)3});
+    if (!cm) return py::array_t<float>(std::vector<py::ssize_t>{(py::ssize_t)0, (py::ssize_t)3});
     base::IArrayPoint3F* arr = cm->getPoints();
     int n = arr ? arr->getSize() : 0;
-    auto out = py::array_t<float>({(py::ssize_t)n, (py::ssize_t)3});
+    auto out = py::array_t<float>(std::vector<py::ssize_t>{(py::ssize_t)n, (py::ssize_t)3});
     if (n > 0)
         std::memcpy(out.mutable_data(), arr->getPointer(), n * sizeof(base::Point3F));
     return out;
@@ -335,10 +335,10 @@ static py::array_t<float> model_final_vertices(py::capsule cap)
 static py::array_t<int32_t> model_final_faces(py::capsule cap)
 {
     base::ICompositeMesh* cm = get_first_composite(cap);
-    if (!cm) return py::array_t<int32_t>({(py::ssize_t)0, (py::ssize_t)3});
+    if (!cm) return py::array_t<int32_t>(std::vector<py::ssize_t>{(py::ssize_t)0, (py::ssize_t)3});
     base::IArrayIndexTriplet* arr = cm->getTriangles();
     int n = arr ? arr->getSize() : 0;
-    auto out = py::array_t<int32_t>({(py::ssize_t)n, (py::ssize_t)3});
+    auto out = py::array_t<int32_t>(std::vector<py::ssize_t>{(py::ssize_t)n, (py::ssize_t)3});
     if (n > 0)
     {
         const base::IndexTriplet* src = arr->getPointer();

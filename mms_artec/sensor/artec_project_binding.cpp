@@ -72,6 +72,7 @@
 #include <artec/sdk/project/EntryType.h>
 
 #include <cstring>
+#include <vector>
 #include <stdexcept>
 #include <string>
 
@@ -387,10 +388,10 @@ static py::array_t<float> composite_mesh_vertices(py::capsule cap)
 {
     auto* pts = get_composite_mesh(cap)->getPoints();
     if (!pts || pts->getSize() == 0)
-        return py::array_t<float>({(py::ssize_t)0, (py::ssize_t)3});
+        return py::array_t<float>(std::vector<py::ssize_t>{(py::ssize_t)0, (py::ssize_t)3});
 
     int n = pts->getSize();
-    auto arr = py::array_t<float>({(py::ssize_t)n, (py::ssize_t)3});
+    auto arr = py::array_t<float>(std::vector<py::ssize_t>{(py::ssize_t)n, (py::ssize_t)3});
     // Point3F 는 {float x, y, z} — tightly packed
     std::memcpy(arr.mutable_data(), pts->getPointer(),
                 static_cast<size_t>(n) * 3 * sizeof(float));
@@ -401,10 +402,10 @@ static py::array_t<int32_t> composite_mesh_faces(py::capsule cap)
 {
     auto* tris = get_composite_mesh(cap)->getTriangles();
     if (!tris || tris->getSize() == 0)
-        return py::array_t<int32_t>({(py::ssize_t)0, (py::ssize_t)3});
+        return py::array_t<int32_t>(std::vector<py::ssize_t>{(py::ssize_t)0, (py::ssize_t)3});
 
     int m = tris->getSize();
-    auto arr = py::array_t<int32_t>({(py::ssize_t)m, (py::ssize_t)3});
+    auto arr = py::array_t<int32_t>(std::vector<py::ssize_t>{(py::ssize_t)m, (py::ssize_t)3});
     // IndexTriplet 은 {int data[3]} — tightly packed
     std::memcpy(arr.mutable_data(), tris->getPointer(),
                 static_cast<size_t>(m) * 3 * sizeof(int32_t));

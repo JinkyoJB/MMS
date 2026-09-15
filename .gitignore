@@ -242,3 +242,10 @@ scripts/sim/log/rec/
 #   testset_points/           : scripts/sim/extract_testset_points.py
 #   gt/, testset_sweep/       : scripts/sim/testset_sweep.sh
 scripts/sim/log/
+
+# Artec SDK python 바인딩 빌드 산출물 (docs/artec_SDK/artec0_build_guide.md)
+#   cmake --build mms_artec/sensor/build --config Release 로 재생성
+*.pyd
+*.exp
+*.ilk
+*.pdb
