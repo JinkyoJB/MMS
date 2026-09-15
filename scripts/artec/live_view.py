@@ -67,9 +67,15 @@ def main() -> int:
     sensor = ArtecClient(ArtecConfig(serial_number=None, capture_texture=True))
     print("[live] 스캐너 연결 중 ...")
     sensor.initialize()
+    # ★ auto exposure 를 안 켜면 capture_frame 이 계속 None 을 돌려준다(실측).
+    #   hand_eye_calib.py 도 같은 설정을 하고 시작한다.
+    try:
+        sensor._scanner.enable_auto_exposure(True)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[live] ⚠ auto exposure 설정 실패: {e}")
     print("[live] q 로 종료. 로봇은 웹 UI 수동 모드로 끌면서 이 화면을 볼 것.")
 
-    n, t0, fps = 0, time.time(), 0.0
+    n, t0, fps, n_none = 0, time.time(), 0.0, 0
     try:
         while True:
             try:
@@ -79,8 +85,14 @@ def main() -> int:
                 time.sleep(0.2)
                 continue
             if fmh is None or not fmh.has_image() or not fmh.is_textured():
+                # 조용히 도는 대신 알린다 — 빈 창만 보고 원인을 못 찾는 일을 막는다.
+                n_none += 1
+                if n_none in (10, 50) or n_none % 200 == 0:
+                    print(f"[live] ⚠ 텍스처 프레임을 {n_none}회 연속 못 받았다. "
+                          f"스캐너 앞에 물체가 있는지 · Artec Studio 가 떠 있지 않은지 확인")
                 time.sleep(0.1)
                 continue
+            n_none = 0
 
             img = fmh.image()
             vis = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
