@@ -181,7 +181,7 @@ sim 전용 전제다.
 
 ## 5. 움직이기 전 체크리스트
 
-1. `python scripts/robot/check_devices.py` — 아니면 `status.py` 로 `error=0` 확인
+1. `python scripts/check_devices.py` — 아니면 `status.py` 로 `error=0` 확인
 2. 작업 반경에 사람·케이블·공구 없는지 **눈으로**
 3. **비상정지 버튼이 손에 닿는 곳에**
 4. 처음 쓰는 좌표는 `--dry-run` 먼저

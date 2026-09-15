@@ -35,6 +35,9 @@ ok, why, s   = cm.is_path_safe(q0, q1)     # 경로 (보수적 전진)
 base 프레임으로 굽기 때문에 **sim·real 공용**이다. **실물 셀을 개조하면 반드시
 재생성한다** — 안 하면 없는 구조물을 피하거나 있는 구조물을 통과한다.
 
+> ⚠ 재생성에는 **Isaac Sim 이 필요하다**(USD 씬을 열어 굽는다). 현장 PC(`mms-env`)에서는
+> 못 돌린다. 실물이 CAD 와 달라졌을 때 현장에서 무엇을 하는가는 **§6** 에 있다.
+
 ### 바꿀 수 있는 값
 
 | 설정 | 뜻 | 기본 |
@@ -152,13 +155,204 @@ standoff 0.313m 로 실측한 결과다.
 
 ---
 
-## 6. 코드 지도
+## 6. ⚠ 실물 셀이 CAD 와 다를 때
+
+> 2026-09-15 현장. **여기서 틀리면 오탐이 아니라 미탐**(칠 수 있는데 안전하다고 함)이라
+> 손해가 파손이다. §1 의 "실물 셀을 개조하면 반드시 재생성한다" 를 실제로 어떻게 하는가.
+
+### 6.1 지금 무엇을 믿고 있나 — 검증 결과
+
+```
+CAD(STEP) ──step2usd──▶ v3_scene.usd ──export_env_mesh.py──▶ cell_env.npz ──▶ 환경 SDF
+                                       (표면 샘플링 5mm       (base 프레임
+                                        + base 프레임 변환)     점군 130만)
+```
+
+기억대로 **CAD 기반이 맞다.** 다만 CAD 를 직접 읽는 게 아니라 **CAD→USD 씬을 한 번 구운
+스냅샷**이고, 굽는 도구가 Isaac Sim 에 묶여 있다는 게 지금 문제의 뿌리다(§6.2).
+
+캐시 2개의 성격이 다르다.
+
+| 파일 | 내용 | 셀이 바뀌면 |
+|---|---|---|
+| `xarm7_spider_links.npz` | **로봇 자신** — 링크 로컬 점군 + 툴(link7 로컬) | 영향 없음. 툴(스캐너·어댑터)을 바꿔 달 때만 |
+| `cell_env.npz` | **셀 구조물** — base 프레임 점군 (`env`, `names`) | **매번 틀어진다** ← 이 문서의 대상 |
+
+실제 파일 내용 (2026-09-15 확인):
+
+```
+env    (1301122, 3) float64      범위  X -0.389~0.968 · Y ±0.380 · Z -0.055~1.571
+names  ['mesh']  ← 1개
+```
+
+> **`names` 가 쓸모없다.** USD 메시 이름이 전부 `mesh` 라 부재 단위 식별이 안 된다.
+> "저울만 빼고 다시 굽는다" 같은 조작이 **이름으로는 불가능**하다 — 좌표로 잘라야 한다(§6.4).
+
+### ★ base 프레임은 Z 가 **아래로** 증가한다
+
+팔이 천장에 매달려 있어 base 가 뒤집혀 있다. `world → base` 는 **Y축 180° 회전**
+(X→−X, Z→−Z) + 원점 `(0.365, 0, 1.500)`. 패치 좌표를 손으로 적을 때 여기서 제일 많이 틀린다.
+
+`hw_layout.md` §1 의 world 값과 캐시 안의 실제 점을 대조해 확인했다:
+
+| 부재 | world Z | base z | 캐시 안 점 (확인) |
+|---|---|---|---|
+| 천장 마운트 하면 | 1.500 | **−0.055** | 축 근처 13,314점 |
+| 턴테이블 상면 | 0.665 | **0.835** | r<0.13 에 31,395점 |
+| 상판 `universal_plate` 상면 | 0.510 | **0.990** | 62,574점 |
+| 바닥(캐스터 하단) | −0.071 | **1.571** | 1,040점 |
+
+환산: `base_z = 1.500 − world_z`, `base_x = 0.365 − world_x`, `base_y = −world_y`.
+
+### 6.2 왜 현장에서 못 고치나
+
+| # | 막히는 이유 |
+|---|---|
+| 1 | **재생성에 Isaac Sim 이 필요하다.** `export_env_mesh.py` 가 `SimulationApp` 을 띄우고 USD stage 를 연다. 현장 PC 엔 `mms-env` 뿐이고 `env_isaacsim` 은 RTX GPU + 수십 GB다 (`install.md` §나머지 env) |
+| 2 | **CAD 를 먼저 고쳐야 한다.** 실측 → CAD → STEP → USD → npz 는 반나절 루프고, 그날 케이블 트레이 하나 옮기면 처음부터 |
+| 3 | **margin 으로 때울 수 없다.** margin 은 *있는* 장애물과의 거리에만 작용한다. 모델에 **없는** 구조물은 거리 계산에 아예 안 들어가므로 `env_margin_m` 을 100mm 로 올려도 그대로 친다 |
+
+3번이 핵심이다. **CAD 와 실물의 차이는 "여유 부족"이 아니라 "데이터 없음"이다.**
+
+### 6.3 순서 — 위험도 순
+
+#### 0단계. 얼마나 틀렸는지부터 잰다 (먼저, 반드시)
+
+**anchor 부터.** 캐시 전체가 로봇 base 에 앵커돼 있으므로, 프레임이나 로봇 마운트가
+움직였으면 **개별 부재가 아니라 130만 점이 통째로 어긋난다.** 이걸 모르고 부재 하나씩
+패치하면 영원히 안 맞는다.
+
+CAD 씬을 눈으로 먼저 훑어 어디가 다른지 감을 잡는 게 빠르다 (설치는 `install.md` §5):
+
+```powershell
+$ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
+& $ISAAC scripts\sim\view_scene.py v3      # 현재 기준 씬 — 메시 152개
+& $ISAAC scripts\sim\view_scene.py v4      # 턴테이블 이설 검토안 (hw_layout §3)
+```
+
+```powershell
+python scripts/artec/turntable_calib.py     # T_B_F0 재측정 — base 기준 턴테이블 축
+```
+
+나온 `T_B_F0` 의 원점을 위 표의 `(0, 0, 0.835)` 와 비교한다.
+어긋나면 **거기서 멈추고** 원인(프레임 이동? 로봇 remount? 턴테이블 이설?)을 먼저 찾는다.
+어차피 `turntable_frame.yaml` 은 Artec 장착 이전 값이라 재캘리브 1순위다(README §알려진 한계 1).
+
+anchor 가 맞으면 개별 부재로 간다. 부재 위치 실측은 로봇 TCP 를 특징점 옆으로 조그해
+읽는 게 가장 정확하다:
+
+```powershell
+python scripts/robot/jog.py --dz 20 --dry-run   # 접근
+python scripts/robot/status.py                  # TCP 읽기
+```
+
+> ⚠ `status.py` 의 TCP 는 **플랜지 기준**(TCP offset 0)이지 툴 끝이 아니다.
+> 툴 체인 265mm 를 빼고 읽는다(`hw_layout.md` §1 EE 툴 체인 표).
+
+#### 1단계. 실측 프리미티브 패치 ← **현장에서 할 수 있는 유일한 방법**
+
+바뀐 구조물을 박스·원기둥·평면으로 근사해 yaml 에 적고, **로드할 때 점군으로 샘플링해
+`env` 에 합친다.**
+
+**왜 이게 되나** — 환경 SDF 는 점군만 받는다(`_Sdf.__init__(pts, voxel, pad)`).
+점의 출처가 CAD 표면 샘플링인지 줄자인지 **구분하지 않는다.** 박스 하나를 5mm 간격으로
+샘플링하면 CAD 에서 구운 점과 같은 자격의 장애물이 된다.
+
+**근사는 반드시 실물보다 크게(외접) 잡는다.** 과대추정 = 오탐 = 자세 몇 개 손해,
+과소추정 = 미탐 = 파손. 비대칭이므로 고민할 것이 없다.
+
+필요한 것 — **아직 없다. 만들어야 한다:**
+
+| 만들 것 | 내용 |
+|---|---|
+| `config/cell_env_patch.yaml` | 프리미티브 목록. **base 프레임 m, Z 아래로 +** |
+| `utils/collision/env_patch.py` | yaml → 점군. 박스/원기둥/평면 표면 샘플링, `spacing_m=0.005` (SDF 복셀 8mm 보다 촘촘해야 한다 — `mesh_sampling.py` 주석과 같은 이유) |
+| 배선 2곳 | `collision_model.CollisionModel.__init__` 의 `env = np.load(env_npz)["env"]` 직후, 그리고 `env_collision.EnvCollision.__init__` 의 `self.env = ...` 직후에 `np.vstack`. **두 곳 다** — 같은 npz 를 서로 독립적으로 읽는다 |
+| `scripts/collision/plot_env_slice.py` (가칭) | base 프레임 z 단면을 떠서 눈으로 확인. 패치가 엉뚱한 데 붙는 사고를 막는 **가장 싼 방법** |
+
+yaml 예시:
+
+```yaml
+# config/cell_env_patch.yaml
+# 2026-09-15 현장 실측. CAD(v3_scene.usd) 와 실물의 차이만 적는다.
+# ⚠ world 가 아니라 **로봇 base 프레임** (m). Z 는 아래로 증가 — §6.1
+add:
+  - {name: cable_tray, type: box,      lo: [0.20, -0.38, 0.95], hi: [0.55, -0.30, 1.02]}
+  - {name: new_post,   type: cylinder, center_xy: [0.62, 0.21], z0: 0.10, z1: 1.55, radius: 0.045}
+remove: []        # §6.4 — 급하지 않으면 비워 둔다
+```
+
+#### 2단계. CAD/USD 동기화 (사무실에서, 수렴 경로)
+
+패치가 쌓이면 그걸 **작업지시서 삼아** CAD 를 고치고 `v3_scene.usd` 재생성 →
+`export_env_mesh.py` → npz 교체 → yaml 의 해당 항목 삭제.
+
+yaml 을 "아직 CAD 에 반영 안 된 차이 목록"으로 운용하면 **무엇이 밀려 있는지가 파일 하나에
+보인다.** 비어 있으면 CAD 와 실물이 같다는 뜻이다.
+
+### 6.4 ⚠ **없어진** 구조물은 빼기가 훨씬 어렵다
+
+추가는 `vstack` 한 줄이지만 제거는 점군에서 영역을 잘라내는 일이다. 두 가지가 걸린다.
+
+- bbox 로 자르면 그 안에 있던 **다른** 부재까지 사라진다 — 벽과 저울처럼 붙어 있으면 같이 날아간다
+- `names` 가 `['mesh']` 하나라 **부재 단위 제외가 원리적으로 안 된다**(§6.1)
+
+그래서 안전한 순서는 **"일단 두고, 자세가 실제로 부족할 때만 잘라낸다"** 이다.
+없는 구조물을 남겨두면 손해는 오탐(자세 몇 개)이고, 그건 `is_pose_safe` 가 거부한
+사유를 보면 바로 드러난다 — `env(link4,12mm)` 처럼 **어느 링크가 무엇에 걸렸는지** 나온다.
+
+### 6.5 패치가 맞는지 확인하는 법
+
+1. **단면 플롯으로 눈 확인** — 좌표 부호 하나 틀리면 구조물이 반대편에 생긴다. Z 뒤집힘(§6.1)이 제일 흔하다
+2. **clearance 대조** — 로봇을 몇 자세에 세우고 `cm.clearance(q)` 가 주는 거리를 **자로 잰 값**과 비교. 부호가 맞고 오차가 margin(자가 20 / 환경 25mm) 안이면 쓸 만하다
+
+   ```python
+   from utils.collision import collision_model as cmod
+   cm = cmod.get_default(min_sigma=0.0)        # 특이점 판정 끄고 거리만
+   s, e, who = cm.clearance(q)                 # (자가 m, 환경 m, 최근접 이름)
+   ```
+
+   > ⚠ `q` 는 **명령각**을 쓴다. 실측각을 쓰면 T5 의 `start` 거부 연쇄를 그대로 재현한다.
+3. **A/B 로 본다**(T8) — 패치 on/off 를 env 스위치로. "고쳤더니 좋아졌다"를 한 번의 실행으로 판단하지 않는다
+
+### 6.6 하지 말 것
+
+| 금지 | 이유 |
+|---|---|
+| margin 을 올려서 때우기 | 미탐에 안 듣는다 (§6.2-3) |
+| npz 를 지우거나 못 읽는 채로 운전 | `get_default()` 가 `None` 을 돌려주고 **검사가 통째로 skip 된다**(§1). 현장에서 제일 위험한 선택 |
+| 캡슐 world 만 고치고 메시 env 를 안 고치기 | 캡슐(`robot_collision.CollisionWorld`)은 Phase 2 후보 **사전 필터**일 뿐이고 최종 게이트는 메시다(T4). 순서는 캡슐 scene → 메시 env → 메시 self |
+| world 좌표로 yaml 적기 | base 프레임이다. Z 부호가 반대다 (§6.1) |
+
+### 6.7 한편, 오늘 당장 되는 것 — 턴테이블 쪽은 이미 파라미터다
+
+셀 구조물과 달리 **턴테이블 주변은 CAD 에 묶여 있지 않다.** 실물 파이프라인의 캡슐
+world 는 `T_B_F0`(캘리브 결과) + 설정값으로 매번 새로 만든다
+(`artec_multipass_scan_session._build_collision_world`).
+
+| 설정 | 뜻 |
+|---|---|
+| `nbv_turntable_radius_mm` | disc(+프레임) 반경 |
+| `nbv_turntable_body_height_mm` | 턴테이블 몸체 높이 |
+| `nbv_keepout_radius_mm` / `_height_mm` / `_center_xy` | disc 위 금지 원기둥 |
+| `nbv_collision_margin_mm` | 캡슐 여유 |
+
+턴테이블을 교체·이설했다면 **재캘리브 + 이 값만 고치면 되고 npz 는 건드릴 필요가 없다.**
+`CollisionWorld` 는 `add_box` / `add_cylinder` / `add_capsule` / `add_halfspace` 를 이미
+갖고 있어, 사전 필터 층에는 실측 프리미티브를 **코드 수정 없이 오늘 넣을 수 있다.**
+다만 그건 사전 필터일 뿐이므로 §6.3 의 메시 패치를 대체하지 않는다.
+
+---
+
+## 7. 코드 지도
 
 ```
 utils/collision/collision_model.py   ★ 단일 게이트 (clearance/is_pose_safe/is_path_safe)
 utils/collision/mesh_sampling.py     # 삼각형 면적비례 표면 샘플링 (T3)
 utils/collision/robot_collision.py   # 캡슐 world + swept_pose_collision (Phase 2 후보 필터)
 utils/collision/data/*.npz           # 링크·셀 점군 캐시 (base 프레임, sim·real 공용)
+utils/collision/env_patch.py         # 〔미구현 §6.3〕 실측 프리미티브 yaml → 점군
+config/cell_env_patch.yaml           # 〔미구현 §6.3〕 CAD 와 실물의 차이 목록
 utils/control/joint_path_planner.py  # RRT-Connect 우회 + shortcut
 utils/robot/view_pose.py             # solve_view_q — roll·시드·규약을 공용화
 utils/robot/xarm7_kinematics.py      # 해석 IK/FK, sigma_min
@@ -168,6 +362,8 @@ scripts/sim/export_env_mesh.py       # 셀 캐시 생성
 scripts/sim/eval_collision_fpfn.py   # 캡슐 vs 메시 오탐/미탐 비교
 scripts/sim/eval_azimuth_cost.py     # §5 방위각 실측표 재생성
 scripts/sim/eval_sigma_min.py        # σ_min 분포
+scripts/sim/view_scene.py            # v2/v3/v4 씬을 GUI 로 열어 본다 (§6.3)
+scripts/collision/plot_env_slice.py  # 〔미구현 §6.3〕 base 프레임 z 단면 확인
 ```
 
 ---

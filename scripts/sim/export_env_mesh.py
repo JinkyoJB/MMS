@@ -17,6 +17,11 @@ import sys
 import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 from mms_paths import asset, testset_dir
 
+# ★ SimulationApp 보다 **먼저** 임포트해야 한다. Isaac 확장들이 자기 `utils` 모듈을
+# sys.modules 에 선점해버려, 앱을 띄운 뒤에 임포트하면 리포의 utils 패키지가
+# 가려져 ModuleNotFoundError: No module named 'utils.collision' 이 난다 (Isaac Sim 5.1 실측).
+from utils.collision.mesh_sampling import sample_surface
+
 SCENE = asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
 
 
@@ -38,13 +43,13 @@ def main() -> None:
     app = SimulationApp({"headless": True})
 
     import numpy as np
-    from utils.collision.mesh_sampling import sample_surface
-    from omni.isaac.core.utils.stage import open_stage
+    # `omni.isaac.core.utils.stage` 는 5.x 에서 없어진 구 네임스페이스다.
+    # omni.usd 컨텍스트를 직접 쓴다 (버전 무관).
     from omni.usd import get_context
     from pxr import Usd, UsdGeom
 
     rng = np.random.default_rng(0)          # 결정적 샘플링
-    open_stage(args.scene)
+    get_context().open_stage(args.scene)
     for _ in range(60):
         app.update()
     stage = get_context().get_stage()
