@@ -241,7 +241,7 @@ python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 --write   # ③ �
 → **실제 보드를 기준으로 다시 만든다:**
 
 ```powershell
-# 1) 보드가 화면 중앙에 오도록 조준 (웹 UI 수동 모드, §2). 끝나면 탭 닫기
+# 1) aim.py 로 'OK' 가 뜨도록 조준 (§2). 끝나면 뷰어 q, Manual Mode off, 탭 닫기
 # 2) 그 자세에서 검출해 보드 중심을 직접 잡는다
 python scripts\artec\gen_calib_poses.py --from-view --write
 ```
@@ -347,6 +347,8 @@ python main_artec.py          # BACKEND = "real" 확인
 | `⚠ 최소 8 frame 필요. 종료.` | 위와 같은 원인. **이 경우 exit 1 로 멈춘다** — 예전엔 조용히 통과해 다음 단계가 낡은 값을 썼다 |
 | hand-eye 가 intrinsic 날짜를 묻는다 | 90일 넘은 intrinsic 이다. 스캐너를 바꿨으면 **`N` 을 눌러 중단**하고 intrinsic 부터 |
 | `charuco 부족` 이 대부분 | **조준 기준점이 실제 보드와 다르다** → `--from-view` 로 다시 생성 (§3). 거리부터 의심하지 말 것 — `debug_intrinsic_artec/*.png` 로 확인된다 |
+| 조준이 맞는지 미리 보고 싶다 | `python scripts\artec\aim.py` — 웹 UI + 실시간 뷰어. 그 자리에서 OK/잘림 판정 |
+| 뷰어가 빈 화면만 돈다 | `텍스처 프레임을 N회 연속 못 받았다` 경고를 볼 것 — Artec Studio 가 떠 있거나 스캐너 앞이 비었다 |
 | 캡처 이미지를 보고 싶다 | `debug_intrinsic_artec/<pose>.png` (intrinsic) · `debug_calib_artec/<pose>_raw.png`, `_aruco.png` (hand-eye). 자세마다 저장된다 |
 | 보드를 못 찾는다 | 인쇄 배율(§2) · 조명 반사 · 작동거리 250mm 벗어남 |
 | hand-eye 오차가 크다 | 자세 간 회전이 작다 → **30° 이상** 확보. 자세 수를 15개 이상으로 |
