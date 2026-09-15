@@ -151,7 +151,7 @@ def _capture_frame(client: ArtecClient):
 def main():
     if not SENSOR_FRAMES.exists():
         print(f"⚠ {SENSOR_FRAMES} 없음. hand-eye 먼저 완료 후 T_EC_artec 갱신 필요.")
-        return
+        return 1
     T_EC = load_transform(str(SENSOR_FRAMES), "T_EC_artec")
     print(f"[artec] T_EC_artec loaded  t={T_EC[:3,3]} m")
 
@@ -249,4 +249,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # ★ 실패를 exit code 로 알린다 (intrinsic_calib.py 주석 참고).
+    sys.exit(main() or 0)

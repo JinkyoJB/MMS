@@ -421,6 +421,25 @@ def main() -> None:
         print(f"  [info] intrinsic 로드: {intr_path}  "
               f"reproj_err={intr_data.get('reprojection_error_px', '?'):.3f}px  "
               f"→ solvePnP 경로 사용")
+        # ★ 낡은 intrinsic 을 조용히 쓰면 T_EC 가 통째로 틀린다.
+        #   K 는 **카메라 개체 종속**이라 스캐너를 바꾸면 무효다. 2026-09-15 현장에서
+        #   intrinsic 단계가 frame 부족으로 실패했는데 exit 0 이라 그냥 넘어갔고,
+        #   여기서 **구 스캐너(SP.10.36181288)의 K** 를 그대로 써버렸다.
+        _age_days = None
+        _when = str(intr_data.get("date", ""))
+        if _when:
+            try:
+                from datetime import date as _date
+                _age_days = (_date.today() - _date.fromisoformat(_when)).days
+            except ValueError:
+                pass
+        if _age_days is not None and _age_days > 90:
+            print(f"\n  ⚠ 이 intrinsic 은 {_when} 측정 ({_age_days}일 전) 이다.")
+            print( "     스캐너를 교체·탈착했다면 **무효**다 — K 는 개체 종속.")
+            print( "     다시 잡으려면:  python scripts/artec/intrinsic_calib.py")
+            if input("     그래도 이 값으로 진행? (y/N) > ").strip().lower() != "y":
+                print("  중단. intrinsic 을 먼저 다시 잡을 것.")
+                return 1
     else:
         print(f"  [info] intrinsic 없음 — UV→3D fallback (정확도 낮음)")
 
@@ -485,7 +504,7 @@ def main() -> None:
     print(f"\n수집된 샘플: {calibrator.n_samples}")
     if calibrator.n_samples < MIN_SAMPLES:
         print(f"⚠ 샘플 부족 — 최소 {MIN_SAMPLES} 필요. 종료.")
-        return
+        return 1
 
     print("calibrate() 실행...")
     calibrator.calibrate()
@@ -499,4 +518,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # ★ 실패를 exit code 로 알린다 — intrinsic_calib.py 와 같은 이유.
+    #   조용히 exit 0 으로 끝나면 calibrate.py 가 다음 단계로 넘어가고,
+    #   **낡은 값을 그대로 쓴 결과물**이 만들어진다 (2026-09-15 현장 사고).
+    sys.exit(main() or 0)

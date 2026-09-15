@@ -154,6 +154,36 @@ python scripts\artec\hand_eye_calib.py       # ② T_EC
 python scripts\artec\turntable_calib.py      # ③ T_B_F0 (rim 클릭)
 ```
 
+### ⚠ 자세 목록(`artec_calibration_poses.yaml`)이 지금 배치와 맞아야 한다
+
+`calibrate.py` 는 yaml 에 기록된 자세를 순회하며 보드를 찍는다. **턴테이블이나 보드
+위치가 바뀌었으면 그 자세들은 보드를 못 본다.** 2026-09-15 현장에서 23자세 중 17개가
+이렇게 버려져 intrinsic 이 최소 프레임(8)을 못 채웠다:
+
+```
+[manual_01] charuco 부족 (aruco=0, charuco=0) — skip
+[manual_06] charuco 부족 (aruco=0, charuco=0) — skip
+...
+수집 frames: 6
+⚠ 최소 8 frame 필요. 종료.
+```
+
+**자세를 다시 딴다** — 로봇을 손으로 끌어다 잡는다:
+
+```powershell
+python scripts\artec\hand_eye_calib.py --interactive
+```
+
+- 로봇이 **teach mode**(중력보상)로 들어간다 — 팔을 손으로 밀 수 있다
+- 보드가 잘 보이는 자세로 옮기고 `Enter` → ChArUco 가 검출되면 yaml 에 `manual_NN` 추가
+- `q` + `Enter` 로 종료
+- **12개 이상**, 자세 간 회전 **30° 이상**, 거리·각도를 고루 섞는다
+
+> ⚠ 이건 SDK 로 teach mode 를 켜는 것이라 **웹 UI 탭이 닫혀 있어야** 한다 (§2 ②).
+>
+> 기존 yaml 에 이어서 추가된다(번호가 이어짐). 배치가 크게 바뀌었으면 옛 자세는
+> 계속 실패하므로 **yaml 을 비우고 새로 따는 편이 낫다** — 옛 파일은 이름을 바꿔 남겨둔다.
+
 ### ② hand-eye 를 돌릴 때
 
 로봇이 여러 자세를 순회하며 보드를 찍는다.
@@ -244,6 +274,9 @@ python main_artec.py          # BACKEND = "real" 확인
 | 증상 | 원인 / 조치 |
 |---|---|
 | `createScanner failed (ErrorCode=0xC0050000)` | **Artec Studio 가 스캐너를 점유 중**이다. 완전히 종료할 것 (§2). `enumerate` 는 되는데 `open` 만 실패하면 거의 항상 이것이다 |
+| `charuco 부족 (aruco=0…) — skip` 이 많다 | 자세 목록이 지금 배치와 안 맞는다 → `--interactive` 로 다시 딴다 (§3) |
+| `⚠ 최소 8 frame 필요. 종료.` | 위와 같은 원인. **이 경우 exit 1 로 멈춘다** — 예전엔 조용히 통과해 다음 단계가 낡은 값을 썼다 |
+| hand-eye 가 intrinsic 날짜를 묻는다 | 90일 넘은 intrinsic 이다. 스캐너를 바꿨으면 **`N` 을 눌러 중단**하고 intrinsic 부터 |
 | 보드를 못 찾는다 | 인쇄 배율(§2) · 조명 반사 · 작동거리 250mm 벗어남 |
 | hand-eye 오차가 크다 | 자세 간 회전이 작다 → **30° 이상** 확보. 자세 수를 15개 이상으로 |
 | 특정 자세만 계속 실패 | IK 시드 문제일 수 있다 — `1_calibration.md` T1 |

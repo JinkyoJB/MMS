@@ -328,7 +328,7 @@ def main() -> None:
     print(f"\n수집 frames: {len(corners)}")
     if len(corners) < MIN_FRAMES:
         print(f"⚠ 최소 {MIN_FRAMES} frame 필요. 종료.")
-        return
+        return 1
 
     # ── calibrateCamera (신 API: matchImagePoints → calibrateCamera) ───
     print("\ncalibrateCamera 실행...")
@@ -347,7 +347,7 @@ def main() -> None:
 
     if len(obj_pts_list) < MIN_FRAMES:
         print(f"⚠ 매칭 후 frame {len(obj_pts_list)} < {MIN_FRAMES} — 종료")
-        return
+        return 1
 
     flags = 0
     if args.fix_k3:
@@ -365,7 +365,7 @@ def main() -> None:
         )
     except Exception as e:
         print(f"⚠ calibrate 실패: {e}")
-        return
+        return 1
 
     print(f"\nreproj rmse = {ret:.3f} px  (used {len(obj_pts_list)} frames)")
     print(f"K =\n{K}")
@@ -385,7 +385,12 @@ def main() -> None:
         "dist": [float(v) for v in dist.flatten().tolist()],
     }, default_flow_style=None, allow_unicode=True), encoding="utf-8")
     print(f"\n[done] {OUTPUT_YAML}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    # ★ 실패는 **exit code 로** 알려야 한다. 예전엔 return 만 해서 frame 부족으로
+    #   죽어도 exit 0 이었고, calibrate.py 가 "✓ 완료" 로 보고 다음 단계로 넘어갔다
+    #   → hand-eye 가 **구 스캐너의 intrinsic** 을 그대로 써버렸다 (2026-09-15 현장).
+    #   조용한 실패가 가장 위험하다.
+    sys.exit(main() or 0)
