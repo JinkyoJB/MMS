@@ -8,7 +8,7 @@
 
 | 목적 | 볼 문서 |
 |---|---|
-| 설치하고 돌려보기 | `setup/setup_envs.sh` → **인수인계서_A1** §3 |
+| 설치하고 돌려보기 | Windows → **`docs/install.md`** · Linux → `setup/setup_envs.sh` → **인수인계서_A1** §3 |
 | 조정 가능한 설정 찾기 | **인수인계서_A1** §4.7 |
 | **알고리즘이 왜 이런가** | **이 문서** §1~8 |
 | 단계별 상세 | `docs/*.md` (calibration / phase1 / phase2 / collision / hw_layout) |
