@@ -54,7 +54,7 @@ TURNTABLE_BD_ID = 0
 # ── MMS Artec 설정 ────────────────────────────────────────────────────
 CFG = ArtecMMSConfig(
     artec=ArtecConfig(
-        serial_number=None,                 # None → 첫 번째 스캐너 (Spider SP.10.36181288)
+        serial_number=None,                 # None → 첫 번째 스캐너 (Spider SP.10.79103441)
         capture_texture=True,
         target_interval_s=0.0,
     ),

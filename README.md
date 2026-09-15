@@ -104,7 +104,7 @@ bash setup/setup_envs.sh          # mms-env / env_isaacsim / step2usd 생성 + �
 | 2 | OpenCV 5.x엔 `cv2.calibrateHandEye`가 없다 → **`opencv<5` 고정**. 상수는 남아 있어 import는 통과하므로 발견이 늦다 |
 | 3 | 콘솔 cp949 이모지 깨짐 → `PYTHONIOENCODING=utf-8` |
 
-**장비** — Artec Spider `SP.10.36181288` (SDK 1.18.4) · xArm7 `192.168.1.210` ·
+**장비** — Artec Spider `SP.10.79103441` (SDK 1.18.4) · xArm7 `192.168.1.210` ·
 턴테이블 Ezi-SERVO `192.168.0.10` **UDP**(TCP는 지속 polling 시 socket 막힘)
 
 **실행 명령**
@@ -201,6 +201,9 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 - 턴테이블 축: disc rim 점 → 3D 원 피팅. **0.015° / 0.7mm**
 - ★ 카메라 위치는 SLAM 이 아니라 **로봇 FK + T_EC** 가 알려준다
 
+> ⚠ **`hand_eye_artec.yaml` · `sensor_frames.yaml::T_EC_artec` 은 구 스캐너 기준** —
+> `SP.10.79103441` 로 교체되었으니 재캘리브 후 사용한다.
+>
 > ⚠ `turntable_frame.yaml`(2026-04-23)은 Artec 장착 이전 값 → **재캘리브 1순위**
 
 → **`docs/1_calibration.md`** (원리·코드 지도·규약·함정·남은 일)
@@ -247,6 +250,10 @@ SDK General Pipeline 으로 최종 메시 생성. **Cleaning 은 반드시 Fusio
 
 ## 알려진 한계 / 가정
 
+0. **hand-eye 재캘리브 필수** — 스캐너가 `SP.10.36181288` → `SP.10.79103441` 로 교체됐다.
+   `T_EC_artec`(2026-04-29)은 구 개체 기준이라 그대로 쓰면 `T_CB` 가 틀어진다.
+   카메라 광학 프레임은 개체마다 다르다 — 같은 모델이라도 재사용 불가.
+   (`scripts/artec/calibrate.py`, §1 · `docs/1_calibration.md`)
 1. **turntable_frame.yaml 미검증** — T_BF0 2026-04-23(Artec pivot 이전), rim 3점·residual 0.0.
    Phase 2 hint·NBV·recovery raycast 가 같은 T_BF0 의존 → 정밀도 의심 시 1순위 재캘리브
    (`scripts/artec/turntable_calib.py`). 라이브 뷰어는 SDK 정합행렬 사용해 이 의존 없음.

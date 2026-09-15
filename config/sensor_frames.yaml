@@ -1,3 +1,8 @@
+# ⚠ 이 T_EC_artec 은 **구 스캐너 SP.10.36181288** 기준이다 — 재캘리브 필요.
+#   현재 장착된 스캐너는 SP.10.79103441 로 교체되었다.
+#   카메라 광학 프레임이 개체마다 다르므로 이 값을 그대로 쓰면 T_CB 가 틀어진다.
+#   재캘리브: scripts/artec/calibrate.py  (docs/1_calibration.md)
+#
 # Artec scanner (SP.10.36181288) hand-eye calibration result
 # 2026-04-29  charuco_uv3d_procrustes + solvePnP refinement
 # t_err=3.55mm  r_err=1.30°  (PARK method, n=22 poses)
