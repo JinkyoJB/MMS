@@ -50,7 +50,22 @@ python scripts\artec\check_calibration.py
 
 1. 작업 반경에 사람·케이블·공구 없는지 **눈으로**
 2. **비상정지 버튼이 손에 닿는 곳에**
-3. 장비 3종 살아 있는지: `python scripts\check_devices.py`
+3. **Artec Studio 를 완전히 종료한다** — 아래 ⚠
+4. 장비 3종 살아 있는지: `python scripts\check_devices.py`
+
+> ⚠ **스캐너는 SDK 와 Artec Studio 중 하나만 잡을 수 있다.** Studio 가 떠 있으면
+> 목록 조회는 되는데 **열기만 실패**한다:
+>
+> ```
+> RuntimeError: [ArtecSDK] createScanner failed (ErrorCode=0xC0050000)
+> ```
+>
+> 창을 닫아도 프로세스가 남는 경우가 있다. 확인하고 죽인다:
+>
+> ```powershell
+> Get-Process astudio_pro, artec-ray-server -ErrorAction SilentlyContinue
+> Stop-Process -Name astudio_pro -Force
+> ```
 
 > 웹 UI 는 **조준에 쓰고 나서 닫는다** — 순서가 있다. 아래 〈배치와 조준〉 참고.
 
@@ -228,6 +243,7 @@ python main_artec.py          # BACKEND = "real" 확인
 
 | 증상 | 원인 / 조치 |
 |---|---|
+| `createScanner failed (ErrorCode=0xC0050000)` | **Artec Studio 가 스캐너를 점유 중**이다. 완전히 종료할 것 (§2). `enumerate` 는 되는데 `open` 만 실패하면 거의 항상 이것이다 |
 | 보드를 못 찾는다 | 인쇄 배율(§2) · 조명 반사 · 작동거리 250mm 벗어남 |
 | hand-eye 오차가 크다 | 자세 간 회전이 작다 → **30° 이상** 확보. 자세 수를 15개 이상으로 |
 | 특정 자세만 계속 실패 | IK 시드 문제일 수 있다 — `1_calibration.md` T1 |

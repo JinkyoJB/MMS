@@ -245,6 +245,12 @@ Open3D 창이 몇 번 뜬다 — 창을 닫으면 다음 단계로 넘어간다.
 > **스캐너 앞에 물체를 두고 실행한다.** 빈 공간을 보고 있으면 `capture() → None`
 > (스캔 데이터 없음) 이 나온다 — 바인딩 문제가 아니다. 작업거리 **225mm 근처**가 좋다.
 
+> ⚠ **Artec Studio 를 켠 채로 돌리면 실패한다.** 스캐너는 SDK 와 Studio 중 하나만
+> 잡을 수 있다. 목록 조회는 되는데 열기만
+> `createScanner failed (ErrorCode=0xC0050000)` 로 죽으면 이것이다.
+> 창을 닫아도 프로세스가 남을 수 있다:
+> `Get-Process astudio_pro, artec-ray-server -ErrorAction SilentlyContinue`
+
 전체가 무겁다면 연결 확인만 하는 §3 의 한 줄로 대체할 수 있다:
 
 ```powershell
@@ -426,6 +432,7 @@ venv 는 인터프리터를 복제할 뿐이라 **Python 3.11 을 먼저 설치*
 | winget 이 약관 프롬프트에서 멈춤 | `--source winget` 추가 |
 | CMake `Generator ... does not match` | `build\` 삭제 후 설치된 VS 버전에 맞는 Generator 로 재구성 |
 | `.pyd` 는 있는데 `DLL load failed` | 래퍼를 거치지 않고 직접 import 했다 → `artec_base._load()` 먼저 |
+| `createScanner failed (ErrorCode=0xC0050000)` | Artec Studio 가 스캐너를 점유 중 → 완전히 종료 (§4-4). `enumerate` 는 되는데 `open` 만 실패하면 거의 항상 이것 |
 | `import artec_base_py` 실패 (`.pyd` 없음) | 3단계 빌드 미실행, 또는 `-DPython_EXECUTABLE` 누락으로 다른 파이썬용 `.pyd` 생성 |
 | `isaacsim` ModuleNotFoundError | `main_artec.py` 의 `BACKEND` 가 `"isaac"` → 실물이면 `"real"` 로 |
 | 빌드 시 `error C2440: 'initializer list'에서 'pybind11::array_t<...>'` | MSVC 가 2-요소 brace shape `{n, 3}` 을 모호하게 본다. shape 을 `std::vector<py::ssize_t>{...}` 로 감싼다 (현재 소스에 반영됨). pybind11 버전과 무관 |
