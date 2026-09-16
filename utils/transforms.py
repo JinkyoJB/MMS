@@ -135,6 +135,36 @@ class TurntableTransformConfig:
         self.T_BF0 = T_BF0
         self._T_FB0 = np.linalg.inv(T_BF0)   # cached; T_BF0 is constant
 
+    # ── base 기준 접근자 ───────────────────────────────────────────────
+    #
+    # ★ **`T_BF0[:3,3]` 을 턴테이블 위치로 쓰면 안 된다.** T_BF0 는 B→F 라
+    #   그 열은 변환 성분이지 base 좌표가 아니다. 반드시 역변환이다.
+    #
+    #   2026-09-16 실물에서 이 실수로 **EE 가 로봇 base 에 충돌했다** —
+    #   Phase 1 플래너가 실측 원판 [0.799,0.005,0.688] 대신
+    #   [-0.862,0.080,-0.603] (2105mm 떨어진 base 반대쪽)을 겨눴다.
+    #   축 방향도 18.1° 틀렸다. 같은 실수가 check_calibration 교차검증,
+    #   Phase 2 NBV 충돌 world, recovery 조준에도 퍼져 있었다.
+    #
+    #   그래서 계산을 여기 한 곳에 두고 호출부는 이것만 쓴다.
+
+    @property
+    def axis_point_B(self) -> np.ndarray:
+        """회전축이 disc 표면과 만나는 점 (= F 원점)의 **base 좌표** (3,)."""
+        return self._T_FB0[:3, 3].copy()
+
+    @property
+    def axis_dir_B(self) -> np.ndarray:
+        """회전축 방향 (= F 의 +z)의 **base 좌표** 단위벡터 (3,)."""
+        d = self._T_FB0[:3, 2].astype(float).copy()
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-9 else d
+
+    @property
+    def axis_xy_B(self) -> np.ndarray:
+        """회전축의 base xy (2,) — 방위각 계획에서 쓴다."""
+        return self.axis_point_B[:2]
+
     def T_FB(self, theta: float) -> np.ndarray:
         """
         F → B transform at turntable angle theta (rad).

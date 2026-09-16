@@ -169,16 +169,48 @@ class Turntable:
         return True
 
     @check_connection
-    def set_servo_on(self, state: bool = True) -> bool:
-        # 모터 서보 온
-        val = 1 if state else 0
-        if FAS_ServoEnable(self.bd_id, val) != FMM_OK:
+    def set_servo_on(self, state: bool = True, timeout_s: float = 2.0) -> bool:
+        """서보 ON/OFF. **상태가 실제로 바뀔 때까지 기다린다.**
+
+        ★ 옛 코드의 비트 비교가 틀렸다:
+
+              if (status & FFLAG_SERVOON) == (val << 0):
+
+          `FFLAG_SERVOON` 은 **0x00100000 (bit 20)** 이다. 그래서
+            · 서보 ON  → status & mask = 0x00100000 ≠ 1 → **False** → 함수가
+              암묵적으로 `None` 을 돌려주고 "Servo ON" 도 안 찍힌다
+            · 서보 OFF → 0 == 0 → True ("Servo OFF" 만 정상 동작)
+          `(val << 0)` 은 mask 가 bit 0 일 때만 맞는 식이다.
+
+          게다가 확인 실패 시 `time.sleep(0.001)` 하나로 끝나서, 서보가 물리적으로
+          체결되기 전에 호출자가 다음 명령을 보낸다. 실측(2026-09-16):
+          `move_velocity` 가 계속 거부되고 status 에 FFLAG_SERVOON 이 없었다 —
+          main_artec.py 의 턴테이블이 안 돌던 원인.
+
+        알람이 걸려 있으면 서보가 안 켜지므로 먼저 리셋을 시도한다.
+        """
+        want = bool(state)
+        if want:
+            self.check_drive_err()
+        if FAS_ServoEnable(self.bd_id, 1 if want else 0) != FMM_OK:
+            print(f"[Turntable] FAS_ServoEnable({want}) 실패")
             return False
+
+        mask = int(EZISERVO2_AXISSTATUS.FFLAG_SERVOON)
+        deadline = time.time() + float(timeout_s)
+        while time.time() < deadline:
+            res, status = FAS_GetAxisStatus(self.bd_id)
+            if res == FMM_OK and bool(status & mask) == want:
+                print(f"Board ID {self.bd_id}: Servo {'ON' if want else 'OFF'}")
+                return True
+            time.sleep(0.02)
+
         res, status = FAS_GetAxisStatus(self.bd_id)
-        if (status & EZISERVO2_AXISSTATUS.FFLAG_SERVOON) == (val << 0): # 비트 확인 logic
-            print(f"Board ID {self.bd_id}: Servo {'ON' if state else 'OFF'}")
-            return True
-        time.sleep(0.001)
+        print(f"[Turntable] ✘ 서보 {'ON' if want else 'OFF'} 확인 실패 "
+              f"({timeout_s:.1f}s) — status=0x{int(status):08X} "
+              f"(FFLAG_SERVOON {'set' if status & mask else 'clear'}). "
+              f"알람·전원·E-STOP 확인")
+        return False
 
     @check_connection
     def GetAxisStatus(self):
@@ -294,15 +326,36 @@ class Turntable:
     
     # --- 동작 함수 ---
     @check_connection
+    @check_connection
     def move_velocity(self, vel_rad_s: float, direction: int) -> bool:
-        # 설정된 가속도를 유지하며 지정한 속도로 회전 시작
+        """지정 속도로 연속 회전 시작.
+
+        ★ `move_abs` 와 달리 이 함수엔 `@check_connection` 과 알람 리셋이 빠져
+          있었고, 실패 시 SDK return code 도 안 찍었다. 그래서 거부되면
+          "move_velocity 거부" 라는 말만 남고 원인을 알 수 없었다
+          (2026-09-16: 실제 원인은 서보가 안 켜진 것이었는데 그게 안 보였다).
+        """
+        # 알람이 latch 돼 있으면 모션 명령이 거부된다 — move_abs 와 같은 처리.
+        self.check_drive_err()
+
         acc_ms = self._calculate_accel_time_ms(vel_rad_s, self.default_accel)
         self.vel_opt.wCustomAccDecTime = acc_ms
-        
         pps = int((self.pulses_per_rev * abs(vel_rad_s)) / (np.pi * 2))
-        
-        if FAS_MoveVelocityEx(self.bd_id, pps, direction, self.vel_opt) == FMM_OK:
+
+        ret = FAS_MoveVelocityEx(self.bd_id, pps, direction, self.vel_opt)
+        if ret == FMM_OK:
             return True
+
+        res, status = FAS_GetAxisStatus(self.bd_id)
+        servo_on = bool(status & int(EZISERVO2_AXISSTATUS.FFLAG_SERVOON))
+        err_all = bool(status & int(EZISERVO2_AXISSTATUS.FFLAG_ERRORALL))
+        print(f"[Turntable] move_velocity 실패 (return={ret}) — "
+              f"vel={np.degrees(vel_rad_s):.1f}°/s dir={direction} pps={pps}  "
+              f"status=0x{int(status):08X} servo_on={servo_on} error={err_all}")
+        if not servo_on:
+            print("  → 서보가 꺼져 있다. set_servo_on(True) 가 성공했는지 확인할 것")
+        if err_all:
+            print("  → 드라이브 알람이 걸려 있다. 전원·E-STOP·과부하 확인")
         return False
 
     @check_connection
