@@ -1,5 +1,24 @@
 # Artec Hand-Eye 캘리브레이션 — 2026-04-29
 
+> ⚠ **이 문서는 2026-04-29 시점의 작업 기록이다. 실행 절차로 따라가지 말 것.**
+>
+> 현재 절차는 **`docs/calibration_runbook.md`**, 진입점은
+> **`python scripts/artec/calibrate.py`** 하나다.
+>
+> 이 문서와 지금이 다른 점:
+> - 스크립트 경로가 `scripts/artec_*.py` → **`scripts/artec/*.py`** 로 바뀌었다
+> - `--interactive`(손으로 끌어 캡처하는 teach mode)는 **제거됐다**
+>   (hand-eye 2026-09-15, intrinsic 2026-09-16). 자세 목록은
+>   `gen_calib_poses.py` 가 만든다
+> - 보드 기본값이 `spider`(5×3/20mm, 코너 8개) → **`spider_dense`**
+>   (7×5/12mm, 코너 24개)로 바뀌었다
+> - 여기 적힌 `T_EC` 는 **구 스캐너 `SP.10.36181288`** 값이다
+>   (현재 장착: `SP.10.79103441`)
+>
+> 아래 "보드 square 18.5mm 실측(인쇄 기준 20mm)" 은 오차가 아니라
+> `make_charuco.py` 의 **여백 버그**였다 — 출력 크기에서 여백을 깎아 칸이
+> 공칭보다 작게 인쇄됐다(20mm → 18.67mm). 2026-09-16 수정.
+
 > 센서를 PhoXi → Artec 으로 교체한 뒤 `T_EC_artec` 를 새로 측정한 기록.
 > 시도 1회 (UV→3D Procrustes) 가 25mm 잔차 → solvePnP 로 갈아탄 뒤 **3.55mm /
 > 1.30°** 로 수렴. 본 문서는 최종 파이프라인 + 시행착오 정리.

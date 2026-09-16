@@ -149,28 +149,127 @@ python scripts\robot\home.py
 
 ```powershell
 conda activate mms-env
-cd C:\dev\MMS
+cd <리포 경로>          # 이 PC 는 C:\Users\user\workspace\MMS
 $env:PYTHONIOENCODING="utf-8"
 ```
 
 ### 한 번에 (권장)
 
 ```powershell
-python scripts\artec\calibrate.py            # 1→2→3 순서대로
-python scripts\artec\calibrate.py --from 2   # intrinsic 건너뛰고
-python scripts\artec\calibrate.py --only 3   # 턴테이블만
+python scripts\artec\calibrate.py                  # 1→2→3 순서대로
+python scripts\artec\calibrate.py --from 2         # intrinsic 건너뛰고
+python scripts\artec\calibrate.py --only 3         # 턴테이블만
+python scripts\artec\calibrate.py --no-via-home    # 자세마다 home 왕복 안 함 (3배 빠름)
 ```
 
 `calibrate.py` 는 **자체 로직이 없다.** 순서대로 부르고, 실패하면 거기서 멈춘다.
 개별로 불러도 결과는 같다.
 
-### 개별로
+| 인자 | 기본 | 뜻 |
+|---|---|---|
+| `--from N` | 1 | N 단계부터 |
+| `--only N` | — | N 단계만 |
+| `--no-via-home` | **꺼짐** | 1·2단계에서 자세마다 home 을 경유하지 않는다 |
+| `--skip-aim` | 꺼짐 | 시작 시 수동 조준 안내를 건너뛴다 |
+
+> **`--no-via-home` 은 기본이 아니다.** 켜면 1·2단계 이동량이 4230° → 1208° 로
+> 줄어 **7.1분 → 2.0분** 이 된다(20자세, 10 deg/s 기준). 기본이 아닌 이유는
+> `home→자세` 만 충돌 검사된 옛 자세 목록에서는 **자세↔자세 경로가 미검증**이기
+> 때문이다. 2026-09-16 이후 `gen_calib_poses.py` 가 만든 목록은 순서 최적화와
+> 자세 간 경로 검사를 거치므로 **안전하게 켤 수 있다.**
+
+### 한 단계만
 
 ```powershell
-python scripts\artec\intrinsic_calib.py      # ① K (최초 1회)
-python scripts\artec\hand_eye_calib.py       # ② T_EC
-python scripts\artec\turntable_calib.py      # ③ T_B_F0 (rim 클릭)
+python scripts\artec\calibrate.py --only 1   # ① K (최초 1회)
+python scripts\artec\calibrate.py --only 2   # ② T_EC
+python scripts\artec\calibrate.py --only 3   # ③ T_B_F0 (rim 클릭)
 ```
+
+인자를 넘기려면 `--only` 와 함께 `--` 뒤에 둔다:
+
+```powershell
+python scripts\artec\calibrate.py --only 2 -- --poses config\calibration\artec_calibration_poses.yaml
+```
+
+> 단계 스크립트(`intrinsic_calib.py` 등)를 직접 불러도 동작은 같다. 다만 순서
+> (K → T_EC → T_B_F0)를 건너뛰면 낡은 값이 조용히 들어가므로, 직접 실행하면
+> 안내가 한 번 뜬다.
+
+### 자주 쓰는 인자 — 단계별
+
+> ⚠ **`--no-via-home` 과 `--no-home` 은 다른 인자다.** 이름이 비슷해서 헷갈린다.
+>
+> | 인자 | 있는 곳 | 뜻 |
+> |---|---|---|
+> | `--no-via-home` | 1·2단계 (`calibrate.py`) | 자세를 순회할 때 **매번 home 을 경유하지 않는다** |
+> | `--no-home` | 3단계 (`turntable_calib.py`) | 시작할 때 **아무 데도 안 간다** |
+>
+> 3단계는 자세 순회가 없어서 `--no-via-home` 이 없고,
+> 1·2단계는 시작 위치 개념이 없어서 `--no-home` 이 없다.
+
+**① intrinsic / ② hand-eye** (둘 다 자세 목록을 순회한다)
+
+| 인자 | 기본 | 뜻 |
+|---|---|---|
+| `--no-via-home` | 꺼짐 | home 왕복 생략 (위 설명 참고) |
+| `--poses PATH` | `artec_calibration_poses.yaml` | 자세 목록 |
+| `--board NAME` | `spider_dense` | 보드 프리셋 |
+| `--square-mm V` | 프리셋값 | 인쇄 실측으로 보정 |
+| `--start-from N` | 0 | N 번째 자세부터 (중간에 끊겼을 때) |
+
+**③ 턴테이블 rim** — 시작 자세와 조절 수단이 핵심이다.
+
+| 인자 | 기본 | 뜻 |
+|---|---|---|
+| — | **기록된 rim 자세로 이동** | `artec_rim_pose.yaml` 이 있으면 그 자세로 간다 |
+| `--force-home` | — | 기록된 자세 대신 **home** 으로 |
+| `--no-home` | — | **아무 데도 안 간다** — 지금 자세 그대로 캡처 (`--no-via-home` 아님) |
+| `--save-pose` | — | 지금 자세를 rim 시작 자세로 기록하고 진행 |
+| `--sensitivity V` | 0.9 | 재구성 민감도. 흰 상판은 기본 0.5 로는 정점이 거의 안 나온다 |
+| `--range-mm N F` | 170 330 | 스캔 깊이 범위. 좁히면 배경 노이즈가 준다 |
+| `--jog-step MM` | 20 | 창 안 조그 한 번의 이동량 |
+| `--jog-rot-step DEG` | 10 | 창 안 조그 한 번의 회전량 |
+
+```powershell
+python scripts\artec\calibrate.py --only 3 -- --no-home
+python scripts\artec\calibrate.py --only 3 -- --sensitivity 1.0 --range-mm 250 350
+python scripts\artec\calibrate.py --only 3 -- --save-pose
+```
+
+**rim 창 안에서 쓰는 키**
+
+| 키 | 동작 |
+|---|---|
+| **좌클릭 / 우클릭** | rim 점 추가 / 취소 |
+| **Enter · Space** | 원 피팅 → 저장 여부 확인 → **결과 오버레이 창** |
+| **m** | 웹 UI 수동 모드 + 라이브 화면 (손으로 팔을 끌며 조준) |
+| **v** | 3D 메시 ↔ 텍스처 사진 전환 (기본 3D) |
+| **S** | 지금 자세를 rim 시작 자세로 저장 |
+| `w s a d e c` | base 프레임 ±x ±y ±z 이동 · `[ ]` 스텝 절반/두배 |
+| `o p` | **광축 roll** — 화면만 회전, 보는 지점 유지 (호를 눕힐 때) |
+| `z x` / `t g` | J7 / J6 회전 (카메라가 선회한다) · `, .` 스텝 |
+| **r** / **h** / **q** | 재캡처 / home 복귀 / 종료 |
+
+> rim 은 원판 **전체가 화각에 안 들어온다** — 지름 ~238mm 인데 Spider 화각은
+> 320mm 에서 123×167mm 다. 목표는 전체가 아니라 **화면을 가로지르는 긴 호**이고,
+> 그 호를 따라 **6~10점을 넓게** 찍는다. 3점이면 잔차가 **항상 0** 이라 검증이
+> 성립하지 않는다.
+
+### ④ 결과를 눈으로 검증 — `turntable_overlay.py`
+
+숫자(점 수·잔차·반경)가 전부 통과해도 축이 엉뚱한 곳에 있을 수 있다. 저장된
+`T_B_F0` 를 실제 화면에 투영해 **실제 테두리와 겹치는지** 본다.
+
+```powershell
+python scripts\artec\turntable_overlay.py                 # 지금 자세 (안 움직임)
+python scripts\artec\turntable_overlay.py --pose rim      # 기록된 rim 자세로 ⚠ 움직임
+python scripts\artec\turntable_overlay.py --save out.png
+```
+
+자홍=실제 테두리, 빨강=피팅 원, 초록=실측 반경(119mm) 원, 청록=축.
+**빨강·초록이 둘 다 자홍에서 벗어나면 반경이 아니라 축의 위치·기울기가 틀린 것이다.**
+`--only 3` 을 저장까지 마치면 이 창이 자동으로 뜬다.
 
 ### ⚠ 자세 목록(`artec_calibration_poses.yaml`)이 지금 배치와 맞아야 한다
 
@@ -189,10 +288,30 @@ python scripts\artec\turntable_calib.py      # ③ T_B_F0 (rim 클릭)
 **자세를 다시 만든다** — 손으로 잡을 필요 없이 자동 생성된다.
 
 ```powershell
+# ★ 권장 — 지금 보이는 보드를 기준으로 (T_EC 계통 오차가 1차 상쇄된다)
+python scripts\artec\gen_calib_poses.py --from-view            # 미리보기
+python scripts\artec\gen_calib_poses.py --from-view --write    # 저장
+
+# 셀 모델 기준 (로봇·스캐너 없이 오프라인)
 python scripts\artec\gen_calib_poses.py                        # ① 원판 후보 확인
 python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 # ② 미리보기
 python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 --write   # ③ 저장
 ```
+
+| 인자 | 기본 | 뜻 |
+|---|---|---|
+| `--from-view` | 꺼짐 | 지금 보이는 ChArUco 를 검출해 기준점으로 |
+| `--center X Y Z` | — | 기준점을 직접 (base, m) |
+| `--hint-xy X Y` | — | 셀 모델에서 원판을 고를 힌트 |
+| `--standoff M` | 0.32 | 조준 여유로 정한 값 (스캔 거리가 아니다) |
+| `--rolls ...` | −45…110 (8개) | **좁히지 말 것** — 90°로 좁혔다가 유효 자세가 81→9 로 무너진 적이 있다 |
+| `--max-poses N` | 20 | 상한 |
+| `--fov-margin-px V` | 40 | 보드가 프레임에 들어오는지 검사할 때의 가장자리 여유 |
+| `--no-fov-gate` | 꺼짐 | 그 검사를 끈다 |
+| `--write` | 꺼짐 | 저장 (없으면 미리보기만) |
+
+저장 시 자세를 **이동거리 최소 순서로 재배열**하고 자세↔자세 경로를 충돌 검사한다
+— 그래서 `--no-via-home` 을 안전하게 쓸 수 있다.
 
 **충돌 셀 모델**(`4_collision.md` §6)에서 턴테이블 원판을 찾아 그 위 반구에 자세를
 깔고, 해석 IK + 충돌 게이트로 거른다. sim 이 쓰는 생성기와 **같은 코드**다.
@@ -282,7 +401,7 @@ python scripts\artec\gen_calib_poses.py --from-view --standoff 0.35 --write
 기록된 자세로 다시 돌리려면:
 
 ```powershell
-python scripts\artec\hand_eye_calib.py --poses config\calibration\artec_calibration_poses.yaml
+python scripts\artec\calibrate.py --only 2 -- --poses config\calibration\artec_calibration_poses.yaml
 ```
 
 ### ③ 턴테이블 rim 클릭
@@ -330,8 +449,14 @@ config\calibration\turntable_frame.yaml      ← ③
 ## 5. 끝나고 반드시 검산
 
 ```powershell
-python scripts\artec\check_calibration.py
+python scripts\artec\check_calibration.py       # 숫자 검사
+python scripts\artec\turntable_overlay.py       # 눈으로 검사 (T_B_F0 를 화면에 투영)
 ```
+
+**둘 다 봐야 한다.** `check_calibration.py` 는 점 수·잔차·반경만 본다 — 점들끼리
+일관된 원인지는 알려주지만, 그 원이 **실제 원판 위에 놓였는지**는 모른다.
+2026-09-16 에 점 15개·잔차 0.18mm·반경 116mm 로 지표가 전부 OK 인데
+투영해 보니 실제 테두리와 **43mm** 어긋난 적이 있다(원인은 `T_EC` 회전 오차 5~7°).
 
 이 도구는 **두 독립 출처를 교차검증**한다 — 캘리브 결과(`T_B_F0`)가 가리키는 자리에
 충돌 캐시(실측 셀 모델)의 구조물이 실제로 있는지 본다. 엉뚱한 곳을 가리키면 여기서 걸린다.
@@ -341,9 +466,8 @@ python scripts\artec\check_calibration.py
 [FAIL] 그 자리에 아무것도 없다
 ```
 
-↑ **지금 저장된 값이 내는 결과다.** 턴테이블 축이 셀 모델과 전혀 다른 곳을 가리킨다
-(`T_B_F0` 원점 `[-0.766, -0.013, -0.686]`, base 기준 1.03m). 재캘리브가 필요한 이유가
-숫자로 드러난 것이다.
+↑ **2026-09-16 현재 저장된 값이 내는 결과다.** 턴테이블 축이 셀 모델과 다른 곳을
+가리킨다(`T_B_F0` 원점 `[-0.626, -0.177, -0.810]`, base 기준 1.04m).
 
 > 셀 모델 쪽이 의심되면 `docs/4_collision.md` §6 을 본다. 두 값이 독립이라
 > **둘이 맞으면 서로를 보증**하고, 안 맞으면 둘 중 하나가 틀린 것이다.
@@ -361,7 +485,7 @@ python main_artec.py          # BACKEND = "real" 확인
 | 증상 | 원인 / 조치 |
 |---|---|
 | `createScanner failed (ErrorCode=0xC0050000)` | **Artec Studio 가 스캐너를 점유 중**이다. 완전히 종료할 것 (§2). `enumerate` 는 되는데 `open` 만 실패하면 거의 항상 이것이다 |
-| `charuco 부족 (aruco=0…) — skip` 이 많다 | 자세 목록이 지금 배치와 안 맞는다 → `--interactive` 로 다시 딴다 (§3) |
+| `charuco 부족 (aruco=0…) — skip` 이 많다 | 자세 목록이 지금 배치와 안 맞는다 → `gen_calib_poses.py --from-view --write` 로 다시 만든다 (§3). *(`--interactive`(teach mode)는 2026-09-16 제거했다)* |
 | `⚠ 최소 8 frame 필요. 종료.` | 위와 같은 원인. **이 경우 exit 1 로 멈춘다** — 예전엔 조용히 통과해 다음 단계가 낡은 값을 썼다 |
 | hand-eye 가 intrinsic 날짜를 묻는다 | 90일 넘은 intrinsic 이다. 스캐너를 바꿨으면 **`N` 을 눌러 중단**하고 intrinsic 부터 |
 | `charuco 부족` 이 대부분 | **조준 기준점이 실제 보드와 다르다** → `--from-view` 로 다시 생성 (§3). 거리부터 의심하지 말 것 — `debug_intrinsic_artec/*.png` 로 확인된다 |

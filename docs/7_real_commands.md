@@ -69,29 +69,41 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3 # 한 단계만
 ### 1.1 ChArUco 보드 준비 (최초 1회)
 
 ```bash
-env -u PYTHONPATH python scripts/artec/make_charuco.py
+env -u PYTHONPATH python scripts/artec/make_charuco.py --pdf
 ```
-출력 PNG 를 **실척으로 인쇄**해 평평한 판에 붙인다. 기본 5×3 / sq 20mm / mk 15mm.
-> Spider 는 FOV 가 좁아 A4 7×5 보드는 화면 밖으로 나간다. 작은 보드를 쓴다.
+기본은 `spider_dense` — **7×5 / sq 12mm / mk 9mm (84×60mm, 내부 코너 24개)**.
+
+`--pdf` 로 나온 A4 PDF 를 **"실제 크기 / 100%"** 로 인쇄한다(`자동 맞춤` 끌 것).
+페이지에 100mm 검증 자가 같이 찍히니, 인쇄 후 재서 100mm 가 아니면 그 비율로
+`--square-mm` 을 보정한다. 인쇄물은 평평한 판에 주름 없이 붙인다.
+
+> Spider 는 FOV 가 좁다 — 320mm 에서 **가로 123mm × 세로 167mm** 뿐이다.
+> `a4` 프리셋(7×5 / 30mm = 210×150mm)은 화면 밖으로 나간다.
+> 구 `spider` 프리셋(5×3 / 20mm)은 들어가긴 하지만 내부 코너가 **8개뿐**이라
+> 조금만 잘려도 캘리브가 안 풀린다(2026-09-16 실측).
 
 ### 1.2 카메라 내부 파라미터
 
 ```bash
-env -u PYTHONPATH python scripts/artec/intrinsic_calib.py
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 1
 # → config/calibration/artec_intrinsic.yaml
 ```
 
 ### 1.3 Hand-eye `T_E_C`
 
 ```bash
-# 첫 실행 — 수동 모드: 로봇을 직접 움직이며 Enter 로 캡처 (성공 자세는 yaml 에 기록)
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py
+# 자세 목록을 먼저 만든다 (보드를 화면 중앙에 두고 실행)
+env -u PYTHONPATH python scripts/artec/gen_calib_poses.py --from-view --write
 
-# 이후 — 기록된 자세로 자동 순회
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
-    --poses config/calibration/artec_calibration_poses.yaml
-# → config/calibration/hand_eye_artec.yaml
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 2
+# → config/sensor_frames.yaml 의 T_EC_artec 를 **직접 갱신** (이전 값은 .bak)
 ```
+> 2026-09-16 이전에는 결과가 `config/calibration/hand_eye_artec.yaml` 에만 저장되고
+> `sensor_frames.yaml` 은 손으로 옮겨 적어야 했다. 그 단계가 빠지면 새 값이 아니라
+> **구 T_EC** 로 rim 캘리브가 돌아간다. 파일을 하나로 합쳤다.
+> 손으로 끌어 캡처하던 **수동(teach) 모드는 제거됐다** — hand-eye 2026-09-15,
+> intrinsic 2026-09-16. `set_mode(2)` 가 브레이크를 푸는데, 스캐너를 단 상태에서
+> 그걸 모른 채 시작하면 팔이 딸려 내려온다. 이제 자세 목록 순회만 한다.
 - **자세 15~25개**, 자세 간 **회전 ≥30°** 확보할 것 (적으면 안 풀린다)
 - 기준값: t_err **3.55mm** / r_err **1.30°** (2026-04-29)
 - 결과를 `config/sensor_frames.yaml::T_EC_artec` 에 반영한다
@@ -99,7 +111,7 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
 ### 1.4 턴테이블 축 `T_B_F0`
 
 ```bash
-env -u PYTHONPATH python scripts/artec/turntable_calib.py
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 3
 # → 원판 rim 위 점을 클릭 → config/calibration/turntable_frame.yaml
 ```
 - rim 이 한 화면에 다 안 들어오면 보이는 호(arc)에서 클릭. 3점이면 되지만 호가 짧으면 정밀도 저하

@@ -231,7 +231,7 @@ $ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
 ```
 
 ```powershell
-python scripts/artec/turntable_calib.py     # T_B_F0 재측정 — base 기준 턴테이블 축
+python scripts/artec/calibrate.py --only 3  # T_B_F0 재측정 — base 기준 턴테이블 축
 ```
 
 나온 `T_B_F0` 의 원점을 위 표의 `(0, 0, 0.835)` 와 비교한다.

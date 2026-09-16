@@ -47,21 +47,33 @@
 
 ```bash
 conda activate mms-env && cd "$MMS_ROOT"
-env -u PYTHONPATH python scripts/artec/make_charuco.py                  # spider (기본)
-env -u PYTHONPATH python scripts/artec/make_charuco.py --board spider_small
+env -u PYTHONPATH python scripts/artec/make_charuco.py --pdf            # spider_dense (기본)
+env -u PYTHONPATH python scripts/artec/make_charuco.py --board spider --pdf
 ```
 
-출력은 `debug_calib/charuco_<sx>x<sy>_<sq>_<mk>.png` 이며, `--out` 으로 바꿀 수 있다.
-바로 인쇄할 수 있는 PNG 를 저장소에도 넣어 두었다 — **`assets/charuco/`**.
+출력은 `debug_calib/charuco_<sx>x<sy>_<sq>_<mk>.png`(+`--pdf` 면 `.pdf`)이며,
+`--out` 으로 바꿀 수 있다.
 
-| 프리셋 | 칸 구성 | square / marker | 실물 크기 | 사전 | 비고 |
+| 프리셋 | 칸 구성 | square / marker | 실물 크기 | 내부 코너 | 비고 |
 |---|---|---|---|---|---|
-| **`spider`** | 5×3 | 20 / 15mm | **100×60mm** | `DICT_4X4_50` | **권장** |
-| `spider_small` | 5×3 | 16 / 12mm | 80×48mm | `DICT_4X4_50` | 더 가까이 볼 때 |
-| `a4` | 7×5 | 30 / 22mm | 210×150mm | `DICT_5X5_100` | 광각 카메라용. **Spider 에는 부적합** |
+| **`spider_dense`** | 7×5 | 12 / 9mm | **84×60mm** | **24** | **권장 (기본)** |
+| `spider` | 5×3 | 20 / 15mm | 100×60mm | 8 | 구 기본. 코너가 적어 잘림에 취약 |
+| `spider_small` | 5×3 | 16 / 12mm | 80×48mm | 8 | 더 가까이 볼 때 |
+| `a4` | 7×5 | 30 / 22mm | 210×150mm | 24 | 광각용. **Spider 에는 부적합** |
 
-Spider 는 FOV 가 30°×21° 로 좁고 작동거리가 0.2~0.3m 이므로, `a4` 보드는 화면 밖으로
-나가 검출되지 않는다. 처음 시도에서 A4 7×5 를 썼다가 이 문제로 5×3 으로 바꿨다.
+프리셋은 `mms_artec/utils/calibration/artec_charuco_detector.py::BOARD_PRESETS`
+**한 곳에서만** 정의한다. 검출기·보드 생성·자세 생성·캘리브가 모두 이것을 공유한다.
+
+### 왜 `spider_dense` 인가
+
+Spider 는 FOV 가 좁다. 실측 K 기준 **가로 21.8° / 세로 29.2°** 이고
+(텍스처 이미지가 960×1280 **세로로 긴** 형태라 가로가 더 좁다),
+standoff 320mm 에서 화각은 **123 × 167mm** 다. `a4` 보드는 당연히 나간다.
+
+구 `spider`(5×3/20mm)는 들어가긴 하지만 **내부 코너가 8개뿐**이라, 조금만 잘려도
+캘리브가 안 풀린다. 2026-09-16 실측에서 15장 전부 보드 모서리 2/4 가 프레임 밖이었고
+검출 코너는 4~6개에 그쳤다. `spider_dense` 는 코너가 **24개**로 3배이고 보드도
+100→84mm 로 작아져 가로 여유가 11.7 → **19.5mm** 로 늘어난다.
 
 ### 인쇄
 
@@ -69,14 +81,25 @@ Spider 는 FOV 가 30°×21° 로 좁고 작동거리가 0.2~0.3m 이므로, `a4
 > 이 옵션이 켜져 있으면 칸 크기가 달라지고, 검출은 정상으로 보이는데
 > `T_MC` 의 스케일이 틀려 결과가 조용히 어긋난다.
 
-인쇄한 뒤 **자로 한 칸을 실측한다.** 20mm 가 아니면 그 값을 캘리브 실행 시 넘긴다.
+**`--pdf` 로 나온 A4 PDF 를 인쇄하는 것을 권한다.** PNG 를 직접 인쇄하면 뷰어가
+DPI 를 임의로 가정해(72/96 DPI) 배율이 흔들린다 — 2026-09-16 실측에서 84mm 보드가
+A4 를 꽉 채워 칸이 12 → 29mm 로 나왔다. PDF 는 페이지 크기와 오브젝트 크기가
+문서에 박혀 있어 **"실제 크기/100%"** 로만 인쇄하면 배율이 확정된다.
+PDF 에는 **100mm 검증 자**가 같이 찍힌다.
+
+인쇄한 뒤 **자로 실측한다.** 여러 칸을 한 번에 재는 게 정확하다 — `spider_dense` 는
+가로 7칸 전체가 **84mm**, 세로 5칸이 **60mm**. 공칭과 다르면 그 값을 캘리브에 넘긴다.
 
 ```bash
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py --square-mm 19.8
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 2 -- --square-mm 19.8
 ```
 
-기본 해상도는 10 px/mm(= 300 DPI)라 100×60mm 보드가 1000×600 px 로 나온다.
-`--pixels-per-mm` 으로 조절한다.
+기본 해상도는 10 px/mm(= 254 DPI). `--pixels-per-mm` 으로 조절한다 — 12mm 칸처럼
+작은 보드는 **20 px/mm(508 DPI)** 를 권한다.
+
+> 2026-09-16 이전에는 `make_charuco.py` 가 출력 크기에서 여백을 깎아 **칸이 공칭보다
+> 작게** 인쇄됐다(`spider` 20mm → 18.67mm, −6.7%). 수정했지만, 그 이전에 뽑은
+> 인쇄물을 쓰고 있다면 반드시 실측해서 `--square-mm` 으로 보정할 것.
 
 ### 부착과 배치
 
@@ -107,7 +130,7 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py --square-mm 19.8
 
 | 단계 | 담당 | real | sim |
 |---|---|---|---|
-| ① 자세 생성 | `generate_hemisphere_poses` | ⚠ **미연결** — 아직 teach / yaml 순회 | 반구 자세 생성 |
+| ① 자세 생성 | `generate_hemisphere_poses` | `gen_calib_poses.py` 가 호출 → yaml → 순회 | 반구 자세 생성 |
 | ① 자세 이동 | `RobotIK.ik` (자체 해석 IK) | xArm SDK 로 모션 명령 | 관절공간 구동 |
 | ② 캡처 | — | Artec 실기 | Isaac 카메라 렌더 |
 | ③ 검출 | `ArtecCharucoDetector.detect` → `T_MC`(mm) | 공통 | 공통 |
@@ -115,13 +138,21 @@ env -u PYTHONPATH python scripts/artec/hand_eye_calib.py --square-mm 19.8
 | ⑤ 누적 | `HandEyeCalibrator.add_sample` | 공통 | 공통 |
 | 풀이 | `HandEyeCalibrator.calibrate` → `T_EC` | 공통 | 공통 |
 
-> 보드의 물리 사양(5×3, 20/15mm, `DICT_4X4_50`)은 `CharucoBoardSpec` 한 곳에서만 정의하고
-> 검출기와 텍스처 생성이 그것을 공유한다. 실물 인쇄본과 sim 텍스처가 어긋나면
-> 검출 자체가 무의미해지기 때문이다.
+> 보드의 물리 사양(기본 7×5, 12/9mm, `DICT_4X4_50`)은 `BOARD_PRESETS` 한 곳에서만
+> 정의하고 검출기·보드 생성·자세 생성이 그것을 공유한다. 실물 인쇄본과 sim 텍스처가
+> 어긋나면 검출 자체가 무의미해지기 때문이다.
 
-> ⚠ **① 자세 생성은 아직 sim 만 공유 코드를 쓴다.** 설계 의도는 real 도
-> `generate_hemisphere_poses` 를 쓰는 것이었고 그래서 sim 에서 먼저 구현했으나,
-> `scripts/artec/hand_eye_calib.py` 는 현재 teach/yaml 순회만 지원한다. 자세한 내용은 **T8**.
+> **① 자세 생성은 real 도 공유 코드를 쓴다** (2026-09-16). `gen_calib_poses.py` 가
+> `generate_hemisphere_poses` 를 호출해 `artec_calibration_poses.yaml` 을 만들고,
+> 캘리브 스크립트는 그 목록을 순회한다. 손으로 끌어 기록하던 **teach mode 는
+> 제거됐다** — hand-eye 2026-09-15, intrinsic 2026-09-16.
+>
+> 기준점은 두 가지로 잡는다:
+> - `--from-view` (권장) — 지금 보이는 ChArUco 를 검출해 그 보드 위에 반구를 세운다.
+>   **같은 `T_EC` 로 검출하고 같은 `T_EC` 로 겨누므로 `T_EC` 의 계통 오차가 1차 상쇄된다.**
+>   그래서 `T_EC` 가 낡아도 동작한다.
+> - `--hint-xy` / `--center` — 실측 셀 모델의 턴테이블 원판 위. `T_EC` 와 무관하게
+>   오프라인 생성 가능.
 
 ---
 
@@ -179,13 +210,17 @@ exec(open("/경로/MMS/sim_harness/MMS_ext_calibration.py").read())      # hand-
 ```bash
 conda activate mms-env && cd "$MMS_ROOT"
 
-env -u PYTHONPATH python scripts/artec/intrinsic_calib.py    # 카메라 K (최초 1회)
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py     # 자세 순회 → T_EC
+env -u PYTHONPATH python scripts/artec/calibrate.py           # 1→2→3 전체 (권장)
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 1  # 카메라 K 만
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 2  # 자세 순회 → T_EC
 
-# 기록된 자세로 재실행
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
+# 인자를 주려면 --only 와 함께 `--` 뒤에
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 2 -- \
     --poses config/calibration/artec_calibration_poses.yaml
 ```
+
+> **진입점은 `calibrate.py` 하나다.** 단계 스크립트를 직접 불러도 되지만 순서
+> (K → T_EC → T_B_F0)를 지켜야 하므로, 직접 실행하면 안내가 한 번 뜬다.
 
 → 결과를 `config/sensor_frames.yaml` 의 `T_EC_artec` 에 반영한다.
 자세 15~25개, 자세 간 회전 **≥30°** 확보할 것(→ T3).
@@ -280,7 +315,7 @@ x축은 base 의 x축을 그 평면에 투영한 것, y축은 z×x 이다.
 ```bash
 conda activate mms-env && cd "$MMS_ROOT"
 
-env -u PYTHONPATH python scripts/artec/turntable_calib.py      # rim 클릭
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 3   # rim 클릭
 # 또는 단일 진입점으로 3단계만
 env -u PYTHONPATH python scripts/artec/calibrate.py --only 3
 ```
@@ -394,12 +429,12 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3  # 3단계만
 **개별 실행** — 한 단계만 다시 잡거나 인자를 주고 싶을 때. 자세히는 §4(hand-eye) · §8(turntable).
 
 ```bash
-env -u PYTHONPATH python scripts/artec/make_charuco.py            # 보드 PNG (최초 1회, 실척 인쇄)
-env -u PYTHONPATH python scripts/artec/intrinsic_calib.py
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py
-env -u PYTHONPATH python scripts/artec/hand_eye_calib.py \
+env -u PYTHONPATH python scripts/artec/make_charuco.py --pdf      # 보드 PDF (최초 1회, 100% 인쇄)
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 1      # intrinsic
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 2      # hand-eye
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 2 -- \
     --poses config/calibration/artec_calibration_poses.yaml       # 기록된 자세로 재실행
-env -u PYTHONPATH python scripts/artec/turntable_calib.py
+env -u PYTHONPATH python scripts/artec/calibrate.py --only 3      # turntable
 ```
 
 자세 15~25개, 자세 간 회전 **≥30°** 확보할 것(→ T3).

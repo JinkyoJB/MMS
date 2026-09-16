@@ -165,7 +165,7 @@ x_B = tt.T_FB(theta) @ x_F   # F 좌표 → B 좌표
 x_F = tt.T_BF(theta) @ x_B   # B 좌표 → F 좌표
 
 # 2. 카메라 → 베이스 변환
-T_EC = load_transform("config/calibration/hand_eye_artec.yaml", "T_E_C")
+T_EC = load_transform("config/sensor_frames.yaml", "T_EC_artec")
 T_EB = robot.get_ee_pose_mat()       # xArm FK 결과 (4x4)
 T_CB = compute_T_CB(T_EB, T_EC)
 points_B = transform_points(T_CB, points_C)
@@ -225,8 +225,9 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 - 턴테이블 축: disc rim 점 → 3D 원 피팅. **0.015° / 0.7mm**
 - ★ 카메라 위치는 SLAM 이 아니라 **로봇 FK + T_EC** 가 알려준다
 
-> ⚠ **`hand_eye_artec.yaml` · `sensor_frames.yaml::T_EC_artec` 은 구 스캐너 기준** —
-> `SP.10.79103441` 로 교체되었으니 재캘리브 후 사용한다.
+> `sensor_frames.yaml::T_EC_artec` 은 **2026-09-16 재캘리브 완료** (`SP.10.79103441`,
+> solvePnP, 19자세). 캘리브 스크립트가 이 파일을 직접 갱신한다 — 별도
+> `hand_eye_artec.yaml` 은 폐지했다.
 >
 > ⚠ `turntable_frame.yaml`(2026-04-23)은 Artec 장착 이전 값 → **재캘리브 1순위**
 

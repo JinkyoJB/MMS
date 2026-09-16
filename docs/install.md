@@ -141,7 +141,7 @@ python -c "from mms_artec.sensor import artec_base; artec_base._load(); import a
 
 ```powershell
 conda activate mms-env
-cd C:\dev\MMS
+cd \MMS
 $env:PYTHONIOENCODING="utf-8"
 ```
 
@@ -264,7 +264,7 @@ python -c "from mms_artec.sensor import artec_base; artec_base._load(); import a
 
 ### 3종이 다 통과했다면
 
-다음은 **캘리브레이션**이다. 현재 `hand_eye_artec.yaml`(`T_EC`)·`turntable_frame.yaml`(`T_B_F0`)은
+다음은 **캘리브레이션**이다. 현재 `sensor_frames.yaml::T_EC_artec`·`turntable_frame.yaml`(`T_B_F0`)은
 둘 다 **구 스캐너(`SP.10.36181288`) 기준이라 재캘리브가 필요하다** — README §알려진 한계 0·1.
 절차는 `docs/1_calibration.md`, 스크립트는 `scripts/artec/calibrate.py` · `scripts/artec/turntable_calib.py`.
 
