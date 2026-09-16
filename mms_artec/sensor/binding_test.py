@@ -1,10 +1,10 @@
-# mms/sensor/artec/binding_test.py
+# mms_artec/sensor/binding_test.py
 #
 # Artec SDK 바인딩 전체 검증 스크립트.
 #
 # 실행
 # ----
-#   python mms/sensor/artec/binding_test.py
+#   python mms_artec/sensor/binding_test.py
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import os
 import numpy as np
