@@ -249,3 +249,6 @@ scripts/sim/log/
 *.exp
 *.ilk
 *.pdb
+
+# 캘리브 자세 생성 시 자동 백업 (gen_calib_poses.py --write)
+config/calibration/*.yaml.bak
