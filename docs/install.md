@@ -340,7 +340,7 @@ gh auth login                                    # private 저장소라 인증 �
 gh release download assets-v1 -R JinkyoJB/MMS -p 'mms-assets-v1.tar.zst' -D $env:TEMP
 ```
 
-검증 — **릴리스의 `.sha256` 파일은 0 바이트라 쓸 수 없다.** 본문 해시로 직접 비교한다:
+검증 — 릴리스에 `.sha256` 이 같이 올라와 있다:
 
 ```powershell
 (Get-FileHash "$env:TEMP\mms-assets-v1.tar.zst" -Algorithm SHA256).Hash.ToLower()
