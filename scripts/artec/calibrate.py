@@ -35,17 +35,21 @@ sim 에서 미리 확인하려면 → `scripts/sim/calib_handeye_sim.py`,
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+
+from scripts.artec._step_guard import ENV_FLAG as STEP_GUARD_ENV
 
 STEPS = [
     (1, "intrinsic  — 카메라 K",      "scripts/artec/intrinsic_calib.py",
      "config/calibration/artec_intrinsic.yaml"),
     (2, "hand-eye   — T_EC",          "scripts/artec/hand_eye_calib.py",
-     "config/calibration/hand_eye_artec.yaml → sensor_frames.yaml::T_EC_artec"),
+     "config/sensor_frames.yaml::T_EC_artec  (직접 갱신)"),
     (3, "turntable  — T_B_F0",        "scripts/artec/turntable_calib.py",
      "config/calibration/turntable_frame.yaml"),
 ]
@@ -68,7 +72,10 @@ def run(step_no: int, title: str, rel: str, out: str, extra: list[str]) -> bool:
     print(f"\n{'='*66}\n  [{step_no}/3] {title}\n  → {out}\n{'='*66}")
     cmd = [sys.executable, str(REPO / rel), *extra]
     print(f"  $ {' '.join(cmd)}\n")
-    r = subprocess.run(cmd, cwd=REPO)
+    # 자식에게 "드라이버가 부른 것" 표식을 준다 — 개별 스크립트의 순서 안내
+    # (`_step_guard.warn_if_direct`)가 여기서는 뜨지 않게.
+    env = {**os.environ, STEP_GUARD_ENV: "1"}
+    r = subprocess.run(cmd, cwd=REPO, env=env)
     if r.returncode != 0:
         print(f"\n✘ [{step_no}] 실패 (exit {r.returncode}) — 여기서 중단한다.")
         return False
@@ -83,6 +90,10 @@ def main() -> int:
                     help="이 단계부터 실행 (기본 1)")
     ap.add_argument("--only", type=int, choices=(1, 2, 3), help="이 단계만 실행")
     ap.add_argument("--skip-aim", action="store_true", help="수동 조준 안내 생략")
+    ap.add_argument("--no-via-home", action="store_true",
+                    help="자세마다 home 을 경유하지 않는다 — 1·2단계가 **3배 이상 빨라진다**. "
+                         "`gen_calib_poses.py` 가 자세↔자세 경로를 검사하고 순서를 "
+                         "최적화한 목록에서만 쓸 것 (2026-09-16 이후 생성분)")
     ap.add_argument("rest", nargs=argparse.REMAINDER,
                     help="-- 뒤의 인자는 해당 스크립트로 전달 (--only 와 함께 쓸 것)")
     args = ap.parse_args()
@@ -99,7 +110,11 @@ def main() -> int:
             return 1
 
     for no, title, rel, out in todo:
-        if not run(no, title, rel, out, extra if args.only == no else []):
+        step_extra = list(extra) if args.only == no else []
+        # 3단계(turntable)는 rim 클릭이라 자세 순회가 없다 — 플래그가 없다.
+        if args.no_via_home and no in (1, 2):
+            step_extra.append("--no-via-home")
+        if not run(no, title, rel, out, step_extra):
             return 1
 
     print(f"\n{'='*66}\n  캘리브레이션 완료\n{'='*66}")

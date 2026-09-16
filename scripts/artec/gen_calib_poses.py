@@ -50,20 +50,41 @@ OUT_YAML = _ROOT / "config" / "calibration" / "artec_calibration_poses.yaml"
 #   (0,15,30,45) x 8방위 → 25 생성 / 10 게이트 제외 / 15 유효, t 0.95mm r 0.10°
 POLARS_DEG = (0.0, 15.0, 30.0, 45.0)
 AZIS_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
-ROLLS_DEG = (-20.0, 0.0, 20.0)
+#: ★ **넓게** 준다. 좁히면 안 된다.
+#
+#  2026-09-16 실패 사례 — FOV 여유만 보고 (70,90,110) 로 좁혔다가 유효 자세가
+#  81 → **9개**로 무너졌다. 손목이 그 roll 로는 대부분의 반구 자세에 못 간다
+#  (IK 실패 196/225). FOV 여유를 벌려도 갈 수 있는 자세가 없으면 의미가 없다.
+#
+#  넓게 주면 roll 90°(FOV 에 유리)는 **갈 수 있는 자세에서만** 쓰이고 나머지는
+#  다른 roll 이 메운다. 실측 비교(기준점 동일, 상한 20자세):
+#     (-20,0,20)                    유효 81 → 상대회전 중앙값  92.6°
+#     (-45,-20,0,20,45,70,90,110)   유효 ~130 → 중앙값 ~102°
+#  roll 다양성은 AX=ZB 가 잘 풀리는 데 그 자체로 도움이 된다.
+ROLLS_DEG = (-45.0, -20.0, 0.0, 20.0, 45.0, 70.0, 90.0, 110.0)
 DIST_JITTER = (-0.02, 0.0, 0.02)
 #: 조준 오차에 대한 **여유**로 정한 값이지 스캔 거리가 아니다.
 #
-#   Spider FOV hfov 30° / vfov 22.62° · 보드 100×60mm · 작동거리 170~350mm
-#     standoff   화각(가로×세로)   보드 중심이 벗어나도 되는 여유
-#       250mm      134×100mm        17 × 20mm
-#       320mm      171×128mm        36 × 34mm     ← 기본값
-#       350mm      188×140mm        44 × 40mm
+# ⚠ 2026-09-16 정정 — 이 표의 가로/세로가 **뒤집혀 있었다.**
+#   옛 주석은 "hfov 30° / vfov 22.62°" 로 가로가 넓다고 봤지만,
+#   `artec_intrinsic.yaml` 의 실측 K(fx 2489 / fy 2456, 960×1280)로 계산하면
+#   **가로(960축) 21.8° · 세로(1280축) 29.2°** 로 정반대다.
 #
-# 2026-09-15 실측: 조준 계통 오차가 **32mm** 였다(구 T_EC 회전 8.6°).
-# 250mm 의 17mm 여유로는 원리적으로 못 담아 20자세 중 18자세가 잘렸다.
-# 거리를 올려도 도달성 손해는 거의 없다(유효 자세 93→85). 코너 정밀도는
-# 보드가 프레임의 58% 를 차지하므로 subpixel 검출에 충분하다.
+#     standoff   실제 화각(가로×세로)   보드 84×60mm 기준 중심 이탈 허용(한쪽)
+#                                        긴변을 가로에    긴변을 세로에(roll 90°)
+#       250mm        96 × 130mm             6mm              23mm
+#       320mm       123 × 167mm            20mm              42mm   ← 기본값
+#       350mm       135 × 182mm            26mm              49mm
+#
+# 2026-09-15 실측 조준 계통 오차 **32mm**(구 T_EC 회전 8.6°). 이 값이
+# 2026-09-16 재측정에서도 (+32, +24)mm 로 그대로 남아 있었다 —
+# 250→320mm 로 올린 대책이 안 먹힌 건 **넓어진 축이 이미 남아돌던 세로**였기
+# 때문이다.
+#
+# 다만 roll 을 90° 로 고정해 세로 여유를 쓰려는 시도는 **실패했다**(위 ROLLS_DEG
+# 주석). 계통 오차는 roll 이 아니라 `--from-view` 로 잡는다 — 같은 T_EC 로
+# 검출하고 같은 T_EC 로 겨누므로 오차가 1차 상쇄된다. 보드를 100→84mm 로
+# 줄인 것(`spider_dense`)은 가로 여유를 11.7 → 19.5mm 로 넓히므로 유효하다.
 STANDOFF_M = 0.32
 
 
@@ -163,7 +184,9 @@ def board_from_view(T_EC):
         d = yaml.safe_load(intr_path.read_text(encoding="utf-8")) or {}
         intrinsic = {"K": d["K"], "dist": d.get("dist", [0] * 5),
                      "image_size": d.get("image_size")}
-    spec = CharucoBoardSpec(5, 3, 20.0, 15.0, cv2.aruco.DICT_4X4_50)   # spider 프리셋
+    from mms_artec.utils.calibration.artec_charuco_detector import (
+        BOARD_PRESETS, DEFAULT_BOARD_NAME)
+    spec = BOARD_PRESETS[DEFAULT_BOARD_NAME]
     detector = ArtecCharucoDetector(spec, intrinsic=intrinsic)
 
     robot = XArmInterface(ip="192.168.1.210")
@@ -195,6 +218,113 @@ def board_from_view(T_EC):
         robot.disconnect()
 
 
+def spec_for_fov():
+    """FOV 게이트가 쓸 보드 사양 — 캘리브와 **같은 프리셋**이어야 한다."""
+    from mms_artec.utils.calibration.artec_charuco_detector import (
+        BOARD_PRESETS, DEFAULT_BOARD_NAME)
+    return BOARD_PRESETS[DEFAULT_BOARD_NAME]
+
+
+def make_fov_gate(T_EC, center_B, normal_B, spec, margin_px: float = 40.0):
+    """보드가 **프레임 안에 들어오는가**를 투영으로 판정하는 게이트를 만든다.
+
+    왜 이게 필요한가
+    ----------------
+    Spider 의 텍스처 이미지는 **Color Camera 한 대**에서 나온다(3D 카메라 3대와 별개).
+    그 카메라의 화각은 좁다 — 실측 K 기준 가로 21.8° / 세로 29.2° 로,
+    standoff 320mm 에서 **123 × 167mm** 뿐이다. 84×60mm 보드를 넣으면 가로 여유가
+    19.5mm 밖에 없어서, 조준이 조금만 밀려도 잘린다(2026-09-16: 15장 전부 2/4 모서리 밖).
+
+    ★ 카메라가 플랜지에서 얼마나 떨어져 있는지는 **`T_EC` 가 이미 담고 있다.**
+      `generate_hemisphere_poses` 는 카메라를 반구에 놓고 `T_W_E = T_W_C @ T_EC` 로
+      EE 를 역산하므로, 별도로 translation 을 더하면 **이중 계산**이 된다.
+      잘림의 원인은 offset 이 빠진 게 아니라 `T_EC` 의 **값이 낡은 것**이다.
+      그래서 여기서는 offset 을 더하지 않고, 주어진 `T_EC` 로 **결과를 검사**한다.
+
+    `--from-view` 와 함께 쓰면 낡은 `T_EC` 로도 의미가 있다 — 검출도 겨눔도 검사도
+    모두 같은 `T_EC` 를 쓰므로 계통 오차가 1차 상쇄된다.
+
+    intrinsic yaml 이 없으면 `None` 을 돌려준다(게이트 생략).
+    """
+    intr_path = _ROOT / "config" / "calibration" / "artec_intrinsic.yaml"
+    if not intr_path.exists():
+        return None
+    d = yaml.safe_load(intr_path.read_text(encoding="utf-8")) or {}
+    K = np.asarray(d["K"], float)
+    dist = np.asarray(d.get("dist", [0] * 5), float).reshape(-1)
+    W, H = (d.get("image_size") or [960, 1280])
+
+    # 보드 4모서리를 base 좌표로. 법선에 수직인 두 축을 보드의 가로/세로로 삼는다.
+    n = np.asarray(normal_B, float); n /= np.linalg.norm(n)
+    u = np.cross(n, [1.0, 0.0, 0.0])
+    if np.linalg.norm(u) < 1e-6:
+        u = np.cross(n, [0.0, 1.0, 0.0])
+    u /= np.linalg.norm(u)
+    v = np.cross(n, u)
+    bw = spec.squares_x * spec.square_length_mm / 2000.0     # 반폭 (m)
+    bh = spec.squares_y * spec.square_length_mm / 2000.0
+    c = np.asarray(center_B, float)
+    corners_B = np.array([c + su * bw * u + sv * bh * v
+                          for su in (-1, 1) for sv in (-1, 1)])
+
+    import cv2
+
+    def fits(T_WE) -> bool:
+        """EE world pose 가 주어졌을 때 보드 4모서리가 전부 프레임 안인가."""
+        T_WC = T_WE @ np.linalg.inv(T_EC)          # 카메라 world pose
+        T_CW = np.linalg.inv(T_WC)
+        P = (T_CW[:3, :3] @ corners_B.T).T + T_CW[:3, 3]      # 카메라 좌표 (m)
+        if np.any(P[:, 2] <= 1e-3):                # 카메라 뒤 → 탈락
+            return False
+        px = cv2.projectPoints(P * 1000.0, np.zeros(3), np.zeros(3), K, dist)[0]
+        px = px.reshape(-1, 2)
+        return bool(np.all((px[:, 0] >= margin_px) & (px[:, 0] < W - margin_px) &
+                           (px[:, 1] >= margin_px) & (px[:, 1] < H - margin_px)))
+
+    print(f"  [fov] 게이트 활성 — 화각 "
+          f"{2*np.degrees(np.arctan(W/2/K[0,0])):.1f}°×"
+          f"{2*np.degrees(np.arctan(H/2/K[1,1])):.1f}°, "
+          f"보드 {spec.squares_x*spec.square_length_mm:.0f}×"
+          f"{spec.squares_y*spec.square_length_mm:.0f}mm, 여유 {margin_px:.0f}px")
+    return fits
+
+
+def order_poses(kept, cm, home_q):
+    """자세를 **이동거리 최소 순서**로 재배열하고, 자세↔자세 경로를 검사한다.
+
+    `via_home` 을 끄면 매 자세마다 home 을 왕복하지 않아 훨씬 빠르지만,
+    `home→자세` 만 검사된 상태에서는 **자세i→자세j 경로가 미검증**이다.
+    (2026-09-15 에 경로 미검사로 턴테이블과 충돌 직전까지 간 적이 있다.)
+
+    그래서 greedy nearest-neighbour 로 순서를 정하면서 **연속 구간마다
+    `is_path_safe` 를 통과하는 것만** 이어 붙인다. 통과 못 한 자세는 뒤로 미루고,
+    끝까지 이어지지 않으면 그 자세는 버린다 — 버린 수를 알려준다.
+    """
+    if not kept:
+        return kept, 0
+    remaining = list(kept)
+    ordered, cur, dropped = [], np.asarray(home_q, float), 0
+    while remaining:
+        # 현재 자세에서 관절공간 거리가 가까운 순으로 시도
+        remaining.sort(key=lambda r: float(np.abs(np.radians(r[2]) - cur).max()))
+        for idx, r in enumerate(remaining):
+            q = np.radians(r[2])
+            if cm is None:
+                ok = True
+            else:
+                ok, _why, _n = cm.is_path_safe(cur, q)
+            if ok:
+                ordered.append(r)
+                cur = q
+                remaining.pop(idx)
+                break
+        else:
+            # 남은 어느 자세로도 안전하게 못 간다 — 전부 버린다
+            dropped += len(remaining)
+            break
+    return ordered, dropped
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="캘리브 자세 자동 생성 (반구)")
     ap.add_argument("--from-view", action="store_true",
@@ -204,6 +334,12 @@ def main() -> int:
     ap.add_argument("--hint-xy", nargs=2, type=float, metavar=("X", "Y"),
                     help="원판 탐색 힌트 (base, m)")
     ap.add_argument("--standoff", type=float, default=STANDOFF_M)
+    ap.add_argument("--rolls", nargs="+", type=float, default=list(ROLLS_DEG),
+                    help="카메라 roll 후보 (deg). 도달성에 크게 영향 — 튜닝용")
+    ap.add_argument("--no-fov-gate", action="store_true",
+                    help="보드가 프레임에 들어오는지 투영 검사하는 게이트를 끈다")
+    ap.add_argument("--fov-margin-px", type=float, default=40.0,
+                    help="프레임 가장자리 여유 (px). 크게 주면 보수적")
     ap.add_argument("--max-poses", type=int, default=20,
                     help="최대 자세 수 (넘으면 고르게 솎는다)")
     ap.add_argument("--min-joint-margin", type=float, default=5.0,
@@ -240,7 +376,7 @@ def main() -> int:
     # 12개 미만이 되므로(실측 25→11), roll·거리마다 따로 불러 후보를 곱한다.
     # roll 다양성은 AX=ZB 가 잘 풀리는 데 그 자체로 도움이 된다.
     poses_T = []
-    for roll in ROLLS_DEG:
+    for roll in args.rolls:
         for dj in DIST_JITTER:
             poses_T += generate_hemisphere_poses(
                 center, normal, T_EC_usd,
@@ -252,9 +388,20 @@ def main() -> int:
     if cm is None:
         print("  ⚠ 충돌 모델 없음 — IK 만으로 거른다")
 
+    fov_gate = None
+    if not args.no_fov_gate:
+        fov_gate = make_fov_gate(T_EC, center, normal, spec_for_fov(),
+                                 margin_px=args.fov_margin_px)
+        if fov_gate is None:
+            print("  ⚠ artec_intrinsic.yaml 없음 — FOV 게이트 생략 "
+                  "(잘림을 미리 못 거른다)")
+
     HOME = np.radians([0.0, -18.4, 0.0, 70.6, 0.0, 60.0, -45.0])   # artec home
-    kept, n_ik, n_col, n_path, n_lim = [], 0, 0, 0, 0
+    kept, n_ik, n_col, n_path, n_lim, n_fov = [], 0, 0, 0, 0, 0
     for i, T in enumerate(poses_T):
+        if fov_gate is not None and not fov_gate(T):
+            n_fov += 1
+            continue
         p6 = np.concatenate([T[:3, 3] * 1000.0, kin.R_to_euler_xyz(T[:3, :3])])
         q, ok = kin.ik(p6, seed=HOME)
         if not ok:
@@ -288,13 +435,26 @@ def main() -> int:
                      [round(float(v), 4) for v in np.degrees(q)]))
 
     print(f"[gen] 유효 {len(kept)}개  "
-          f"(IK 실패 {n_ik} · 관절한계 {n_lim} · 자세충돌 {n_col} · 경로충돌 {n_path})")
+          f"(FOV 밖 {n_fov} · IK 실패 {n_ik} · 관절한계 {n_lim} · "
+          f"자세충돌 {n_col} · 경로충돌 {n_path})")
     # 너무 많으면 고르게 솎는다 — 한 방향에 몰리지 않게 순서대로 건너뛴다.
     if len(kept) > args.max_poses:
         step = len(kept) / args.max_poses
         kept = [kept[int(i * step)] for i in range(args.max_poses)]
-        kept = [(f"hemi_{i:02d}", ee, q) for i, (_n, ee, q) in enumerate(kept)]
         print(f"[gen] {args.max_poses}개로 솎음")
+
+    # ★ 이동거리 최소 순서로 재배열 + 자세↔자세 경로 검사.
+    #   이게 통과하면 `--no-via-home` 으로 home 왕복을 없애도 안전하다.
+    kept, n_unreach = order_poses(kept, cm, HOME)
+    if n_unreach:
+        print(f"[gen] 자세간 경로 미확보로 {n_unreach}개 제외")
+    kept = [(f"hemi_{i:02d}", ee, q) for i, (_n, ee, q) in enumerate(kept)]
+    if kept:
+        steps = [float(np.abs(np.radians(kept[i + 1][2]) - np.radians(kept[i][2])).max())
+                 for i in range(len(kept) - 1)]
+        print(f"[gen] 순서 최적화 — 자세간 최대관절이동 "
+              f"중앙값 {np.degrees(np.median(steps)) if steps else 0:.0f}°  "
+              f"(home 경유 없이 이어서 갈 수 있다 → --no-via-home)")
     if len(kept) < 12:
         print("  ⚠ 12개 미만 — hand-eye 가 잘 안 풀린다. standoff·기준점을 바꿔 볼 것")
 

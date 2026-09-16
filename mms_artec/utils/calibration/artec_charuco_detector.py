@@ -55,13 +55,36 @@ class CharucoBoardSpec:
             )
 
 
+#: 보드 프리셋 — **여기 한 곳에서만 정의한다.**
+#  예전엔 hand_eye_calib / intrinsic_calib 가 각자 복사본을 들고 있었고
+#  gen_calib_poses 는 아예 하드코딩(5,3,20,15)이라, 보드를 바꾸면 세 곳이 어긋났다.
+BOARD_PRESETS = {
+    # ★ 기본. 2026-09-16 실측으로 고른 값.
+    #   5×3 보드는 내부 코너가 **8개뿐**이라 절반만 잘려도 캘리브가 못 푼다.
+    #   7×5/12mm 는 코너 24개에 84×60mm 라, 320mm 에서 가로 여유가
+    #   11.7mm(100mm 보드) → 19.5mm 로 늘고 코너는 3배가 된다.
+    "spider_dense": CharucoBoardSpec(7, 5, 12.0, 9.0, aruco.DICT_4X4_50),
+    # 구 보드 — 100×60mm. 코너 8개라 잘림에 취약하다(2026-09-16 실측에서
+    # 15장 전부 2/4 모서리가 프레임 밖이었다). 과거 데이터 재처리용으로 남긴다.
+    "spider": CharucoBoardSpec(5, 3, 20.0, 15.0, aruco.DICT_4X4_50),
+    "spider_small": CharucoBoardSpec(5, 3, 16.0, 12.0, aruco.DICT_4X4_50),
+    # 큰 보드 — PhoXi/광각용. Spider FOV 에는 안 들어간다.
+    "a4": CharucoBoardSpec(7, 5, 30.0, 22.0, aruco.DICT_5X5_100),
+}
+DEFAULT_BOARD_NAME = "spider_dense"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 검출 결과
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class CharucoDetection:
-    n_corners: int                    # 검출된 ChArUco corner 수
+    #: PnP/Procrustes 에 들어간 **대응점 총수**. ChArUco corner 수가 아니다 —
+    #  solvePnP 경로는 ChArUco corner + ArUco 마커 4모서리를 **둘 다** 쓴다
+    #  (`_detect_pnp`). 7×5 보드면 24 + 17×4 = 92 가 정상이고, 보드의 내부
+    #  코너 수(24)보다 큰 값이 찍힌다고 이상한 게 아니다.
+    n_corners: int
     corner_ids: np.ndarray            # (n,) int — 보드 상의 corner index
     pixels: np.ndarray                # (n, 2) float — texture image 픽셀 좌표
     pts_M_mm: np.ndarray              # (n, 3) — 마커 프레임 좌표 (z=0)

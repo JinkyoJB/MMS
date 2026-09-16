@@ -19,11 +19,18 @@ intrinsic (fx, fy, cx, cy + distortion) 을 측정한다.
 
 Usage
 -----
-  # 기존 hand-eye 자세 yaml 재사용 (권장 — 다양성 충분)
-  python scripts/artec_intrinsic_calib.py
+  # hand-eye 자세 yaml 을 그대로 순회한다 (각도 다양성 충분)
+  python scripts/artec/intrinsic_calib.py
 
-  # 또는 interactive (manual move)
-  python scripts/artec_intrinsic_calib.py --interactive --target-n 15
+자세 목록이 없으면 먼저 만든다:
+  python scripts/artec/gen_calib_poses.py --from-view --write
+
+teach mode 제거 (2026-09-16)
+----------------------------
+손으로 끌어 캡처하던 `--interactive` 경로를 삭제했다. `set_mode(2)` 가 로봇
+브레이크를 푸는데, 스캐너를 단 상태에서 그걸 모른 채 시작하면 팔이 딸려 내려온다.
+hand_eye_calib 은 2026-09-15 에 이미 같은 이유로 제거했고, 이제 두 스크립트 모두
+**자세 목록 순회만** 한다.
 """
 
 from __future__ import annotations
@@ -44,7 +51,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from mms_artec.utils.calibration.artec_charuco_detector import (
-    ArtecCharucoDetector, CharucoBoardSpec,
+    ArtecCharucoDetector, CharucoBoardSpec, BOARD_PRESETS, DEFAULT_BOARD_NAME,
 )
 from utils.robot.xarm_interface import XArmInterface
 from mms_artec.sensor.artec_client import ArtecClient, ArtecConfig
@@ -62,22 +69,19 @@ MIN_FRAMES      = 8
 
 # ─── 보드 ─────────────────────────────────────────────────────────────
 
-BOARD_PRESETS = {
-    "spider": CharucoBoardSpec(5, 3, 20.0, 15.0, cv2.aruco.DICT_4X4_50),
-    "a4":     CharucoBoardSpec(7, 5, 30.0, 22.0, cv2.aruco.DICT_5X5_100),
-    "spider_small": CharucoBoardSpec(5, 3, 16.0, 12.0, cv2.aruco.DICT_4X4_50),
-}
+# 프리셋은 `artec_charuco_detector` 에서 import 한다 (단일 정의).
 
 
 # ─── 캡처 + 검출 누적 ─────────────────────────────────────────────────
 
-def _capture(client: ArtecClient):
-    try:
-        return client.capture_frame(capture_texture=True)
-    except RuntimeError as e:
-        print(f"  [warn] capture: {e}")
-        time.sleep(0.5)
-        return None
+def _capture(client: ArtecClient, name: str = ""):
+    """재시도 + 필요 시 세션 재초기화 (`_robust_capture` 참고).
+
+    ★ 2026-09-16: 단발 시도만 하던 탓에 스캐너 세션이 죽은 뒤 남은 7자세가
+      조용히 skip 됐다(20자세 중 13장만 수집). 이제 회복을 시도한다.
+    """
+    from scripts.artec._robust_capture import capture_with_retry
+    return capture_with_retry(client, name=name)
 
 
 def _detect_for_intrinsic(
@@ -135,6 +139,7 @@ def _run_scripted(
     all_corners: List[np.ndarray] = []
     all_ids: List[np.ndarray] = []
     image_size = None
+    n_capture_fail = n_move_fail = n_detect_fail = 0
 
     for i, p in enumerate(poses):
         if i < start_from:
@@ -178,13 +183,15 @@ def _run_scripted(
         )
         if code != 0:
             print(f"  이동 실패 ({code}) — skip")
+            n_move_fail += 1
             robot.arm.clean_error(); robot.arm.clean_warn(); robot.enable_motion()
             continue
         time.sleep(SETTLE_TIME_S)
 
-        fmh = _capture(sensor)
+        fmh = _capture(sensor, name)
         if fmh is None or not fmh.has_image():
-            print(f"  [{name}] capture 실패")
+            print(f"  [{name}] capture 실패 — skip")
+            n_capture_fail += 1
             continue
         image = fmh.image()
         if image_size is None:
@@ -196,69 +203,35 @@ def _run_scripted(
         c, ids = _detect_for_intrinsic(detector, image, name)
         _save_debug(name, image, c, ids)
         if c is None:
+            n_detect_fail += 1
             continue
         all_corners.append(c)
         all_ids.append(ids)
 
+    # ★ 왜 빠졌는지를 **원인별로** 남긴다. 예전엔 수집 수만 찍혀서,
+    #   "보드가 안 보였다"(정상적 skip)와 "스캐너가 죽었다"(장비 문제)가
+    #   구분되지 않았다 — 2026-09-16 에 13/20 이 후자였는데 모르고 넘어갔다.
+    n_try = len(poses) - start_from
+    print(f"\n[scripted] 수집 {len(all_corners)}/{n_try}  "
+          f"(이동 실패 {n_move_fail} · capture 실패 {n_capture_fail} · "
+          f"검출 실패 {n_detect_fail})")
+    if n_capture_fail:
+        print("  ⚠ capture 실패가 있었다 — 스캐너 세션 문제일 수 있다. "
+              "재시도·재초기화를 거치고도 실패한 것이다.")
+
     return all_corners, all_ids, image_size
 
-
-# ─── 모드 2: interactive ───────────────────────────────────────────────
-
-def _run_interactive(
-    robot: XArmInterface,
-    sensor: ArtecClient,
-    detector: ArtecCharucoDetector,
-    target_n: int = 15,
-):
-    print(f"\n[interactive] manual mode — Enter 캡처 / q 종료, 목표 {target_n}장")
-    try:
-        robot.arm.motion_enable(enable=True)
-        robot.arm.set_mode(2); robot.arm.set_state(0)
-    except Exception as e:
-        print(f"  [warn] manual mode: {e}")
-
-    all_corners: List[np.ndarray] = []
-    all_ids: List[np.ndarray] = []
-    image_size = None
-    saved = 0
-    while True:
-        cmd = input(f"\n  [{saved}/{target_n}] Enter / q > ").strip().lower()
-        if cmd == "q":
-            break
-        fmh = _capture(sensor)
-        if fmh is None or not fmh.has_image():
-            print("  capture 실패")
-            continue
-        image = fmh.image()
-        if image_size is None:
-            image_size = (image.shape[1], image.shape[0])
-        name = f"intrinsic_{saved:02d}"
-        c, ids = _detect_for_intrinsic(detector, image, name)
-        _save_debug(name, image, c, ids)
-        if c is None:
-            continue
-        all_corners.append(c); all_ids.append(ids)
-        saved += 1
-        if saved >= target_n:
-            break
-
-    try:
-        robot.arm.set_mode(0); robot.arm.set_state(0)
-    except Exception:
-        pass
-    return all_corners, all_ids, image_size
 
 
 # ─── main ─────────────────────────────────────────────────────────────
 
 def main() -> None:
+    from scripts.artec._step_guard import warn_if_direct
+    warn_if_direct(1)
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Artec texture camera intrinsic 캘리브")
     parser.add_argument("--poses", type=str, default=str(DEFAULT_POSES_YAML))
-    parser.add_argument("--interactive", action="store_true")
-    parser.add_argument("--target-n", type=int, default=15)
-    parser.add_argument("--board", type=str, default="spider",
+    parser.add_argument("--board", type=str, default=DEFAULT_BOARD_NAME,
                         choices=list(BOARD_PRESETS.keys()))
     parser.add_argument("--square-mm", type=float, default=None)
     parser.add_argument("--marker-mm", type=float, default=None)
@@ -283,7 +256,12 @@ def main() -> None:
     detector = ArtecCharucoDetector(spec)    # intrinsic 없이 — 검출만
 
     poses_yaml = Path(args.poses)
-    use_interactive = args.interactive or not poses_yaml.exists()
+    # ★ 자세 목록이 없으면 **그냥 실패시킨다.** 예전엔 조용히 teach mode 로
+    #   빠졌는데, 그러면 로봇 브레이크가 풀린 걸 모른 채 팔이 딸려 내려온다.
+    if not poses_yaml.exists():
+        print(f"\n[오류] 자세 목록이 없다: {poses_yaml}")
+        print("  먼저 만들 것:  python scripts/artec/gen_calib_poses.py --from-view --write")
+        raise SystemExit(1)
 
     print("=" * 70)
     print("  Artec Intrinsic Calibration  (cv2.aruco.calibrateCameraCharuco)")
@@ -291,7 +269,6 @@ def main() -> None:
     print(f"  보드: {spec.squares_x}×{spec.squares_y}  sq={spec.square_length_mm}  mk={spec.marker_length_mm}")
     print(f"  poses: {poses_yaml}  (exists={poses_yaml.exists()})")
     print(f"  output: {OUTPUT_YAML}")
-    print(f"  mode: {'interactive' if use_interactive else 'scripted'}")
 
     robot = XArmInterface(ip=ROBOT_IP)
     sensor = ArtecClient(ArtecConfig(serial_number=None, capture_texture=True))
@@ -311,16 +288,11 @@ def main() -> None:
     input()
 
     try:
-        if use_interactive:
-            corners, ids, img_sz = _run_interactive(
-                robot, sensor, detector, target_n=args.target_n,
-            )
-        else:
-            corners, ids, img_sz = _run_scripted(
-                poses_yaml, robot, sensor, detector,
-                via_home=not args.no_via_home,
-                start_from=int(args.start_from),
-            )
+        corners, ids, img_sz = _run_scripted(
+            poses_yaml, robot, sensor, detector,
+            via_home=not args.no_via_home,
+            start_from=int(args.start_from),
+        )
     finally:
         sensor.shutdown()
         robot.disconnect()
