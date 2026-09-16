@@ -85,10 +85,20 @@ class HandEyeCalibrator:
         self._T_EB_list: List[np.ndarray] = []
         self._T_MC_list: List[np.ndarray] = []
         self._T_EC: Optional[np.ndarray] = None
+        #: `calibrate()` 가 고른 해의 잔차. 결과 yaml 메타데이터로 남긴다 —
+        #  예전엔 로그에만 찍혀서, 저장된 T_EC 가 얼마나 믿을 만한지
+        #  파일만 봐서는 알 수 없었다.
+        self._t_err_m: Optional[float] = None
+        self._r_err_deg: Optional[float] = None
 
     @property
     def n_samples(self) -> int:
         return len(self._T_EB_list)
+
+    @property
+    def residuals(self) -> tuple[Optional[float], Optional[float]]:
+        """(t_err [m], r_err [deg]) — `calibrate()` 전이면 (None, None)."""
+        return self._t_err_m, self._r_err_deg
 
     @property
     def T_EC(self) -> Optional[np.ndarray]:
@@ -199,6 +209,7 @@ class HandEyeCalibrator:
             )
 
         self._T_EC = best_T_EC
+        self._t_err_m, self._r_err_deg = float(best_t_err), float(best_r_err)
         log.info(
             f"[HandEye] 최적: {best_name}  "
             f"t_err={best_t_err*1000:.2f}mm  r_err={best_r_err:.2f}°  "

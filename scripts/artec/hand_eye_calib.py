@@ -27,6 +27,7 @@ teach mode(손으로 끌어 기록)는 2026-09-15 제거했다. 셀 모델 기�
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import logging
 import sys
 import time
@@ -43,9 +44,10 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.calibration.hand_eye_calibrator import HandEyeCalibrator
 from mms_artec.utils.calibration.artec_charuco_detector import (
-    ArtecCharucoDetector, CharucoBoardSpec,
+    ArtecCharucoDetector, CharucoBoardSpec, BOARD_PRESETS, DEFAULT_BOARD_NAME,
 )
 from utils.robot.xarm_interface import XArmInterface
+from utils.transforms import load_transform, update_transform
 from mms_artec.sensor.artec_client import ArtecClient, ArtecConfig
 
 
@@ -54,24 +56,18 @@ from mms_artec.sensor.artec_client import ArtecClient, ArtecConfig
 ROBOT_IP        = "192.168.1.210"
 DEFAULT_POSES_YAML = _PROJECT_ROOT / "config" / "calibration" / "artec_calibration_poses.yaml"
 DEFAULT_INTRINSIC_YAML = _PROJECT_ROOT / "config" / "calibration" / "artec_intrinsic.yaml"
-OUTPUT_YAML     = _PROJECT_ROOT / "config" / "calibration" / "hand_eye_artec.yaml"
+# ★ 결과는 **시스템이 읽는 파일에 바로** 쓴다. 별도 산출물 파일
+#   (구 `config/calibration/hand_eye_artec.yaml`)은 2026-09-16 폐지했다 —
+#   두 파일이 갈라져 구 T_EC 로 다음 단계가 돌 위험이 있었다.
+SENSOR_FRAMES   = _PROJECT_ROOT / "config" / "sensor_frames.yaml"
+T_EC_KEY        = "T_EC_artec"
 DEBUG_DIR       = _PROJECT_ROOT / "debug_calib_artec"
 
 MOVE_SPEED_DEG  = 10
 SETTLE_TIME_S   = 1.5
 MIN_SAMPLES     = 5
 
-# ChArUco 보드 프리셋 — Artec Spider FOV 작아서 작은 보드 필요
-# (Spider 작동거리 170-350mm, FOV 90-180mm)
-BOARD_PRESETS = {
-    # 큰 보드 — PhoXi/광각 카메라용 (참고용, Spider 에는 부적합)
-    "a4": CharucoBoardSpec(7, 5, 30.0, 22.0, cv2.aruco.DICT_5X5_100),
-    # Spider 추천 — 100×60mm, FOV 안에 충분히 들어옴
-    "spider": CharucoBoardSpec(5, 3, 20.0, 15.0, cv2.aruco.DICT_4X4_50),
-    # 더 작은 — 80×48mm
-    "spider_small": CharucoBoardSpec(5, 3, 16.0, 12.0, cv2.aruco.DICT_4X4_50),
-}
-DEFAULT_BOARD_NAME = "spider"
+# ChArUco 보드 프리셋은 `artec_charuco_detector` 에서 import 한다 (단일 정의).
 
 
 # ─── 헬퍼 ─────────────────────────────────────────────────────────────
@@ -86,16 +82,15 @@ def _read_T_EB(robot: XArmInterface) -> np.ndarray:
     return T
 
 
-def _capture_artec_frame(client: ArtecClient):
-    """1회 capture → FrameMeshHandle 반환. SDK 에러 시 None."""
-    try:
-        return client.capture_frame(capture_texture=True)
-    except RuntimeError as e:
-        # Artec SDK 가 reconstructAndTexturizeMesh 실패하면 0x80070803 등
-        # RuntimeError 가 올라옴 — 다음 자세에서 재시도 가능.
-        print(f"  [warn] capture 실패: {e}")
-        time.sleep(0.5)
-        return None
+def _capture_artec_frame(client: ArtecClient, name: str = ""):
+    """capture → FrameMeshHandle. 재시도 + 필요 시 스캐너 세션 재초기화.
+
+    ★ 단발 시도만 하면 세션이 한번 죽었을 때 남은 자세가 전부 조용히 skip 된다
+      (2026-09-16 intrinsic 에서 20자세 중 7자세가 그렇게 날아갔다).
+      `_robust_capture` 참고.
+    """
+    from scripts.artec._robust_capture import capture_with_retry
+    return capture_with_retry(client, name=name)
 
 
 def _detect_and_log(
@@ -239,7 +234,7 @@ def _run_scripted(
         time.sleep(SETTLE_TIME_S)
 
         T_EB = _read_T_EB(robot)
-        fmh = _capture_artec_frame(sensor)
+        fmh = _capture_artec_frame(sensor, name)
         det = _detect_and_log(detector, fmh, name)
         _save_debug(name, det)
         if det is None:
@@ -250,6 +245,8 @@ def _run_scripted(
 # ─── main ─────────────────────────────────────────────────────────────
 
 def main() -> None:
+    from scripts.artec._step_guard import warn_if_direct
+    warn_if_direct(2)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -342,12 +339,13 @@ def main() -> None:
     detector = ArtecCharucoDetector(board_spec, intrinsic=intrinsic)
 
     print("=" * 70)
-    print("  Artec Hand-Eye Calibration  (ChArUco + UV→3D Procrustes)")
+    print("  Artec Hand-Eye Calibration  "
+          f"(ChArUco + {'solvePnP' if intrinsic else 'UV→3D Procrustes'})")
     print("=" * 70)
     print(f"  ChArUco        : {board_spec.squares_x}×{board_spec.squares_y}  "
           f"sq={board_spec.square_length_mm}mm  mk={board_spec.marker_length_mm}mm")
     print(f"  poses yaml     : {poses_yaml}  (exists={poses_yaml.exists()})")
-    print(f"  output yaml    : {OUTPUT_YAML}")
+    print(f"  output yaml    : {SENSOR_FRAMES}  ::{T_EC_KEY}")
     print(f"  debug dir      : {DEBUG_DIR}")
     print(f"  poses          : {len(yaml.safe_load(poses_yaml.read_text(encoding='utf-8')).get('poses', []))} 개")
 
@@ -398,13 +396,53 @@ def main() -> None:
 
     print("calibrate() 실행...")
     calibrator.calibrate()
-    calibrator.save_yaml(
-        OUTPUT_YAML,
-        sensor="artec_spider",
-        method="charuco_uv3d_procrustes",
-    )
-    print(f"\n[done] {OUTPUT_YAML}")
-    print("  → config/sensor_frames.yaml 의 T_EC_artec 를 위 값으로 갱신하세요.")
+    # ★ 시스템이 읽는 파일에 **직접** 쓴다.
+    #   예전엔 config/calibration/hand_eye_artec.yaml 에만 저장하고
+    #   "sensor_frames.yaml 을 갱신하세요" 라고 출력만 했다. 그 손작업이 빠지면
+    #   새로 구한 값이 아니라 **구 T_EC** 로 다음 단계(rim)가 돌아간다
+    #   — 2026-09-16 에 실제로 그럴 뻔했다. 파일을 하나로 합쳤다.
+    #
+    #   method 는 실제로 탄 경로를 기록한다. 예전엔 `charuco_uv3d_procrustes` 가
+    #   하드코딩이라, intrinsic 이 있어 solvePnP 로 푼 결과에도 그 라벨이 붙었다.
+    #   두 경로는 T_MC 의 기준 프레임이 다르다 — PnP 는 텍스처(Color) 카메라
+    #   광학 프레임, Procrustes 는 SDK vertices 의 스캐너 3D 프레임.
+    t_err, r_err = calibrator.residuals
+    meta = {
+        "sensor": "artec_spider",
+        "date": _dt.date.today().isoformat(),
+        "method": ("charuco_solvepnp" if intrinsic else "charuco_uv3d_procrustes"),
+        "n_poses": int(calibrator.n_samples),
+        "board": f"{board_spec.squares_x}x{board_spec.squares_y}"
+                 f"_sq{board_spec.square_length_mm:g}",
+    }
+    if t_err is not None:
+        meta["t_err_mm"] = round(t_err * 1000.0, 3)
+        meta["r_err_deg"] = round(r_err, 3)
+
+    T_old = None
+    if SENSOR_FRAMES.exists():
+        try:
+            T_old = load_transform(str(SENSOR_FRAMES), T_EC_KEY)
+        except Exception:
+            pass
+
+    update_transform(str(SENSOR_FRAMES), T_EC_KEY, calibrator.T_EC, meta=meta)
+    print(f"\n[done] {SENSOR_FRAMES}  ::{T_EC_KEY} 갱신")
+    print(f"  translation (m) : {calibrator.T_EC[:3,3].tolist()}")
+    if t_err is not None:
+        print(f"  잔차            : t={t_err*1000:.2f}mm  r={r_err:.2f}°")
+
+    # 이전 값과 얼마나 달라졌는지 — 조준이 왜 달라지는지 바로 보이게.
+    if T_old is not None:
+        dt = (calibrator.T_EC[:3, 3] - T_old[:3, 3]) * 1000.0
+        dr = np.degrees(np.arccos(np.clip(
+            (np.trace(T_old[:3, :3].T @ calibrator.T_EC[:3, :3]) - 1) / 2, -1, 1)))
+        print(f"  이전 값 대비    : |Δt|={np.linalg.norm(dt):.2f}mm  Δr={dr:.2f}°  "
+              f"(이전 값은 {SENSOR_FRAMES.name}.bak 에 있다)")
+        print(f"  → 320mm 조준 시 횡오차 변화 ≈ "
+              f"{np.linalg.norm(dt) + 320*np.tan(np.radians(dr)):.0f}mm")
+        print(f"  ⚠ T_EC 가 바뀌었으니 자세 목록을 **다시 생성**할 것:")
+        print(f"     python scripts/artec/gen_calib_poses.py --from-view --write")
 
 
 if __name__ == "__main__":

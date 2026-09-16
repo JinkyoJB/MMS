@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import yaml
 from scipy.spatial.transform import Rotation as R
@@ -59,6 +61,53 @@ def load_transform(yaml_path: str, key: str) -> np.ndarray:
     T[:3, :3] = R.from_quat(q).as_matrix()
     T[:3, 3] = t
     return T
+
+
+def update_transform(yaml_path: str, key: str, T: np.ndarray,
+                     meta: dict | None = None, backup: bool = True) -> None:
+    """`yaml_path` 의 `key` **하나만** 갱신한다. 다른 센서 키는 그대로 둔다.
+
+    왜 이 함수가 있나
+    ----------------
+    예전에는 hand-eye 결과가 `config/calibration/hand_eye_<sensor>.yaml` 에만
+    저장되고, 시스템이 실제로 읽는 `config/sensor_frames.yaml` 은 **사람이 손으로
+    옮겨 적어야** 했다("갱신하세요" 출력만 있었다). 2026-09-16 에 그 단계가
+    빠진 채로 다음 단계를 돌려서, 새로 구한 값이 아니라 **구 스캐너의 T_EC** 로
+    rim 캘리브가 진행될 뻔했다. 산출물과 시스템 설정을 한 파일로 합치고,
+    캘리브가 **직접** 여기에 쓰도록 바꿨다.
+
+    `meta` 는 같은 매핑 안에 나란히 쓴다(date/method/n_poses/잔차 등).
+    `load_transform` 은 translation·rotation_quat 만 읽으므로 무해하고,
+    파일만 열어봐도 그 값이 언제·어떻게 나온 건지 알 수 있다.
+    """
+    path = Path(yaml_path)
+    cfg = {}
+    if path.exists():
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if backup:
+            bak = path.with_suffix(path.suffix + ".bak")
+            bak.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    T = np.asarray(T, dtype=float)
+    entry = {
+        "translation": [float(v) for v in T[:3, 3]],
+        "rotation_quat": [float(v) for v in R.from_matrix(T[:3, :3]).as_quat()],
+    }
+    entry.update(meta or {})
+    cfg[key] = entry
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# 센서별 T_EC (E→C). **캘리브 스크립트가 직접 쓴다 — 손으로 옮겨 적지 않는다.**\n"
+        "#   artec : scripts/artec/calibrate.py --only 2\n"
+        "# translation 단위 m, rotation_quat 는 [qx, qy, qz, qw].\n"
+        "# 각 키의 date/method/n_poses/t_err_mm 은 그 값이 어디서 나왔는지 기록이다.\n\n"
+    )
+    path.write_text(
+        header + yaml.dump(cfg, default_flow_style=None, allow_unicode=True,
+                           sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 # ---------- Object frame (O) ----------
