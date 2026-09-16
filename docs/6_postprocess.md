@@ -25,8 +25,13 @@
 | `do_texturize` | UV·텍스처 baking | True |
 | `export_obj_path` / `export_sproj_path` | 결과 저장 경로 | 타임스탬프로 자동 |
 
-`use_streaming_scan` / `use_multipass_scan` 으로 어떤 스캔 세션을 쓸지 고르고,
-`scan_settings` / `streaming_scan_settings` / `multipass_settings` 에 각 단계 설정을 넣는다.
+캡처는 **streaming(`IScanningProcedure`) 하나**다. `use_multipass_scan` 으로
+멀티패스(Phase 1→2→3 · tracking-lost 복구) 여부만 고르고,
+`streaming_scan_settings` / `multipass_settings` 에 각 설정을 넣는다.
+
+> 옛 discrete 경로(`artec_scan_session.py`)와 그걸 고르던 `use_streaming_scan`·
+> `scan_settings` 는 2026-09-16 제거했다. 오래 안 쓰였고, 세 갈래 분기가
+> "지금 어느 코드가 도는지" 를 헷갈리게 만들었다.
 
 ---
 

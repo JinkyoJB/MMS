@@ -410,7 +410,11 @@ class ArtecMMS:
             print(f"\n[artec_process] (sim) Scan — {r.n_frames} frames")
             return r.model, ctx, False
 
-        if s.use_streaming_scan and s.use_multipass_scan:
+        # ★ 캡처는 **streaming(IScanningProcedure) 하나**다. 옛 discrete 경로
+        #   (`artec_scan_session.ArtecScanSession`, 자세마다 개별 capture())는
+        #   2026-09-16 삭제했다 — 오래 안 쓰였고, 세 갈래 분기가 "어느 코드가 도는지"
+        #   를 헷갈리게 만들었다. 남은 선택은 **multipass 여부** 하나다.
+        if s.use_multipass_scan:
             # Phase 1 재진행(tracking lost recovery) + phase_mode 분기.
             # 모든 IScan 이 master IModel 에 누적되고 아래 GlobalReg 에서 정합된다.
             from mms_artec.nbv.artec_multipass_scan_session import ArtecMultiPassScanSession
@@ -419,17 +423,11 @@ class ArtecMMS:
                   f"{r.n_total_frames} total frames ({r.model.scan_count()} scan(s))")
             return r.model, ctx, bool(r.hints_applied)
 
-        if s.use_streaming_scan:
-            from mms_artec.nbv.artec_streaming_scan_session import ArtecStreamingScanSession
-            r = ArtecStreamingScanSession(self, robot, turntable, s.streaming_scan_settings).run()
-            print(f"\n[artec_process] Streaming Scan — {r.n_frames} frames "
-                  f"({r.fps_actual:.1f} fps)")
-            return r.model, ctx, False
-
-        from mms_artec.nbv.artec_scan_session import ArtecScanSession
-        ctx = ArtecScanSession(self, robot, turntable, s.scan_settings).run()
-        print(f"\n[artec_process] Discrete Scan — {ctx.n_frames} frames")
-        return ctx.model, ctx, False
+        from mms_artec.nbv.artec_streaming_scan_session import ArtecStreamingScanSession
+        r = ArtecStreamingScanSession(self, robot, turntable, s.streaming_scan_settings).run()
+        print(f"\n[artec_process] Streaming Scan — {r.n_frames} frames "
+              f"({r.fps_actual:.1f} fps)")
+        return r.model, ctx, False
 
     def _stage(self, name: str, fn, current_model):
         """후처리 한 단계. 실패해도 **이전 모델을 유지**하고 계속한다.
@@ -579,13 +577,14 @@ class ArtecProcessSettings:
     # __post_init__ 에서 do_* 플래그를 강제 override 함 (dev_mode 가 우선).
     dev_mode: bool = False
 
-    use_streaming_scan: bool = True
     # Multi-pass: tracking-lost 재진행 + Phase 2(NBV) / Phase 3(flip 바닥면). True 가
     # 새 default — 한 번에 끝내고 싶으면 multipass_settings.prompt_*_=False 로
     # 끄거나 use_multipass_scan=False 로 단일 streaming session 사용.
+    #
+    # ★ 옛 `use_streaming_scan` 은 2026-09-16 제거했다. discrete 경로가 사라져
+    #   streaming 이 유일한 캡처 방식이 됐으므로 켜고 끌 것이 없다.
     use_multipass_scan: bool = True
 
-    scan_settings: Optional["ArtecScanSessionSettings"] = None              # type: ignore[name-defined]
     streaming_scan_settings: Optional["ArtecStreamingScanSessionSettings"] = None    # type: ignore[name-defined]
     multipass_settings: Optional["ArtecMultiPassScanSessionSettings"] = None         # type: ignore[name-defined]
 
@@ -609,9 +608,6 @@ class ArtecProcessSettings:
         # ⚠ 아래 scan-settings 클래스들은 Artec SDK(artec_base)에 의존 → isaac 에선 import 실패.
         # isaac 스캔 경로(IsaacScanSession)는 이 세 settings 를 쓰지 않으므로, 실패 시 None 유지.
         try:
-            if self.scan_settings is None:
-                from mms_artec.nbv.artec_scan_session import ArtecScanSessionSettings as _S
-                self.scan_settings = _S()
             if self.streaming_scan_settings is None:
                 from mms_artec.nbv.artec_streaming_scan_session import (
                     ArtecStreamingScanSessionSettings as _SS,
