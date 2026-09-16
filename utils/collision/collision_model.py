@@ -122,6 +122,16 @@ class CollisionModel:
                     self._link_sdf[j] = _Sdf(self.links[j], link_voxel_m, link_pad_m)
         env = np.asarray(np.load(env_npz)["env"], float)
         self.env_sdf = _Sdf(env, sdf_voxel_m, sdf_pad_m)
+        # ── 동적 장애물 (스캔 대상 등) ──────────────────────────────────────
+        # 셀 CAD(env_npz)에는 **스캔 대상물이 없다** — "225mm standoff 로 접근하는
+        # 대상"이라 일부러 뺐는데, 그 결과 자세 사이 이동 경로가 물체를 관통해도
+        # 아무도 막지 않았다 (2026-09-16 실물: NBV 자세 이동 중 로봇이 대상을
+        # 치고 지나감). `set_dynamic_obstacle` 로 등록하면 clearance →
+        # is_pose_safe → is_path_safe → 우회계획까지 전부 자동 반영된다.
+        self.dyn_sdf = None
+        self.dyn_margin = float(env_margin_m)
+        self._dyn_voxel = float(sdf_voxel_m)
+        self._dyn_pad = float(sdf_pad_m)
         mb = (self.env_sdf.nbytes + sum(v.nbytes for v in self._link_sdf.values())) / 1e6
         self.log(f"[collision] SDF 준비 — 환경 {tuple(self.env_sdf.shape)} @ "
                  f"{sdf_voxel_m*1000:.0f}mm, 링크 {len(self._link_sdf)}개 @ "
@@ -129,6 +139,24 @@ class CollisionModel:
 
     def env_distance(self, P):
         return self.env_sdf.query(P)
+
+    def set_dynamic_obstacle(self, pts_B, margin_m: float = None):
+        """런타임 장애물(스캔 대상) 등록. pts_B = (N,3) base 프레임 m. None = 해제.
+
+        margin 이 env_margin 과 달라도 호출측 API(slack/is_pose_safe)가 그대로
+        동작하도록, 조회 거리를 `d − margin + env_margin` 으로 정규화해 env 거리와
+        같은 잣대로 합산한다 (slack = min − env_margin 이므로 실효 여유는 margin)."""
+        if pts_B is None or len(pts_B) == 0:
+            self.dyn_sdf = None
+            return
+        P = np.asarray(pts_B, float)
+        if len(P) > 20000:
+            P = P[:: len(P) // 20000]
+        self.dyn_sdf = _Sdf(P, self._dyn_voxel, self._dyn_pad)
+        if margin_m is not None:
+            self.dyn_margin = float(margin_m)
+        self.log(f"[collision] 동적 장애물 등록 — {len(P):,}pt "
+                 f"margin {self.dyn_margin*1000:.0f}mm")
 
     # ── 배치 ───────────────────────────────────────────────────────────────
     def _placed(self, q, tool_pts=None):
@@ -165,14 +193,19 @@ class CollisionModel:
                 d = float(sdf.query(loc).min())
                 if d < s_min:
                     s_min, s_who = d, f"{name}↔link{j}"
-        # 환경: SDF 조회
+        # 환경: SDF 조회 (+동적 장애물 — margin 차를 정규화해 같은 잣대로)
         e_min, e_who = 1e9, ""
+        _dyn_off = self.dyn_margin - self.env_margin
         for name in [f"link{i}" for i in ENV_LINKS] + ["tool"]:
             if name not in placed:
                 continue
             d = float(self.env_distance(placed[name][0]).min())
             if d < e_min:
                 e_min, e_who = d, name
+            if self.dyn_sdf is not None:
+                d2 = float(self.dyn_sdf.query(placed[name][0]).min()) - _dyn_off
+                if d2 < e_min:
+                    e_min, e_who = d2, f"{name}↔대상물"
         return s_min, e_min, (s_who if s_min - self.self_margin < e_min - self.env_margin
                               else e_who)
 

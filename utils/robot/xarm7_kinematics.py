@@ -57,6 +57,14 @@ BASE_TO_LINKBASE = np.eye(4)
 JOINT_LOWER = np.array([-2*np.pi, -2.059, -3.927, -1.693, -6.283, -1.693, -6.283])
 JOINT_UPPER = np.array([ 2*np.pi,  2.042,  0.192,  3.142,  6.283,  3.142,  6.283])
 
+#: base 원점에서 플랜지까지의 **엄격한 도달 상한** (m). 링크 변위 노름의 합이므로
+#  실제 도달 최대치보다 반드시 크다 (FK 무작위 샘플 실측 최대 1.034m vs 이 값 1.090m).
+#  용도: 수치 IK 를 **부르기 전에** 명백히 도달 불가한 타깃을 걸러내는 것.
+#  `ik()` 는 실패해도 max_iter(200) 를 다 돌므로, roll·seed 스윕까지 겹치면
+#  한 타깃당 48회 × 200반복 = **2.8초**가 든다(실측 2026-09-16). NBV gap 겨냥은
+#  타깃이 300개라 14분간 로그 한 줄 없이 멈춘다.
+MAX_REACH_M = float(np.linalg.norm(_LOCALPOS0, axis=1).sum())
+
 
 def _quat_wxyz_to_R(q) -> np.ndarray:
     wq, x, y, z = q

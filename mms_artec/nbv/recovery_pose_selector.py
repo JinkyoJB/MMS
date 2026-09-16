@@ -33,10 +33,17 @@ import numpy as np
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Half-angles (rad) of the FOV cone, for frustum culling in raycast.
-SPIDER_FOV_H_DEG = 30.0
-SPIDER_FOV_V_DEG = 21.0
-SPIDER_HALF_FOV_H = np.radians(SPIDER_FOV_H_DEG / 2.0)   # 15°
-SPIDER_HALF_FOV_V = np.radians(SPIDER_FOV_V_DEG / 2.0)   # 10.5°
+# ⚠ 2026-09-16 정정 — 가로/세로가 **뒤집혀 있었다** (`utils/nbv/phase1_viewpoint.py`
+#   의 SensorModel 과 같은 오류). 실측 K (`config/calibration/artec_intrinsic.yaml`:
+#   fx 2519 / fy 2513, **960×1280 세로형**, 재투영 0.484px):
+#       가로(960축)  = 2·atan(960/2/2519)  = 21.58°
+#       세로(1280축) = 2·atan(1280/2/2513) = 28.58°
+#   세로를 21° 로 보면 `_standoff_distance` 의 "물체 높이가 FOV 에 들어오나"
+#   판정이 과하게 비관적이 되어 카메라를 far(350mm)까지 물러나게 만들었다.
+SPIDER_FOV_H_DEG = 21.58
+SPIDER_FOV_V_DEG = 28.58
+SPIDER_HALF_FOV_H = np.radians(SPIDER_FOV_H_DEG / 2.0)   # 10.79°
+SPIDER_HALF_FOV_V = np.radians(SPIDER_FOV_V_DEG / 2.0)   # 14.29°
 
 # Depth range — points outside [near, far] are not seen by Spider.
 # Full working range 170–350mm (not the optimal sub-band) so that recovery

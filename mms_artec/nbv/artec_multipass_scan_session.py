@@ -2,6 +2,19 @@
 #
 # Artec(real) 스캔 backend — 공용 Phase 컨트롤러의 ScanBackend 프리미티브 구현.
 # ArtecStreamingScanSession 한 번 = 한 IScan = 한 회전 (= _do_one_rotation).
+#
+# ── 용어 (로그에서 셋이 같이 나와 헷갈리기 쉽다) ─────────────────────────────
+#   pass  (`n_pass`)    회전 **1회 캡처** = IScan 1개. 재시도·복구도 pass 를 태운다.
+#                       상한 = `max_passes`.
+#   band                Phase 1 플래너가 나눈 **높이 구간**. 밴드마다 로봇 관측
+#                       자세가 다르고, 밴드 1개 = pass 1개(성공 시).
+#   flip  (`pose_idx`)  **물체를 손으로 뒤집은 상태** (Phase 3). 로봇 자세가 아니다.
+#                       `pose_physical_rotations` 목록의 인덱스이고, 정상 완료
+#                       시에만 advance. Phase 1·2 에서는 0 으로 고정.
+#
+#   ★ 내부 변수명은 `pose_idx` 지만 **출력은 `flip`** 으로 통일했다(2026-09-16).
+#     "pose" 가 로봇 자세처럼 읽혀서, `Pass 1 / max 8 (pose 0)` 이 로봇 얘기로
+#     오해됐다. 공용 Phase 컨트롤러도 같은 것을 `next_flip()` 이라 부른다.
 # Phase 1→2→3 순서/게이팅/NBV 수렴 루프는 **공용 컨트롤러**
 # (utils/nbv/scan_phase_controller.run_scan_phases) 소유 — sim IsaacScanSession
 # 과 동일. 이 파일은 real Artec 캡처 하드웨어 프리미티브만 제공한다.
@@ -178,7 +191,18 @@ class ArtecMultiPassScanSessionSettings:
     # 아래 키들은 그 알고리즘의 공통 파라미터.
     adaptive_target_standoff_mm: float = 225.0   # 최적대역 중앙 목표 거리
     adaptive_min_preview_verts: int = 1500       # preview 유효 최소 정점
+    #: preview 캡처용 **재구성 민감도**(0~1). None 이면 SDK 기본(0.5) 유지.
+    #
+    #  ★ 스트리밍 세션엔 `sensitivity` 설정이 있었지만 **preview 경로엔 없었다.**
+    #    기본 0.5 는 저대비/광택 표면에서 정점을 거의 못 만든다 — 2026-09-16 실측
+    #    (흰 턴테이블 상판): 0.5 → 67~116개, 0.9 → 698개, 1.0 → 1739개.
+    #    `adaptive_min_preview_verts`(1500)를 못 넘으면 preview 가 조용히 실패해
+    #    플래너가 "점 부족" 으로 포기한다. 올릴수록 노이즈도 섞이므로 계획용으로만 쓴다.
+    preview_sensitivity: Optional[float] = 0.9
     adaptive_robot_speed_deg_s: float = 30.0   # 2026-08-19: 15→30 (2배)
+    #: 밴드 사이 이동 속도. **녹화 중** 움직이므로 느려야 SLAM 이 따라온다.
+    #  (밴드를 한 IScan 에 담는 구조 — 2026-09-16)
+    band_move_speed_deg_s: float = 8.0
 
     # ── Phase 1 자세 선정 (sim·real 공용 플래너) ───────────────────────
     # 2026-09-09: real 을 sim 과 같은 코드로 통일. 그전까지 real 의 시작 자세는
@@ -190,7 +214,13 @@ class ArtecMultiPassScanSessionSettings:
     phase1_els_deg: tuple = (30.0, 40.0, 50.0, 60.0, 70.0)  # sim MMS_SIM_P1_ELS 와 동일
     phase1_view_azis_deg: tuple = (0.0, 30.0, -30.0)        # sim VIEW_AZIS_DEG 와 동일
     phase1_preview_el_deg: float = 30.0                     # 계획용 preview 고도각
-    phase1_preview_dists_m: tuple = (0.30, 0.38)            # 축거리 2스텝
+    #: 계획용 preview 축거리 2스텝.
+    #
+    #  ★ 0.38m 은 **Spider 작동거리(170~350mm) 밖**이다. 2026-09-16 실물에서
+    #    d=0.30 은 정점 13k~30k 가 나오는데 d=0.38 은 매번 300~1700개로
+    #    `adaptive_min_preview_verts`(1500)를 못 넘겨 전부 버려졌다.
+    #    Spider v1 최적 구간은 ~200~250mm 이므로 그 안에서 두 스텝을 잡는다.
+    phase1_preview_dists_m: tuple = (0.24, 0.30)
     phase1_preview_turntable_vel_rad_s: float = float(np.radians(30.0))
     phase1_min_plan_points: int = 100                       # 미만이면 플래너 포기
 
@@ -309,6 +339,11 @@ class ArtecMultiPassScanSessionSettings:
     # gap 직접 겨냥(plan_frontier) — 로봇이 편한 방위. 턴테이블이 gap 을 여기로 가져온다.
     # 넓히면 겨냥 성공률은 오르지만 팔이 물체를 감싸 충돌 위험이 커진다(docs/4_collision §5).
     nbv_frontier_az_pref_deg: tuple = (0.0, 30.0, -30.0)
+    # ★ gap 겨냥 캡처의 부분 스윕 폭 (deg) — sim `NBV_PATCH_SPAN_DEG` 와 동일.
+    #   gap 하나 채우려고 360° 를 돌면 이미 가진 면만 다시 본다(낭비). 목표 θ 를
+    #   중심으로 이 폭만 돈다. ⚠ sim 실측: 60° 이하는 프레임 중첩 부족으로 정합
+    #   붕괴 (boundary 963→13,927mm). 보장 고도각 패스는 전회전 유지.
+    nbv_patch_span_deg: float = 90.0
     nbv_frontier_enabled: bool = True        # False = 축-고도각만 (2026-09-10 이전 동작)
     # gap 과 무관하게 최소 한 번은 시도할 관측 고도각. 오목 물체 내부는 미관측이라
     # 메시에 없고 → 경계(gap)로도 안 잡혀 el_need 가 올라갈 근거가 없다(닭·달걀).
@@ -364,12 +399,20 @@ class _RunState:
     n_pass: int = 0
     pose_idx: int = 0                    # 현재 pose hint 인덱스. 정상 완료 시만 advance.
     master_center: Optional[np.ndarray] = None   # Pass 1 후 lock
+    #: master IModel 의 좌표계 = **첫 회전 녹화 시작 시점의 카메라 프레임**.
+    #  그 시점의 C→B 를 고정해 둔다. `self._T_CB` 는 로봇이 움직일 때마다
+    #  갱신되므로(밴드 이동·NBV 자세) 나중에 쓰면 마스터를 엉뚱한 곳에 놓는다.
+    master_T_CB: Optional[np.ndarray] = None
     hints_applied: bool = False
     last_n_frames: int = 0               # 직전 회전 프레임 수 (완료 로그용)
     recovery_retry_count: int = 0        # 같은 pose 안에서 누적 (성공 시 0)
     n_recovery_attempts: int = 0
     n_recovery_succeeded: int = 0
     next_T_BC_pending: Optional[np.ndarray] = None
+    last_scan_theta0: float = 0.0        # 직전 스캔 시작 시점 turntable 논리각 (rad)
+    #: Phase 1 밴드 관절해 목록. 설정되면 **한 IScan 안에서** 밴드마다 전회전한다.
+    #  첫 밴드는 호출자가 미리 이동시켜 두고, 2번째부터 세션이 콜백으로 옮긴다.
+    band_poses: Optional[list] = None
     next_skip_clearpos: bool = False
     recorded_hints: List[tuple] = field(default_factory=list)
     icp_refine_log: List[tuple] = field(default_factory=list)
@@ -444,23 +487,107 @@ class ArtecMultiPassScanSession:
 
     # ── 물체-적응 사전 포지셔닝 (Phase 1, run() 시작 1회) ──────────────
 
-    def _capture_preview_verts(self, sensor, min_verts: int):
-        """PREVIEW 최대 3회, 정점 최다 프레임 채택. C 프레임 mm (N,3) or None."""
+    def _apply_preview_sensitivity(self, sensor) -> None:
+        """preview 재구성 민감도를 1회 적용 (설정 시). 실패는 경고만."""
+        if getattr(self, "_preview_sens_done", False):
+            return
+        self._preview_sens_done = True
+        v = getattr(self.s, "preview_sensitivity", None)
+        if v is None:
+            return
+        proc = getattr(sensor, "_processor", None)
+        if proc is None or not hasattr(proc, "set_sensitivity"):
+            print("  [p1plan] ⚠ preview 민감도 설정 불가 (processor 없음)")
+            return
+        try:
+            old = proc.sensitivity()
+            proc.set_sensitivity(float(v))
+            print(f"  [p1plan] preview 민감도 {old:.2f} → {float(v):.2f}")
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [p1plan] ⚠ preview 민감도 설정 실패: {e}")
+
+    def _capture_preview_verts(self, sensor, min_verts: int,
+                               to_color: bool = False):
+        """PREVIEW 최대 3회, 정점 최다 프레임 채택. mm (N,3) or None.
+
+        ★ `to_color=True` 면 **스캐너 3D → Color 카메라 프레임**으로 옮긴다.
+          `T_EC`(hand-eye)가 solvePnP 로 풀려 Color 기준이므로, `T_CB` 로 base 로
+          옮길 점은 반드시 Color 프레임이어야 한다.
+
+          이 변환이 빠져 있어서 preview 점이 턴테이블 축에서 **0.44m** 떨어진
+          곳에 찍혔고, 기하 크롭(r<0.16m)이 정점 3만개를 **전부 버렸다**
+          (2026-09-16 실측: 변환 전 크롭통과 0 / 변환 후 29,608 전부 통과.
+           변환 후 r중앙 0.042m · 디스크 위 0.054m = 원판 중앙의 물체).
+          자세한 근거는 `mms_artec/utils/calibration/scanner_frames.py`.
+        """
+        self._apply_preview_sensitivity(sensor)
         v_mm = None
+        best_uv = None
+        best_wh = None
         for _ in range(3):
             try:
-                fmh = sensor.capture_frame()
+                fmh = sensor.capture_frame(capture_texture=True) if to_color \
+                    else sensor.capture_frame()
                 vv = fmh.vertices() if fmh is not None else None
             except Exception:
-                vv = None
+                fmh, vv = None, None
             if vv is not None and vv.shape[0] > 0:
                 if v_mm is None or vv.shape[0] > v_mm.shape[0]:
                     v_mm = vv
+                    if to_color:
+                        try:
+                            best_uv = fmh.uv()
+                            img = fmh.image()
+                            best_wh = (img.shape[1], img.shape[0])
+                        except Exception:                       # noqa: BLE001
+                            best_uv = best_wh = None
             if v_mm is not None and v_mm.shape[0] >= min_verts:
                 break
         if v_mm is None or v_mm.shape[0] < min_verts:
             return None
-        return v_mm.astype(np.float64)
+        v = v_mm.astype(np.float64)
+        if not to_color:
+            return v
+
+        T = self._scanner_to_color(v, best_uv, best_wh)
+        if T is None:
+            print("  [p1plan] ⚠ 스캐너3D→Color 변환 실패 — 좌표가 0.4m 급으로 "
+                  "어긋나 크롭이 전부 버릴 수 있다")
+            return v
+        from mms_artec.utils.calibration import scanner_frames as _sf
+        return _sf.apply(T, v)
+
+    def _scanner_to_color(self, verts_mm, uv, image_wh):
+        """스캐너3D→Color 변환. **고정 외부파라미터라 1회만 풀고 캐시**한다."""
+        cached = getattr(self, "_T_scan_color", None)
+        if cached is not None:
+            return cached
+        if uv is None or image_wh is None:
+            return None
+        intr = getattr(self.mms, "intrinsic", None) or self._load_color_intrinsic()
+        if intr is None:
+            return None
+        from mms_artec.utils.calibration import scanner_frames as _sf
+        T = _sf.solve_scanner_to_color(
+            verts_mm, uv, image_wh, intr["K"], intr["dist"],
+            log=lambda m: print(f"  [frame] {m}"))
+        if T is not None:
+            self._T_scan_color = T
+        return T
+
+    @staticmethod
+    def _load_color_intrinsic():
+        """`config/calibration/artec_intrinsic.yaml` 로드 (없으면 None)."""
+        import yaml
+        from pathlib import Path as _Path
+        p = (_Path(__file__).resolve().parents[2]
+             / "config" / "calibration" / "artec_intrinsic.yaml")
+        if not p.exists():
+            print(f"  [frame] ⚠ {p.name} 없음 — 스캐너3D→Color 변환 불가")
+            return None
+        d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        return {"K": np.asarray(d["K"], float),
+                "dist": np.asarray(d.get("dist", [0] * 5), float).reshape(-1)}
 
     @staticmethod
     def _est_from_points(xo: np.ndarray) -> dict:
@@ -921,10 +1048,24 @@ class ArtecMultiPassScanSession:
         def _fits(d):
             return (h_obj + 2.0 * margin) <= (2.0 * d * tan_hv)
 
+        band_hi = float(s.elevation_optimal_band_mm[1]) / 1000.0
+
         d = max(s.adaptive_target_standoff_mm / 1000.0, near + r_obj)
         if not _fits(d):
             d_need = (0.5 * h_obj + margin) / max(tan_hv, 1e-6)
-            d = min(max(d, d_need), far)
+            if d_need > far:
+                # ★ far 까지 물러나도 **어차피 안 들어온다** → 물러날 이유가 없다.
+                #   recovery 의 목적은 물체 전체를 한 화면에 담는 게 아니라
+                #   **추적을 다시 붙이는** 것이다. 게다가 밴드 스캔에서는 애초에
+                #   한 자세가 물체 전체를 덮지 않는 것이 정상이다.
+                #   far(=350mm) 는 Spider 의 절대 한계라 거기선 데이터가 거의
+                #   안 나온다 — 실측 2026-09-16 (h_obj 215mm): 이 분기가 d 를
+                #   350mm 로 밀어붙여 elevation 후보마다 preview 206~243 verts,
+                #   결국 "[elev] 유효 후보 없음 — home 복귀" 로 recovery 0/1 실패.
+                #   최적대역 상단(250mm)에 머무는 쪽이 재획득 확률이 높다.
+                d = min(max(d, min(band_hi, far)), far)
+            else:
+                d = min(max(d, d_need), far)
         d = float(min(max(d, near + r_obj), far))
         return d, (not _fits(d))
 
@@ -948,15 +1089,75 @@ class ArtecMultiPassScanSession:
                 pass
         return int(code)
 
-    def _recapture_T_BC(self, tag: str) -> None:
-        """이동 후 T_BC/T_CB 재캡처 (recovery hint 일관성)."""
+    def _read_turntable_theta(self) -> float:
+        """현재 turntable 논리각 (rad). 실패 시 0.0."""
+        try:
+            v = self.turntable.getActualPos()
+            if not isinstance(v, bool) and v is not None:
+                return float(v)
+        except Exception:                                   # noqa: BLE001
+            pass
+        return 0.0
+
+    def _compose_T_pre_W_mm(self, T_BC_new: np.ndarray, theta0: float,
+                            tag: str = "merge") -> np.ndarray:
+        """sub scan-world → master scan-world 변환 (SDK mm 단위).
+
+            T_pre = S⁻¹ · T_BC_master · R_B(axis, −θ0) · T_CB_new · S
+
+        구성요소 세 가지가 **모두** 필요하다 (2026-09-16 실물에서 각각 사고):
+          · 카메라 이동 (T_BC_master·T_CB_new): 로봇이 움직인 만큼 — master 기준은
+            `master_T_CB` 고정 스냅샷 (self._T_BC 는 recovery 가 덮어씀).
+          · 물체 회전 R_B(−θ0): 스캔 시작 시 turntable 이 논리 0° 가 아니면 물체가
+            그만큼 돌아간 채 찍힌다. gap 겨냥(θ=306°)에서 빼먹어 유령 geometry →
+            다음 반복이 유령을 겨냥, 스캐너가 뚜껑 15mm 까지 접근했다.
+            부호 검증: `p1.rot_about_axis(..., -theta)` (실기 검증된 계획 경로)와 동일.
+          · S 켤레: scan-world 는 **스캐너3D 프레임**이지 Color 가 아니다
+            ([[project_artec_3d_vs_color_frame]], 180°+41.8mm). hand-eye 는 Color
+            기준이라 켤레 없이 B 왕복하면 병합이 어긋난다.
+        """
+        _T_BC_master = (np.linalg.inv(self._st.master_T_CB)
+                        if self._st.master_T_CB is not None else self._T_BC)
+        R_obj = np.eye(4)
+        tt = getattr(self.mms, "turntable_transform", None)
+        if abs(float(theta0)) > 1e-6 and tt is not None:
+            p_ax = np.asarray(tt.axis_point_B, float)
+            R3 = self._rot_about_axis(np.asarray(tt.axis_dir_B, float),
+                                      -float(theta0))
+            R_obj[:3, :3] = R3
+            R_obj[:3, 3] = p_ax - R3 @ p_ax
+            print(f"  [{tag}] 병합 보정: 물체 회전 θ0={np.degrees(theta0):.1f}° 포함")
+        T_core = _T_BC_master @ R_obj @ np.linalg.inv(T_BC_new)   # B 경유 (m)
+        S_mm = getattr(self, "_T_scan_color", None)
+        if S_mm is not None:
+            S_m = np.asarray(S_mm, float).copy()
+            S_m[:3, 3] /= 1000.0                            # mm → m
+            T_pre = np.linalg.inv(S_m) @ T_core @ S_m
+        else:
+            print(f"  [{tag}] ⚠ 스캐너3D→Color 미캐시 — S 켤레 없이 병합 (오차 가능)")
+            T_pre = T_core.copy()
+        T_pre = T_pre.copy()
+        T_pre[:3, 3] *= 1000.0                              # m → mm (SDK 단위)
+        return T_pre
+
+    def _recapture_T_BC(self, tag: str, return_only: bool = False):
+        """이동 후 T_BC/T_CB 재캡처 (recovery hint 일관성).
+
+        `return_only=True` 면 **새 T_BC 를 돌려주기만 하고 `self._T_BC` 는 그대로
+        둔다.** master 기준(첫 밴드의 T_BC)을 유지한 채 이동 후 값을 얻어야
+        `T_pre = T_BC_master @ inv(T_BC_new)` 를 만들 수 있기 때문이다.
+        """
         T_EB_after = self.robot.get_ee_pose_mat()
-        self._T_BC = self._T_EC @ np.linalg.inv(T_EB_after)
-        self._T_CB = np.linalg.inv(self._T_BC)
-        tb = self._T_BC[:3, 3]
-        print(f"  [{tag}] ✓ 이동 완료 — T_BC 재캡처 "
+        T_BC_new = self._T_EC @ np.linalg.inv(T_EB_after)
+        tb = T_BC_new[:3, 3]
+        print(f"  [{tag}] ✓ 이동 완료 — T_BC {'측정' if return_only else '재캡처'} "
               f"(t=({tb[0]*1000:+.1f},{tb[1]*1000:+.1f},"
               f"{tb[2]*1000:+.1f})mm)")
+        if return_only:
+            return T_BC_new
+        self._T_BC = T_BC_new
+        self._T_CB = np.linalg.inv(self._T_BC)
+        return T_BC_new
 
     @staticmethod
     def _rot_about_axis(axis: np.ndarray, ang_rad: float) -> np.ndarray:
@@ -1294,23 +1495,71 @@ class ArtecMultiPassScanSession:
 
     # ── Phase 1 자세 선정 (sim 과 같은 공용 플래너) ─────────────────────
     def _turntable_frame(self):
-        """턴테이블 캘리브(T_BF0) → (axis_pt(3,) base, axis_dir(3,)). 없으면 None."""
+        """턴테이블 캘리브(T_BF0) → (axis_pt(3,) base, axis_dir(3,) base). 없으면 None.
+
+        ★ `T_B_F0` 는 **B→F** 규약이다 (x_F = R·x_B + t, `build_T_B_F0` 참고).
+          따라서 base 기준 값을 얻으려면 **역변환**이어야 한다:
+
+              축 위의 점(F 원점)  = −Rᵀ·t
+              축 방향(F 의 +z)    = Rᵀ 의 3열 = R 의 3행
+
+          2026-09-16 까지 `T_BF0[:3,3]` 과 `T_BF0[:3,2]` 를 그대로 썼다. 그 값은
+          base 좌표가 아니라 변환 성분이라, 실측 원판 `[0.799,0.005,0.688]` 대신
+          **`[-0.862,0.080,-0.603]`** (2105mm 떨어진 base 원점 반대쪽)을 겨눴고
+          축 방향도 18.1° 틀렸다. 그래서 Phase 1 플래너가 로봇 자기 base 를
+          바라보는 자세를 만들어 **EE 가 base 에 충돌했다**(실물 확인).
+          같은 규약 실수가 `check_calibration.py` 교차검증에도 있었다.
+        """
         tt = getattr(self.mms, "turntable_transform", None)
         T_BF0 = getattr(tt, "T_BF0", None) if tt is not None else None
         if T_BF0 is None:
             return None
-        T_BF0 = np.asarray(T_BF0, float)
-        return T_BF0[:3, 3].copy(), T_BF0[:3, 2].copy()
+        return tt.axis_point_B, tt.axis_dir_B
 
-    def _move_turntable_abs(self, theta_rad: float) -> None:
-        """계획용 실루엣 회전 — 절대각 이동 후 완료 대기 (실패는 삼킨다)."""
+    def _move_turntable_abs(self, theta_rad: float, tol_deg: float = 3.0) -> bool:
+        """계획용 실루엣 회전 — 절대각 이동 후 **실제로 도착했는지 확인**한다.
+
+        ★ 예전엔 반환값을 무시하고 "실패는 삼킨다" 였다. 그런데 이 경로는 조용히
+          실패하기 쉽다:
+            · `move_abs` 가 FMP_RUNFAIL(133) 로 거부돼도 그냥 넘어갔다
+            · `wait_motion_done` 은 Stage 1 에서 "motion 시작 안 됨" 을 **경고만**
+              찍고 Stage 2 로 내려가, 정지+in-position 이면 `Move Done` + True 를
+              돌려준다 — 안 움직인 것과 끝난 것을 구분하지 못한다
+          그 결과 플래너는 90° 실루엣을 받았다고 믿고 실제로는 0° 점군을 한 번 더
+          쓴다. 계획이 조용히 틀어지고 원인은 로그에 안 남는다 (2026-09-16).
+
+        그래서 **위치로 검증**한다. 도착 못 했으면 False 를 돌려주고, 호출자가
+        그 방향 실루엣을 버릴 수 있게 한다.
+        """
+        want = float(theta_rad)
         try:
-            self.turntable.move_abs(float(theta_rad),
-                                    float(self.s.phase1_preview_turntable_vel_rad_s))
+            ok = self.turntable.move_abs(
+                want, float(self.s.phase1_preview_turntable_vel_rad_s))
+            if ok is False:
+                print(f"  [p1plan] ⚠ move_abs 거부 — θ={np.degrees(want):+.1f}° 건너뜀")
+                return False
             if hasattr(self.turntable, "wait_motion_done"):
                 self.turntable.wait_motion_done(timeout_s=20.0)
         except Exception as e:                                  # noqa: BLE001
             print(f"  [p1plan] ⚠ 턴테이블 이동 실패({type(e).__name__}: {e})")
+            return False
+
+        # 실제 위치 확인 — wait_motion_done 만으로는 '안 움직임' 을 못 거른다.
+        try:
+            pos = self.turntable.getActualPos()
+        except Exception:                                       # noqa: BLE001
+            pos = None
+        if pos is None or isinstance(pos, bool):
+            print("  [p1plan] ⚠ 턴테이블 위치를 못 읽었다 — 도착 검증 불가")
+            return True                                         # 판단 보류, 진행
+        err_deg = abs(np.degrees(float(pos) - want))
+        err_deg = min(err_deg, 360.0 - err_deg % 360.0) if err_deg > 180 else err_deg
+        if err_deg > tol_deg:
+            print(f"  [p1plan] ⚠ 턴테이블이 목표에 도달하지 못했다 — "
+                  f"목표 {np.degrees(want):+.1f}° · 실제 {np.degrees(float(pos)):+.1f}° "
+                  f"(오차 {err_deg:.1f}°). 이 방향 실루엣은 버린다")
+            return False
+        return True
 
     def _preview_object_points_B(self, axis_pt, tz: float, d: float):
         """조준높이 tz·축거리 d 로 구동 후 preview 캡처 → base 프레임 물체 점군.
@@ -1331,17 +1580,32 @@ class ArtecMultiPassScanSession:
             q_seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
         except Exception:                                       # noqa: BLE001
             return np.zeros((0, 3))
+        # ★ 예전엔 이 루프가 **완전히 조용했다.** IK 실패·충돌 거부·정점 부족이
+        #   전부 로그 없이 `continue`/빈 배열이라, 로봇이 안 움직이는데 화면엔
+        #   아무것도 안 뜨는 상태가 됐다(2026-09-16 실물). 어느 단계에서 막혔는지
+        #   알 수 없으면 디버깅이 불가능하므로 각 실패를 한 줄씩 남긴다.
+        n_ik = n_move = 0
         for azd in s.phase1_view_azis_deg:      # 도달 azimuth 스윕 (커버리지 무관)
             q = self._axis_view_q(target, s.phase1_preview_el_deg,
                                   float(azd), float(d), q_seed)
             if q is None:
+                n_ik += 1
                 continue
-            if self._move_robot_to_q(q, s.adaptive_robot_speed_deg_s) != 0:
+            code = self._move_robot_to_q(q, s.adaptive_robot_speed_deg_s)
+            if code != 0:
+                n_move += 1
+                print(f"  [p1plan] az={azd:+.0f}° 이동 실패(code={code}) — 다음 방위")
                 continue                        # 충돌 거부/구동 실패 → 다음 az
             self._recapture_T_BC("p1plan")
-            vC = self._capture_preview_verts(sensor, s.adaptive_min_preview_verts)
+            vC = self._capture_preview_verts(sensor, s.adaptive_min_preview_verts,
+                                             to_color=True)
             if vC is None:
+                print(f"  [p1plan] tz={tz:.3f} d={d:.2f} az={azd:+.0f}° — "
+                      f"preview 정점 부족(<{s.adaptive_min_preview_verts}). "
+                      f"스캐너 민감도/대상 표면 확인")
                 return np.zeros((0, 3))
+            print(f"  [p1plan] tz={tz:.3f} d={d:.2f} az={azd:+.0f}° — "
+                  f"정점 {len(vC):,}")
             T_CB = np.asarray(self._T_CB, float)
             xB = (vC / 1000.0) @ T_CB[:3, :3].T + T_CB[:3, 3]
             # ★ 로봇 자기점 제거 — 프레임에 걸린 링크/스캐너 점이 크롭 실린더를
@@ -1353,7 +1617,17 @@ class ArtecMultiPassScanSession:
                                              T_EC=self._T_EC))
             except Exception:                                   # noqa: BLE001
                 pass
-            return p1.crop_object_points(xB, axis_xy, float(axis_pt[2]))
+            # ★ up_sign 필수 — base 는 +Z 가 아래라 기본 +1 이면 물체 쪽을
+            #   전부 버린다(2026-09-16: 정점 30k → 크롭 후 0점).
+            xo = p1.crop_object_points(
+                xB, axis_xy, float(axis_pt[2]),
+                up_sign=(-1.0 if float(self._view_up_B()[2]) < 0 else +1.0))
+            print(f"  [p1plan]     크롭 {len(xB):,} → {len(xo):,}점 "
+                  f"(축 r<0.16m · 디스크 위 0.004~0.45m)")
+            return xo
+        print(f"  [p1plan] tz={tz:.3f} d={d:.2f} — 도달 가능한 방위 없음 "
+              f"(IK 실패 {n_ik} · 이동 실패 {n_move} / "
+              f"{len(s.phase1_view_azis_deg)} 방위)")
         return np.zeros((0, 3))
 
     def _pick_phase1_planner(self):
@@ -1373,19 +1647,38 @@ class ArtecMultiPassScanSession:
         axis_xy = axis_pt[:2]
         sensor_model = p1.SensorModel()
 
+        # ★ `up_sign` 을 **명시**한다. base 가 천장 마운트라 +Z 가 아래여서,
+        #   기본값 +1 이면 시작 조준높이가 원판 표면 **아래**(테이블 속)가 되고
+        #   높이를 올릴수록 더 파고든다 → 물체가 아니라 턴테이블을 겨눈다
+        #   (2026-09-16 실물 관측). sim 은 world 프레임이라 +1 이 맞다.
+        up_sign = -1.0 if float(self._view_up_B()[2]) < 0 else +1.0
         pts = p1.collect_planning_points(
             lambda tz, d: self._preview_object_points_B(axis_pt, tz, d),
             self._move_turntable_abs, axis_pt, axis_dir,
-            d_steps=tuple(s.phase1_preview_dists_m),
+            d_steps=tuple(s.phase1_preview_dists_m), up_sign=up_sign,
             log=lambda m: print(f"  [p1plan] {m}"))
         pts = p1.voxel_downsample(pts, sensor_model.voxel_m)
         if len(pts) < s.phase1_min_plan_points:
             print(f"  [p1plan] preview 점 부족({len(pts)}) — home 고정")
             return None
 
+        # ★ 계획 점군을 **충돌 게이트의 동적 장애물**로 등록한다. 셀 CAD 에는
+        #   스캔 대상이 없어서 자세 간 이동 경로가 물체를 관통해도 못 막았다
+        #   (2026-09-16 실물: NBV 이동 중 대상을 치고 지나감). 지금부터의 모든
+        #   이동(밴드·NBV·recovery)이 이 장애물을 회피한다. Phase 2 부터는
+        #   `build_coverage_mesh` 가 더 정확한 메시 정점으로 갱신한다.
+        try:
+            cm = self._collision_gate()
+            if cm is not None:
+                cm.set_dynamic_obstacle(pts, margin_m=0.030)
+        except Exception as e:                              # noqa: BLE001
+            print(f"  [p1plan] ⚠ 대상물 장애물 등록 실패({e}) — 계속")
         nrm = p1.estimate_outward_normals(pts, axis_xy)
+        # `up_sign` — 위에서 구한 것과 같은 값. 플래너가 '윗면(뚜껑)' 보강 자세를
+        # 넣을 때 **어느 끝이 위인지** 알아야 한다. base 가 천장 마운트라 −1.
         plan = p1.plan_phase1_viewpoints(pts, nrm, axis_xy, sensor_model,
-                                         els=tuple(s.phase1_els_deg))
+                                         els=tuple(s.phase1_els_deg),
+                                         up_sign=up_sign)
         print(f"  [p1plan] 플랜: {plan.note} risk={plan.tracking_risk} "
               f"(preview {len(pts)}pt)")
         try:
@@ -1422,6 +1715,68 @@ class ArtecMultiPassScanSession:
         except Exception as e:
             print(f"  [phase] ⚠ go_home 실패({e}) — 자세 확인 필요")
 
+    def capture_bands(self, poses, phase: int = 1) -> bool:
+        """Phase 1 밴드 전체를 **한 IScan** 으로 캡처한다.
+
+        ★ 예전엔 컨트롤러가 밴드마다 `capture_rotation` 을 불러 **밴드 = pass =
+          IScan** 이 됐다. 그러면 SLAM 이 밴드마다 끊기고, 밴드끼리는 후처리
+          GlobalRegistration 에 의존한다 — 2026-09-16 실물에서 band1/band2 가
+          정합되지 않았다. 설계 의도는 **밴드가 한 scan 안에 이어지는 것**이다.
+
+          여기서는 첫 밴드로 이동한 뒤 스트리밍 세션을 열고, 세션이 녹화를 유지한
+          채 나머지 밴드로 로봇을 옮긴다(`band_poses` + `move_robot_fn`).
+        """
+        st = self._st
+        qs = [q for q in (poses or []) if q is not None]
+        if not qs:
+            return False
+        code = self._move_robot_to_q(qs[0], self.s.adaptive_robot_speed_deg_s)
+        if code != 0:
+            print(f"  [p1plan] ✘ 첫 밴드 이동 실패(code={code})")
+            return False
+        self._recapture_T_BC("p1plan")          # master 기준 = 첫 밴드
+        st.band_poses = qs
+        try:
+            while st.n_pass < self.s.max_passes:
+                status = self._do_one_rotation(st)
+                if status == _ROT_ABORT:
+                    return False
+                if status == _ROT_OK:
+                    return True
+                # ── _ROT_RETRY (tracking lost) ───────────────────────────
+                # ★ 밴드 sweep 은 단일 자세 pass 와 재시도 의미가 다르다.
+                #   단일 자세면 "그 자세를 다시" = 유일한 데이터를 다시 얻는 것.
+                #   밴드 sweep 이면 이미 전회전을 마친 밴드가 있을 수 있고, 그걸
+                #   처음부터 다시 돌리는 건 순손실이다. 도달 못 한 밴드는 Phase 1
+                #   의 실패가 아니라 **부분 결손**이고, 그 결손을 메우는 것이
+                #   Phase 2 NBV 의 역할이다(scan_phase_controller 의 밴드 루프가
+                #   이미 그렇게 동작한다 — 여기만 예외였다).
+                #
+                #   2026-09-16 실물: band1·2 가 -366° 완주하고 band3 에서 lost 되자
+                #   recovery 가 3-밴드 sweep 을 처음부터 2번 더 돌렸다. 재시도는
+                #   매번 1초 만에 lost 됐고(recovery 자세에서 물체가 거의 안 보임),
+                #   Phase 2 에는 도달조차 못 했다.
+                res = st.pass_results[-1] if st.pass_results else None
+                n_done = int(getattr(res, "n_bands_done", 0) or 0)
+                n_band = int(getattr(res, "n_bands", len(qs)) or len(qs))
+                if n_done > 0:
+                    nxt = ("Phase 2 로 넘긴다 (남은 결손은 NBV 가 메운다)"
+                           if self.phase_mode >= 2 else
+                           "여기서 Phase 1 을 끝낸다 "
+                           f"(phase_mode={self.phase_mode} — NBV 보강 없음)")
+                    print(f"  [p1plan] 밴드 부분 성공 {n_done}/{n_band} "
+                          f"— 재시도 없이 {nxt}")
+                    for _r in getattr(res, "band_reasons", []) or []:
+                        print(f"    · {_r}")
+                    return True
+                # 밴드를 하나도 못 끝냈다 = 첫 자세부터 잘못됐다.
+                # 이때는 recovery 가 고른 새 자세로 재시도하는 게 맞다.
+                print(f"  [p1plan] 밴드 0/{n_band} — recovery 자세로 sweep 재시도")
+            print(f"  [p1plan] ✘ max_passes({self.s.max_passes}) 소진")
+            return False
+        finally:
+            st.band_poses = None
+
     def capture_rotation(self, pose, label: str, phase: int) -> bool:
         """real 캡처 (턴테이블 전회전). 세 경로:
           - phase=1 + pose=q: Phase 1 플래너가 고른 자세로 **구동한 뒤**
@@ -1442,7 +1797,25 @@ class ArtecMultiPassScanSession:
             if code != 0:
                 print(f"  [p1plan] ✘ 자세 이동 실패(code={code}) — 이 밴드 건너뜀")
                 return False
-            self._recapture_T_BC("p1plan")
+            # ★ 밴드마다 **로봇이 움직이므로** 카메라 프레임이 바뀐다. 각 pass 는
+            #   독립 IScan 이고 SLAM 은 scan 안에서만 유지되므로, master 에 붙일 때
+            #   카메라 이동을 보정하지 않으면 밴드끼리 어긋난 채 쌓인다.
+            #
+            #   예전엔 이 보정이 **recovery 경로에서만** 걸렸다
+            #   (`next_T_BC_pending` 을 거기서만 세팅). 계획된 밴드 이동에는
+            #   T_pre 가 None 이라 band 2 가 자기 카메라 좌표로 병합됐고,
+            #   GlobalRegistration 이 "ok" 를 내도 실제로는 정합이 안 됐다
+            #   (2026-09-16 실물: band1/band2 어긋남).
+            #
+            #   규약은 recovery 와 동일: T_pre = T_BC_master @ inv(T_BC_new)
+            #   — master(=첫 밴드) 카메라 프레임으로 되돌린다.
+            if self._T_BC is not None and self._st.master_model.scan_count() > 0:
+                self._st.next_T_BC_pending = self._recapture_T_BC(
+                    "p1plan", return_only=True)
+                print("  [band hint] 카메라 이동 보정 예약 "
+                      "(master 프레임으로 정렬)")
+            else:
+                self._recapture_T_BC("p1plan")   # 첫 밴드 = master 기준
             pose = AT_CURRENT
         if pose is AT_CURRENT:
             while st.n_pass < self.s.max_passes:
@@ -1532,7 +1905,7 @@ class ArtecMultiPassScanSession:
         if not s.prompt_between_passes:
             st.aborted_reason = "single-pass mode (no inter-pass prompt)"
             return False
-        print(f"\n  ✓ Pass {st.n_pass} (pose {st.pose_idx}) 완료 "
+        print(f"\n  ✓ Pass {st.n_pass} (flip {st.pose_idx}) 완료 "
               f"— frames={st.last_n_frames}")
         next_pose = st.pose_idx + 1
         # 세장형 물체 권고 — sim 과 같은 정책(utils/nbv/flip_policy). 실제 뒤집기는
@@ -1550,7 +1923,7 @@ class ArtecMultiPassScanSession:
             self._print_pose_hint_for_user(next_pose)
         else:
             print(f"  → 추가 pass 진행하려면 [Enter] (모든 정의된 pose 완료)")
-        print(f"    종료하려면 [q]+Enter")
+        print(f"    남은 flip 건너뛰기 [n]+Enter / 종료 [q]+Enter")
         if self._wait_user_quit():
             st.user_quit = True
             st.aborted_reason = "사용자 종료 (정상 완료 후)"
@@ -1568,10 +1941,17 @@ class ArtecMultiPassScanSession:
         """
         s = self.s
         self._print_pass_banner(st.n_pass + 1, s.max_passes, st.pose_idx)
+        # ★ master IModel 의 좌표계는 **첫 회전의 녹화 시작 시점** 카메라 프레임이다.
+        #   그 T_CB 를 여기서 고정한다. 이후 밴드 이동·NBV 자세마다 `self._T_CB` 가
+        #   갱신되므로, 나중에 그걸로 마스터를 B 로 옮기면 그 사이 카메라가 움직인
+        #   만큼 통째로 밀린다 — 2026-09-16 실물: Phase 2 조준점이 물체보다
+        #   한참 위로 떠서 허공을 스캔했다.
+        if st.master_T_CB is None and self._T_CB is not None:
+            st.master_T_CB = np.asarray(self._T_CB, float).copy()
         if st.live_viewer is not None:
             try:
                 st.live_viewer.new_pass(
-                    f"Pass {st.n_pass + 1} (pose {st.pose_idx})")
+                    f"Pass {st.n_pass + 1} (flip {st.pose_idx})")
             except Exception:
                 pass
 
@@ -1584,10 +1964,24 @@ class ArtecMultiPassScanSession:
 
         # ── 단일 회전 ─────────────────────────────────────────────
         try:
+            # ★ `st.band_poses` 가 있으면 **한 IScan 안에서** 밴드마다 전회전한다.
+            #   세션을 열어둔 채 로봇만 옮기므로 SLAM 추적이 이어지고, 밴드끼리
+            #   후처리 GlobalRegistration 에 의존하지 않는다.
+            #   이동은 느린 속도로 — 녹화 중이라 급하게 움직이면 추적을 잃는다.
             single = ArtecStreamingScanSession(
                 self.mms, self.robot, self.turntable, s.streaming_settings,
                 live_viewer=st.live_viewer,
+                band_poses=st.band_poses,
+                move_robot_fn=(
+                    (lambda q: self._move_robot_to_q(
+                        q, s.band_move_speed_deg_s))
+                    if st.band_poses else None),
             )
+            # ★ 스캔 시작 시점의 turntable 논리각 — clearpos 를 건너뛰는 경우
+            #   (recovery safe-back) 물체가 이 각만큼 돌아간 채 찍히므로, 병합
+            #   보정(`_compose_T_pre_W_mm`)에 넣어야 한다. clearpos 경로면 0.
+            st.last_scan_theta0 = (self._read_turntable_theta()
+                                   if st.next_skip_clearpos else 0.0)
             sub_result = single.run()
         finally:
             # streaming_settings 는 multipass 인스턴스 외부에서 공유될 수
@@ -1635,16 +2029,21 @@ class ArtecMultiPassScanSession:
         #              = T_BC_master @ inv(T_BC_new) @ x_W_new
         # SDK frame_transformation 은 mm 라 translation 만 m→mm scale.
         if st.next_T_BC_pending is not None:
-            if self._T_BC is None:
+            # ★ 공통 헬퍼(`_compose_T_pre_W_mm`) — master 스냅샷 기준 + 물체 회전
+            #   θ0(clearpos 를 건너뛴 recovery 는 safe-back 각에서 시작) + S 켤레.
+            #   예전 공식(self._T_BC @ inv(pending))은 recovery 가 self._T_BC 를
+            #   덮어써 T_pre ≈ I 로 무효였고, θ0·S 도 빠져 있었다.
+            if st.master_T_CB is None and self._T_BC is None:
                 print(f"  [recovery hint] ⚠ T_BC_master 미설정 — override skip")
             else:
                 try:
-                    T_pre_cam = self._T_BC @ np.linalg.inv(st.next_T_BC_pending)
-                    T_pre = T_pre_cam.copy()
-                    T_pre[:3, 3] *= 1000.0          # m → mm (SDK 단위)
-                    print(f"\n  [recovery hint] camera-motion correction "
-                          f"applied (Δtrans = ({T_pre[0,3]:+.1f}, "
-                          f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm)")
+                    T_pre = self._compose_T_pre_W_mm(
+                        st.next_T_BC_pending, st.last_scan_theta0,
+                        tag="camera-motion")
+                    print(f"\n  [camera-motion] 이동 보정 적용 "
+                          f"(Δtrans = ({T_pre[0,3]:+.1f}, "
+                          f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm) "
+                          f"— master 프레임으로 정렬")
                 except np.linalg.LinAlgError as e:
                     print(f"  [recovery hint] ⚠ inv 실패 ({e}) — override skip")
             st.next_T_BC_pending = None
@@ -1673,12 +2072,12 @@ class ArtecMultiPassScanSession:
                 T_pre[:3, :3] = R_phys_inv_W
                 T_pre[:3, 3] = c_ref - R_phys_inv_W @ c_pass
                 st.hints_applied = True
-                print(f"\n  [hint pose {st.pose_idx}] frame={frame_tag}")
-                print(f"  [hint pose {st.pose_idx}] c_pass = ({c_pass[0]:+.1f}, "
+                print(f"\n  [hint flip {st.pose_idx}] frame={frame_tag}")
+                print(f"  [hint flip {st.pose_idx}] c_pass = ({c_pass[0]:+.1f}, "
                       f"{c_pass[1]:+.1f}, {c_pass[2]:+.1f}) mm")
-                print(f"  [hint pose {st.pose_idx}] c_master = ({c_ref[0]:+.1f}, "
+                print(f"  [hint flip {st.pose_idx}] c_master = ({c_ref[0]:+.1f}, "
                       f"{c_ref[1]:+.1f}, {c_ref[2]:+.1f}) mm")
-                print(f"  [hint pose {st.pose_idx}] translation = ({T_pre[0,3]:+.1f}, "
+                print(f"  [hint flip {st.pose_idx}] translation = ({T_pre[0,3]:+.1f}, "
                       f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm")
 
         # Sub-model 의 IScan 들 → master_model.
@@ -1718,7 +2117,7 @@ class ArtecMultiPassScanSession:
             n_added = self._merge_into_master(
                 sub_result.model, st.master_model, T_pre_to_apply,
             )
-        print(f"\n  [pass {st.n_pass} / pose {st.pose_idx}] {n_added} scan(s) → master "
+        print(f"\n  [pass {st.n_pass} / flip {st.pose_idx}] {n_added} scan(s) → master "
               f"(total scans={st.master_model.scan_count()})")
 
         # Viewer 를 cleaned master_model 로 재구성 — 회전 중 누적된 raw
@@ -1798,7 +2197,7 @@ class ArtecMultiPassScanSession:
                 print(f"  ⚠ {st.aborted_reason}")
                 return _ROT_ABORT
             print(f"\n  ⚠ Pass {st.n_pass} tracking lost: {sub_result.loss_reason}")
-            print(f"  → 같은 pose (pose {st.pose_idx}) 그대로 두고 [Enter] 재시도 / [q]+Enter 종료")
+            print(f"  → 같은 flip (flip {st.pose_idx}) 그대로 두고 [Enter] 재시도 / [q]+Enter 종료")
             if self._wait_user_quit():
                 st.user_quit = True
                 st.aborted_reason = "사용자 종료 (lost 직후)"
@@ -1943,11 +2342,21 @@ class ArtecMultiPassScanSession:
 
     @staticmethod
     def _iscan_to_pcd_B(scan, T_CB_master: np.ndarray, voxel_mm: float,
-                        max_frames: int = 50):
+                        max_frames: int = 50, T_sc_mm=None):
         """단일 IScan 의 frame vertices+colors 를 B 프레임 Open3D PointCloud 로
         변환 (voxel downsample). T_CB_master = 첫 pass C→B (translation m).
 
-        IScan vertices 는 mm, scan-world W (≈ C_first). C→B 후 base frame.
+        IScan vertices 는 mm, scan-world W = **3D 스캐너 프레임**(첫 프레임).
+        ⚠ W ≈ C 가 **아니다** — Artec 3D 정점과 Color 카메라 프레임은 180° 회전
+          + 41.8mm 강체변환으로 어긋난다([[project_artec_3d_vs_color_frame]]).
+          hand-eye `T_CB` 는 Color(솔브PnP) 기준이므로 T_sc 없이 곧장 C→B 를
+          걸면 점군이 카메라 반대편(≈2×작동거리 ≈ 0.5~0.6m)으로 미러링된다 —
+          2026-09-16 실물: Phase 2 메시가 물체보다 ~0.5m 위에 떠서 NBV 가
+          허공을 조준했다. preview 경로(`_capture_preview_verts(to_color=True)`)
+          는 이 변환을 하는데 이 경로만 빠뜨렸던 것.
+
+        T_sc_mm : (4,4) 스캐너3D→Color (mm), `_scanner_to_color()` 캐시.
+                  None 이면 변환 없이 진행(호출측이 경고할 것).
         반환: o3d.geometry.PointCloud (translation mm 단위) 또는 None.
         """
         try:
@@ -1965,6 +2374,10 @@ class ArtecMultiPassScanSession:
             idxs = list(range(n))
         R_CB = np.asarray(T_CB_master[:3, :3], float)
         t_CB_mm = np.asarray(T_CB_master[:3, 3], float) * 1000.0
+        R_sc = t_sc = None
+        if T_sc_mm is not None:
+            R_sc = np.asarray(T_sc_mm[:3, :3], float)
+            t_sc = np.asarray(T_sc_mm[:3, 3], float)
         all_v, all_c = [], []
         for i in idxs:
             frame = scan.get_frame(i)
@@ -1973,6 +2386,8 @@ class ArtecMultiPassScanSession:
                 continue
             T_f = scan.get_frame_transformation(i)
             v_W = v @ np.asarray(T_f[:3, :3], float).T + np.asarray(T_f[:3, 3], float)
+            if R_sc is not None:                # 스캐너3D → Color (mm)
+                v_W = v_W @ R_sc.T + t_sc
             v_B = v_W @ R_CB.T + t_CB_mm
             all_v.append(v_B)
             c = ArtecMultiPassScanSession._frame_vertex_colors(frame)
@@ -1993,8 +2408,10 @@ class ArtecMultiPassScanSession:
 
     @staticmethod
     def _master_to_pcd_B(master_model, T_CB_master: np.ndarray,
-                         voxel_mm: float, max_frames_per_scan: int = 30):
-        """master IModel 의 모든 IScan 을 B 프레임 colored PCD 로 합치기."""
+                         voxel_mm: float, max_frames_per_scan: int = 30,
+                         T_sc_mm=None):
+        """master IModel 의 모든 IScan 을 B 프레임 colored PCD 로 합치기.
+        T_sc_mm = 스캐너3D→Color (mm) — `_iscan_to_pcd_B` 참조."""
         try:
             import open3d as o3d
         except Exception:
@@ -2003,7 +2420,8 @@ class ArtecMultiPassScanSession:
         for s in range(master_model.scan_count()):
             scan = master_model.get_scan(s)
             pcd = ArtecMultiPassScanSession._iscan_to_pcd_B(
-                scan, T_CB_master, voxel_mm, max_frames=max_frames_per_scan)
+                scan, T_CB_master, voxel_mm, max_frames=max_frames_per_scan,
+                T_sc_mm=T_sc_mm)
             if pcd is not None:
                 merged += pcd
         if len(merged.points) == 0:
@@ -2030,9 +2448,12 @@ class ArtecMultiPassScanSession:
             print("  [nbv] ⚠ turntable_transform/T_BF0 없음 — 충돌 world 미구성(검사 skip)")
             return None
         from utils.collision.robot_collision import CollisionWorld
-        T_BF0 = np.asarray(T_BF0, float)
+        # ★ base 좌표는 `tt.axis_point_B/axis_dir_B` 로 받는다. T_BF0 의 열을
+        #   그대로 쓰면 안 된다 — B→F 규약이라 base 좌표가 아니다
+        #   (2026-09-16 EE-base 충돌 원인. `utils/transforms.py` 접근자 주석 참고).
+        axis_pt_B, axis_dir_B = tt.axis_point_B, tt.axis_dir_B
         world = CollisionWorld.from_turntable(
-            surface_point=T_BF0[:3, 3], axis_dir=T_BF0[:3, 2],
+            surface_point=axis_pt_B, axis_dir=axis_dir_B,
             disc_radius=self.s.nbv_turntable_radius_mm / 1000.0,
             body_height=self.s.nbv_turntable_body_height_mm / 1000.0,
             margin=self.s.nbv_collision_margin_mm / 1000.0)
@@ -2041,11 +2462,11 @@ class ArtecMultiPassScanSession:
         # ── 충돌 금지 원기둥 (turntable 위 금지구역) ──
         if self.s.nbv_keepout_enable:
             cxy = (self.s.nbv_keepout_center_xy
-                   if self.s.nbv_keepout_center_xy is not None else T_BF0[:2, 3])
+                   if self.s.nbv_keepout_center_xy is not None else axis_pt_B[:2])
             R = (self.s.nbv_keepout_radius_mm / 1000.0
                  if self.s.nbv_keepout_radius_mm is not None
                  else self.s.nbv_turntable_radius_mm / 1000.0)  # 기본=턴테이블 지름
-            z0 = float(T_BF0[2, 3])                             # disc 표면
+            z0 = float(axis_pt_B[2])                            # disc 표면
             world.add_cylinder("keepout", cxy, z0, z0 + self.s.nbv_keepout_height_mm / 1000.0,
                                R, margin=self.s.nbv_collision_margin_mm / 1000.0)
             print(f"  [nbv] keep-out 원기둥 추가 (r={R*1000:.0f}mm, "
@@ -2053,12 +2474,41 @@ class ArtecMultiPassScanSession:
         return world
 
     def _build_master_mesh_B(self, master_model):
-        """master IModel → B 프레임 pcd → Poisson mesh (frontier 입력)."""
+        """master IModel → B 프레임 pcd → Poisson mesh (frontier 입력). **단위 = m.**
+
+        ★ `_master_to_pcd_B` 는 Artec 정점 그대로 **mm** 를 돌려준다(ICP 병합
+          경로가 mm 를 요구한다). 반면 이 메시를 먹는 하류는 전부 **m** 다:
+            · `utils/nbv/phase2_nbv.detect_gaps(min/max_seg_length)` — m
+              (`_gap_kw()` 가 mm 설정을 /1000 해서 넘긴다)
+            · `phase2_nbv.is_converged(boundary_stop_m)` — m
+            · `_plan_nbv_pose` 의 `look_target` — base 프레임 m (`axis_xy_B` 와 조합)
+          sim(`isaac_scan_session.build_coverage_mesh`)도 m 로 넘긴다 — 공용
+          `phase2_nbv` 를 쓰므로 단위가 같아야 한다.
+
+          단위를 안 맞췄을 때의 증상 (실측 2026-09-16, run_20260916_211701):
+            · 세그먼트 길이가 mm 스케일 → 전부 `max_seg_length=0.06` 초과로
+              걸러져 `gaps=0`, 그런데 `boundary=943019mm` — 모순된 로그.
+            · `look_target` z 가 mm 값(−290)을 m 로 해석 → 조준점이 base 에서
+              290m → IK 전부 실패 → "feasible 관측자세 없음" 으로 Phase 2 즉시 종료.
+        """
         from utils.nbv import phase2_nbv as _p2
+        # ★ **마스터 프레임의** T_CB 를 쓴다 (`self._T_CB` 는 현재 자세라 틀림).
+        T_CB_master = self._st.master_T_CB
+        if T_CB_master is None:
+            T_CB_master = self._T_CB
+        # ★ 스캐너3D→Color 변환 — 없으면 점군이 ~0.5m 미러링된다. Phase 1 계획의
+        #   preview 경로가 풀어서 캐시해 두므로(`_capture_preview_verts(to_color=
+        #   True)` → `_scanner_to_color`) 정상 플로우면 항상 있다.
+        T_sc = getattr(self, "_T_scan_color", None)
+        if T_sc is None:
+            print("  [nbv] ⚠ 스캐너3D→Color 변환 미캐시 — 메시가 카메라 반대편으로 "
+                  "미러링될 수 있다 (preview 경로가 안 돌았나?)")
         pcd = self._master_to_pcd_B(
-            master_model, self._T_CB, voxel_mm=self.s.nbv_master_voxel_mm)
+            master_model, T_CB_master, voxel_mm=self.s.nbv_master_voxel_mm,
+            T_sc_mm=T_sc)
         if pcd is None or len(pcd.points) < 200:
             return None
+        pcd = pcd.scale(0.001, center=(0.0, 0.0, 0.0))     # mm → m
         return _p2.pcd_to_mesh_poisson(
             pcd, depth=self.s.nbv_poisson_depth,
             density_quantile=self.s.nbv_density_quantile)
@@ -2106,11 +2556,41 @@ class ArtecMultiPassScanSession:
         from utils.robot import xarm7_kinematics as _kin
         from utils.robot import view_pose as _vp
         rolls = rolls or getattr(self.s, "view_rolls_deg", None) or _vp.DEFAULT_ROLLS_DEG
+        # ★ el 의 기준축(up)을 **명시**한다. base 프레임을 world 처럼 넘기는데
+        #   (T_WB=None) 이 셀의 base 는 천장 마운트라 **+Z 가 아래**다
+        #   (`docs/4_collision.md` §6.1). 기본값 (0,0,1) 을 쓰면 el=+30° 가 카메라를
+        #   원판 **아래**로 보내 도달 불가가 된다 — 2026-09-16 실물에서 eye 가
+        #   base 로부터 1.38m(반경 0.70m)에 찍혀 3방위 IK 가 전부 실패했다.
+        #   sim 은 world 프레임에서 풀어 +Z 가 위였으므로 이 버그가 안 드러났다.
+        # ★ az=0 을 **로봇 쪽**으로 잡는다. 방위각은 커버리지와 무관하고(회전은
+        #   턴테이블 담당) 도달성만 좌우하는데, 이 셀은 턴테이블이 base 에서
+        #   1.09m 인데 팔 반경은 0.70m 라 카메라를 base 쪽에 놓아야만 닿는다.
+        #   2026-09-16 실측: 기본 기준(+X)에서는 az 0/±30° 가 전부 도달 불가였고
+        #   105~270° 만 해가 있었다(180° 최적). 기준을 돌리면 기존 스윕
+        #   (0, ±30) 이 그대로 유효 구간에 들어온다.
+        up = self._view_up_B()
+        az_ref = -np.asarray(look_target, float)     # 타깃 → base 원점
         q, _roll, _eye = _vp.solve_view_q(
             _kin, look_target, el_deg, az_deg, standoff, q_seed, self._T_EC,
             T_WB=None,                       # look_target 이 이미 base 프레임
-            convention=_vp.CAM_OPENCV, rolls_deg=rolls)
+            convention=_vp.CAM_OPENCV, rolls_deg=rolls, up=up, world_up=up,
+            az_ref=az_ref)
         return q
+
+    def _view_up_B(self):
+        """base 프레임에서 '위'(= 카메라가 놓이는 쪽) 단위벡터.
+
+        턴테이블 축 방향을 **로봇 쪽**으로 뒤집은 것이다. `build_T_B_F0` 가 F 의 +z 를
+        `nz[2] > 0` 으로 정규화하므로(= base 기준 +Z, 천장 마운트에서 '아래'),
+        관측 자세를 만들 때는 그 반대 방향이 필요하다.
+        캘리브가 없으면 base 기준 '위' = −Z 로 둔다.
+        """
+        tt = getattr(self.mms, "turntable_transform", None)
+        if tt is not None and hasattr(tt, "axis_dir_B"):
+            d = np.asarray(tt.axis_dir_B, float)
+            # base 원점(로봇) 쪽을 향하게
+            return -d if float(d[2]) > 0 else d
+        return np.array([0.0, 0.0, -1.0])
 
     def _plan_nbv_pose(self, q_cur, gaps, mesh):
         """Phase 2 관측자세 — 판단은 **sim·real 공용** `utils/nbv/nbv_planner` 가 한다.
@@ -2132,18 +2612,34 @@ class ArtecMultiPassScanSession:
         T_BF0 = getattr(tt, "T_BF0", None) if tt is not None else None
         if T_BF0 is None:
             return None
-        T_BF0 = np.asarray(T_BF0, float)
-        verts = np.asarray(mesh.vertices)                  # 메쉬(B) mid z = 객체 중간높이
-        look_target = np.array([T_BF0[0, 3], T_BF0[1, 3], float(verts[:, 2].mean())])
+        # ★ 회전축의 base xy 는 `tt.axis_xy_B`. T_BF0 의 열이 아니다 —
+        #   그걸 조준 타깃으로 쓰면 로봇이 자기 base 를 본다(2026-09-16 충돌).
+        axis_xy_B = tt.axis_xy_B
+        verts = np.asarray(mesh.vertices)                  # 메쉬(B, m) mid z = 객체 중간높이
+        look_target = np.array([axis_xy_B[0], axis_xy_B[1], float(verts[:, 2].mean())])
         standoff = self.s.nbv_distance_mm / 1000.0
+        # ★ 조준점을 **찍는다**. 이 한 줄이 없어서 단위/프레임 오류(mm 를 m 로,
+        #   현재 T_CB 를 마스터 T_CB 로)가 "허공을 스캔" 으로만 드러났다.
+        #   디스크 상단 z 와 나란히 보이면 바로 이상을 알 수 있다.
+        _disc_z = float(np.asarray(tt.axis_point_B, float)[2])
+        print(f"  [nbv] 조준 target=({look_target[0]:+.3f}, {look_target[1]:+.3f}, "
+              f"{look_target[2]:+.3f})m  standoff={standoff*1000:.0f}mm  "
+              f"| 디스크상단 z={_disc_z:+.3f}m  메시 z={verts[:, 2].min():+.3f}"
+              f"..{verts[:, 2].max():+.3f}m")
 
         if getattr(self, "_nbv", None) is None:
             # visited 를 pass 사이에 유지해야 하므로 세션에 1회만 만든다.
+            # ★ up_sign — base 가 천장 마운트라 '위' = −Z (`docs/4_collision.md`
+            #   §6.1, Phase 1 플래너와 같은 유도식). 안 넘기면 gap 의 윗면/아랫면
+            #   분류가 뒤집혀 뚜껑 gap 이 'Phase 3 flip 필요'로 제외된다
+            #   (2026-09-16 실물).
             self._nbv = NbvPlanner(joint_weights=DEFAULT_JOINT_WEIGHTS,
                                    el_floor_deg=self.s.nbv_el_floor_deg,
                                    view_azis_deg=tuple(self.s.nbv_view_azis_deg),
                                    ensure_els=tuple(self.s.nbv_ensure_els_deg),
-                                   log=lambda m: print(f"  [nbv] {m}"))
+                                   log=lambda m: print(f"  [nbv] {m}"),
+                                   up_sign=(-1.0 if float(self._view_up_B()[2]) < 0
+                                            else +1.0))
 
         def solve_pose(el, az, rolls):
             q = self._axis_view_q(look_target, el, az, standoff, q_cur, rolls=rolls)
@@ -2180,25 +2676,54 @@ class ArtecMultiPassScanSession:
         from utils.robot import view_pose as _vp
         from utils.robot import xarm7_kinematics as _kin
 
+        # ★ 물체 근접 하드 가드 — 충돌 world 는 **대상물을 장애물로 넣지 않으므로**
+        #   (225mm standoff 로 접근하는 대상이라) gap 겨냥 카메라가 물체에 얼마나
+        #   붙는지는 아무도 검사하지 않았다. 겨냥점이 유령이면 실물과의 거리는
+        #   임의가 된다 — 2026-09-16 실물: 스캐너가 뚜껑 15mm 까지 접근.
+        #   Spider 는 근접한계(170mm) 아래에선 데이터도 안 나오므로, 그보다
+        #   가까운 카메라 후보는 데이터 가치도 없다 → IK 전에 거부한다.
+        _mesh_v = np.asarray(mesh.vertices)                 # (B, m)
+        if len(_mesh_v) > 3000:
+            _mesh_v = _mesh_v[np.random.default_rng(0).choice(
+                len(_mesh_v), 3000, replace=False)]
+        _EYE_CLEAR_M = 0.15                                 # < near(0.17) 약간 아래
+
         def solve_lookat(eye, tgt):
+            d_min = float(np.min(np.linalg.norm(_mesh_v - np.asarray(eye)[None, :],
+                                                axis=1)))
+            if d_min < _EYE_CLEAR_M:
+                return None, None                           # 물체에 너무 가까움
             return _vp.solve_look_at_q(
                 _kin, eye, tgt, q_cur, self._T_EC,
                 T_WB=None,                          # look_target 이 이미 base 프레임
                 convention=_vp.CAM_OPENCV,
                 rolls_deg=(getattr(self.s, "view_rolls_deg", None)
-                           or _vp.DEFAULT_ROLLS_DEG))
+                           or _vp.DEFAULT_ROLLS_DEG),
+                # 스크리닝 예산 — 실패 후보에 기본 200iter×8seed 를 다 쓰면
+                # 실패 1건에 ~2.8s (2026-09-16 실측). 수렴하는 해는 초반에
+                # 수렴하므로 예산 축소로 놓치는 해가 거의 없다.
+                n_seed_alt=3, ik_max_iter=60)
 
         fr = None
         if self.s.nbv_frontier_enabled:
+            # ★ '로봇 편한 방위' 는 **축→로봇 base 방향에서 유도**한다. 설정값
+            #   (0, ±30) 은 그 방향에 대한 오프셋이다. 예전엔 atan2 세계각 그대로
+            #   써서 gap 을 로봇 **반대편**(+x, 축 너머)으로 돌렸다 — 카메라 eye
+            #   가 x≈1.0m 로 도달한계(1.09m) 직전이라 IK 가 전멸했고
+            #   (2026-09-16: "IK 150, 충돌 0" 후 실패), 매번 전회전 폴백만 돌았다.
+            #   성공하던 el-NBV 카메라는 전부 x 0.63~0.69 (로봇 쪽) — 그게 답이다.
+            az_robot = float(np.degrees(np.arctan2(-axis_xy_B[1], -axis_xy_B[0])))
+            az_pref = tuple(az_robot + float(a)
+                            for a in self.s.nbv_frontier_az_pref_deg)
             fr = self._nbv.plan_frontier(
                 gaps, q_cur, solve_lookat, swept,
                 standoff_m=self.s.nbv_distance_mm / 1000.0,
-                axis_xy=T_BF0[:2, 3],
-                az_pref_deg=tuple(self.s.nbv_frontier_az_pref_deg))
+                axis_xy=axis_xy_B,
+                az_pref_deg=az_pref)
         if fr is not None:
             # 턴테이블을 이 θ 로 보내면 gap 이 로봇 편한 방위에 온다.
-            # 캡처는 아직 전회전이라(§docs 3_phase2 T6) 시작각으로만 쓴다 —
-            # 회전 시작 시점에 gap 이 정면이라 추적이 가장 안정적일 때 찍힌다.
+            # 캡처는 sim 과 같이 이 θ 중심 부분 스윕(`nbv_patch_span_deg`) —
+            # `_capture_nbv_pose` 가 θ+span/2 에서 시작해 span 만큼 돈다.
             self._next_theta = float(fr[3])
             return fr[0]
 
@@ -2303,35 +2828,63 @@ class ArtecMultiPassScanSession:
             return None, None
         T_EB_after = self.robot.get_ee_pose_mat()
         T_BC_nbv = self._T_EC @ np.linalg.inv(T_EB_after)
-        T_pre = self._T_BC @ np.linalg.inv(T_BC_nbv)       # camera-motion (case ③)
+        # ★ EE/카메라 위치를 **찍는다** — 조준이 빗나가면 이 줄과 `[nbv] 조준
+        #   target` 줄만 비교해도 어긋난 좌표계를 바로 특정할 수 있다.
+        _p_ee = T_EB_after[:3, 3]
+        _T_CB_nbv = np.linalg.inv(T_BC_nbv)
+        _p_cam = _T_CB_nbv[:3, 3]
+        print(f"  [nbv] 이동 완료 — TCP=({_p_ee[0]:+.3f}, {_p_ee[1]:+.3f}, "
+              f"{_p_ee[2]:+.3f})m  카메라=({_p_cam[0]:+.3f}, {_p_cam[1]:+.3f}, "
+              f"{_p_cam[2]:+.3f})m (B)")
 
-        # gap 겨냥 자세면 계획된 θ 로 턴테이블을 먼저 보낸다. 그 각에서 gap 이
-        # 로봇 정면에 오도록 자세를 푼 것이므로, 회전을 그 지점에서 시작해야
-        # 추적이 가장 안정적인 초반에 목표 gap 이 찍힌다.
+        # gap 겨냥 자세면 **T_pre 계산 전에** 턴테이블을 목표 θ 로 보낸다. 그 각에서
+        # gap 이 로봇 정면에 오도록 자세를 푼 것이다. sim 과 같이 스윕을 목표 θ 에
+        # **중심 정렬**한다: 회전은 −방향이므로 θ+span/2 에서 시작해 θ−span/2 까지.
         th = getattr(self, "_next_theta", None)
+        sweep_rad = None
         if th is not None:
+            sweep_rad = float(np.radians(self.s.nbv_patch_span_deg))
+            th_start = float(th) + sweep_rad / 2.0
             try:
                 self.turntable.stop()
                 self.turntable.check_drive_err()
                 self.turntable.set_servo_on(True)
                 self.turntable.move_abs(
-                    float(th), float(self.s.probe_turntable_vel_rad_s))
+                    th_start, float(self.s.probe_turntable_vel_rad_s))
                 if hasattr(self.turntable, "wait_motion_done"):
                     self.turntable.wait_motion_done(timeout_s=20.0)
-                print(f"  [nbv] gap 겨냥 θ={np.degrees(th) % 360:.0f}° 로 이동")
+                print(f"  [nbv] gap 겨냥 θ={np.degrees(th) % 360:.0f}° — "
+                      f"스윕 {np.degrees(sweep_rad):.0f}° "
+                      f"(시작 {np.degrees(th_start) % 360:.0f}°)")
             except Exception as e:                          # noqa: BLE001
                 print(f"  [nbv] ⚠ θ 이동 실패({type(e).__name__}: {e}) — 현재 각에서 진행")
             finally:
                 self._next_theta = None
 
+        # ── T_pre: sub scan-world → master scan-world ────────────────────
+        # ★ 캡처 시작 시점의 **실제 턴테이블 각 θ0** 를 잰다. gap 겨냥은 물체가
+        #   master 기준(logical 0°)에서 θ0 만큼 회전된 상태로 스캔을 시작하므로,
+        #   카메라 이동만 보정하면 그 스캔이 **회전된 채** master 에 합쳐진다 —
+        #   2026-09-16 실물: θ=306° gap 스캔이 유령 geometry 를 만들고, 다음
+        #   반복이 유령의 gap 을 겨냥해 스캐너가 뚜껑 15mm 까지 접근했다.
+        #   또 scan-world 는 **스캐너3D 프레임**이지 Color(C)가 아니다
+        #   ([[project_artec_3d_vs_color_frame]]) — S(스캐너→Color)로 켤레해야
+        #   B 를 경유하는 변환이 옳다:
+        #     T_pre = S⁻¹ · T_BC_master · R_B(axis, −θ0) · T_CB_new · S
+        theta0 = self._read_turntable_theta()
+        T_pre = self._compose_T_pre_W_mm(T_BC_nbv, theta0, tag="nbv")
+
         st = self.s.streaming_settings
         orig_reset = st.reset_to_zero_first
+        orig_sweep = st.sweep_rad
         st.reset_to_zero_first = False                     # 현재 위치 유지
+        st.sweep_rad = sweep_rad                           # gap 겨냥 = 부분 스윕
         try:
             sub = ArtecStreamingScanSession(
                 self.mms, self.robot, self.turntable, st).run()
         finally:
             st.reset_to_zero_first = orig_reset
+            st.sweep_rad = orig_sweep
         return sub, T_pre
 
     # ── Phase 2 (NBV hole-fill) 프리미티브 — 수렴 루프는 공용 컨트롤러 소유 ──
@@ -2353,6 +2906,14 @@ class ArtecMultiPassScanSession:
         if mesh is None or len(mesh.triangles) == 0:
             print("  [nbv] master mesh 비어있음 — 종료.")
             return None
+        # 동적 장애물 갱신 — 계획 점군보다 정확한 실측 메시로 (경로가 대상물을
+        # 관통하지 않도록; 등록 자체의 근거는 _pick_phase1_planner 쪽 주석 참조).
+        try:
+            cm = self._collision_gate()
+            if cm is not None:
+                cm.set_dynamic_obstacle(np.asarray(mesh.vertices), margin_m=0.030)
+        except Exception as e:                              # noqa: BLE001
+            print(f"  [nbv] ⚠ 대상물 장애물 갱신 실패({e}) — 계속")
         return mesh
 
     def is_converged(self, mesh) -> bool:
@@ -2632,7 +3193,7 @@ class ArtecMultiPassScanSession:
         """현재 pose 에 대해 사용자가 어떤 자세로 두어야 하는지 출력."""
         rots = self.s.pose_physical_rotations
         if not rots or pose_idx >= len(rots) or rots[pose_idx] is None:
-            print(f"  [pose {pose_idx}] hint 미정 — canonical 자세로 두기")
+            print(f"  [flip {pose_idx}] hint 미정 — canonical 자세로 두기")
             return
         R3 = rots[pose_idx][:3, :3]
         # Rotation 행렬에서 axis-angle 추출 (Rodrigues' formula 역계산)
@@ -2641,7 +3202,7 @@ class ArtecMultiPassScanSession:
         angle_deg = float(np.degrees(np.arccos(cos_t)))
 
         if abs(angle_deg) < 0.1:
-            print(f"  [pose {pose_idx}] canonical 자세 (회전 0°)")
+            print(f"  [flip {pose_idx}] canonical 자세 (회전 0°)")
             return
 
         # 축 추출: 180° 근처는 sin_t≈0 singularity. (R+I)/2 의 대각 원소로 axis 복원.
@@ -2665,21 +3226,24 @@ class ArtecMultiPassScanSession:
                 R3[1, 0] - R3[0, 1],
             ]) / (2.0 * sin_t)
 
-        print(f"  [pose {pose_idx}] 객체 회전 ≈ {angle_deg:.0f}° "
+        print(f"  [flip {pose_idx}] 객체 회전 ≈ {angle_deg:.0f}° "
               f"around axis ({ax[0]:+.2f}, {ax[1]:+.2f}, {ax[2]:+.2f})")
 
     @staticmethod
     def _print_pass_banner(idx: int, total: int, pose_idx: int) -> None:
         bar = "═" * 46
         print(f"\n╔{bar}╗")
-        print(f"║   Multi-pass scan — Pass {idx} / max {total:<3} (pose {pose_idx})    ║")
+        print(f"║   Multi-pass scan — Pass {idx} / max {total:<3} (flip {pose_idx})    ║")
         print(f"╚{bar}╝")
 
     @staticmethod
     def _wait_user_quit() -> bool:
-        """Return True if user typed 'q' (case-insensitive), else False."""
+        """Return True if user typed 'q' or 'n' (case-insensitive), else False.
+
+        'n' = "이 phase 는 여기까지" — flip 프롬프트에서 q 와 같은 효과지만
+        (남은 flip 건너뛰고 finalize 로), 의도를 분명히 하려고 따로 받는다."""
         try:
             inp = input("  >> ").strip().lower()
         except EOFError:
             return False
-        return inp == "q"
+        return inp in ("q", "n")

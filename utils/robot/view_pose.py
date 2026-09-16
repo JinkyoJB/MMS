@@ -53,11 +53,44 @@ DEFAULT_N_SEED_ALT = 7
 DEFAULT_MIN_SIGMA = 0.05
 
 
-def eye_from_el_az(target_w, el_deg, az_deg, standoff):
-    """target 을 (el, az) 방향 standoff 거리에서 보는 카메라 원점."""
+def eye_from_el_az(target_w, el_deg, az_deg, standoff, up=(0.0, 0.0, 1.0),
+                   az_ref=None):
+    """target 을 (el, az) 방향 standoff 거리에서 보는 카메라 원점.
+
+    ★ `up` 은 **el 의 기준축**이다 — el=+90° 면 카메라가 이 방향에 놓인다.
+      기본 (0,0,1) 은 **world 프레임**(sim)에서 맞다.
+
+      real 은 다르다. `_axis_view_q` 가 base 프레임을 그대로 넘기는데,
+      이 셀의 base 는 **천장 마운트라 +Z 가 아래**다(`docs/4_collision.md` §6.1).
+      기본값을 쓰면 el=+30° 가 카메라를 원판 **아래**로 보낸다 — 2026-09-16 실물에서
+      eye 가 base 로부터 1.38m(도달반경 0.70m)에 찍혀 3방위 IK 가 전부 실패했고,
+      "sim 에서는 되는데 real 에서만 안 되는" 증상으로 나타났다.
+      real 은 턴테이블 축이 **로봇을 향하는 방향**을 `up` 으로 넘겨야 한다.
+
+      `gen_calib_poses.find_disc` 주석이 같은 함정을 경고한다 —
+      "여기서 부호를 틀리면 반구가 바닥을 향한다".
+    """
     e, a = math.radians(el_deg), math.radians(az_deg)
-    return np.asarray(target_w, float) + float(standoff) * np.array(
-        [math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e)])
+    n = np.asarray(up, float)
+    n = n / (np.linalg.norm(n) + 1e-12)
+    # n 에 수직인 정규직교 기저 — az=0 의 기준 방향.
+    # ★ Gram-Schmidt 로 잡는다. `cross(n, ref)` 를 쓰면 up=(0,0,1) 일 때 u1 이
+    #   (0,1,0) 이 되어 **방위각이 90° 돌아간다** — 기존 sim 동작과 달라진다.
+    #   아래 식은 up=(0,0,1) 에서 u1=(1,0,0), u2=(0,1,0) 이라 옛 공식과 정확히 같다.
+    #
+    # `az_ref` 를 주면 그 방향이 az=0 이 된다. real 은 **로봇 쪽**을 넘긴다 —
+    # 방위각은 커버리지와 무관하고(회전은 턴테이블 담당) 도달성만 좌우하는데,
+    # 타깃이 팔 길이 밖(base 에서 1.09m, 반경 0.70m)이면 카메라를 base 쪽에
+    # 놓아야만 닿는다. 2026-09-16 실측: az 0/±30° 는 전부 도달 불가,
+    # 105~270° 만 해가 있었고 180°(= 로봇 쪽)가 최적이었다.
+    ref = np.asarray(az_ref, float) if az_ref is not None else np.array([1.0, 0.0, 0.0])
+    if abs(float(n @ (ref / (np.linalg.norm(ref) + 1e-12)))) > 0.9:
+        ref = np.array([0.0, 1.0, 0.0]) if az_ref is None else np.cross(n, [1.0, 0.0, 0.0])
+    u1 = ref - float(ref @ n) * n
+    u1 /= (np.linalg.norm(u1) + 1e-12)
+    u2 = np.cross(n, u1)
+    d = math.cos(e) * (math.cos(a) * u1 + math.sin(a) * u2) + math.sin(e) * n
+    return np.asarray(target_w, float) + float(standoff) * d
 
 
 def camera_pose(eye, target, convention=CAM_USD, roll_deg=0.0, world_up=(0.0, 0.0, 1.0)):
@@ -88,7 +121,7 @@ def ik_seeds(seed, n_alt=DEFAULT_N_SEED_ALT, rng_seed=0):
 def solve_look_at_q(kin, eye, target, seed, T_EC, *,
                     T_WB=None, convention=CAM_USD, rolls_deg=DEFAULT_ROLLS_DEG,
                     n_seed_alt=DEFAULT_N_SEED_ALT, world_up=(0.0, 0.0, 1.0),
-                    min_sigma=DEFAULT_MIN_SIGMA):
+                    min_sigma=DEFAULT_MIN_SIGMA, ik_max_iter=None):
     """(q, roll_deg) — **카메라 위치와 겨냥점을 직접** 주는 경로. 못 풀면 (None, None).
 
     `solve_view_q` 는 '축을 el/az/standoff 에서 본다'는 규칙이라 **오목·내부 면을
@@ -97,6 +130,17 @@ def solve_look_at_q(kin, eye, target, seed, T_EC, *,
     """
     eye = np.asarray(eye, float)
     target = np.asarray(target, float)
+    # ★ 명백히 도달 불가한 타깃은 IK 를 **부르지 않는다.** 수치 IK 는 실패해도
+    #   max_iter 를 다 돌아서, 아래 roll×seed 스윕이면 한 번에 2.8초가 걸린다
+    #   (실측 2026-09-16). NBV gap 겨냥은 후보가 수백 개라 14분간 무응답이 된다.
+    #   플랜지는 eye 에서 |t_EC| 이내에 있으므로 `|eye| - |t_EC| > 도달상한` 이면
+    #   **어떤 roll 로도** 못 풀린다 — 보수적이라 놓치는 해가 없다.
+    #   (T_WB 가 있으면 eye 가 base 프레임이 아니므로 이 검사를 건너뛴다.)
+    _reach = getattr(kin, "MAX_REACH_M", None)
+    if _reach is not None and T_WB is None:
+        _d_ec = float(np.linalg.norm(np.asarray(T_EC, float)[:3, 3]))
+        if float(np.linalg.norm(eye)) - _d_ec > float(_reach):
+            return None, None
     seeds = ik_seeds(seed, n_seed_alt)
     for roll in rolls_deg:
         T_C = camera_pose(eye, target, convention, roll, world_up)
@@ -106,7 +150,14 @@ def solve_look_at_q(kin, eye, target, seed, T_EC, *,
         pose6d = np.concatenate([T_EB[:3, 3] * 1000.0,
                                  kin.R_to_euler_xyz(T_EB[:3, :3])])
         for sd in seeds:
-            q, ok = kin.ik(pose6d, seed=sd)
+            # ik_max_iter — 후보 **스크리닝**용 예산. NBV gap 겨냥처럼 실패가
+            # 대부분인 대량 평가에서 기본 200 반복을 다 돌면 실패 1건에 수 초씩
+            # 든다. 수렴할 해는 초반에 수렴하므로 예산을 줄여도 해를 거의 안
+            # 놓친다 (None = kin 기본값, 기존 동작).
+            if ik_max_iter is not None:
+                q, ok = kin.ik(pose6d, seed=sd, max_iter=int(ik_max_iter))
+            else:
+                q, ok = kin.ik(pose6d, seed=sd)
             if not ok:
                 continue
             if min_sigma > 0.0:
@@ -122,13 +173,17 @@ def solve_look_at_q(kin, eye, target, seed, T_EC, *,
 def solve_view_q(kin, target_w, el_deg, az_deg, standoff, seed, T_EC, *,
                  T_WB=None, convention=CAM_USD, rolls_deg=DEFAULT_ROLLS_DEG,
                  n_seed_alt=DEFAULT_N_SEED_ALT, world_up=(0.0, 0.0, 1.0),
-                 min_sigma=DEFAULT_MIN_SIGMA):
+                 min_sigma=DEFAULT_MIN_SIGMA, up=None, az_ref=None):
     """(q, roll_deg, eye) — target 을 (el, az, standoff) 에서 보는 자세. 실패 시 (None, None, eye).
 
     카메라가 **물체 바깥 구면**에 놓이는 규칙이라 외부 표면 전용이다. 내부·오목면은
     `solve_look_at_q` 를 쓸 것.
+
+    `up` 은 **el 의 기준축**(기본 = `world_up`). 천장 마운트 base 프레임처럼 +Z 가
+    아래인 좌표계에서는 반드시 로봇 쪽 방향을 줘야 한다 — `eye_from_el_az` 참고.
     """
-    eye = eye_from_el_az(target_w, el_deg, az_deg, standoff)
+    eye = eye_from_el_az(target_w, el_deg, az_deg, standoff,
+                         up=(world_up if up is None else up), az_ref=az_ref)
     q, roll = solve_look_at_q(kin, eye, target_w, seed, T_EC, T_WB=T_WB,
                               convention=convention, rolls_deg=rolls_deg,
                               n_seed_alt=n_seed_alt, world_up=world_up,

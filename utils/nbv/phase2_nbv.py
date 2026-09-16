@@ -236,14 +236,22 @@ def geometric_cost(
     return float(dp @ dp) - delta * L_hat
 
 
-def gap_normal_elevations_deg(gaps, top_k: int = 8) -> List[float]:
-    """큰 gap 들의 바깥법선 elevation(수평 위 각도, deg). 윗면 gap≈90°, 측면≈0°."""
+def gap_normal_elevations_deg(gaps, top_k: int = 8,
+                              up_sign: float = +1.0) -> List[float]:
+    """큰 gap 들의 바깥법선 elevation(수평 위 각도, deg). 윗면 gap≈90°, 측면≈0°.
+
+    `up_sign` — 작업 프레임에서 어느 z 방향이 '위'인가 (+1 = +Z 가 위).
+      sim 은 world 프레임이라 +1. real 은 천장 마운트 base 라 **−1**
+      (`docs/4_collision.md` §6.1) — 부호 없이 n_z 를 그대로 쓰면 윗면 gap 이
+      elevation **−90°** 로 나와 윗면/아랫면 판정이 통째로 뒤집힌다.
+    """
+    s = float(np.sign(up_sign)) or 1.0
     big = sorted(gaps, key=lambda c: -c.L)[:top_k]
     out = []
     for c in big:
         n = np.asarray(c.n_O, float)
         n = n / (np.linalg.norm(n) + 1e-12)
-        out.append(math.degrees(math.asin(float(np.clip(n[2], -1.0, 1.0)))))
+        out.append(math.degrees(math.asin(float(np.clip(s * n[2], -1.0, 1.0)))))
     return out
 
 
@@ -252,7 +260,7 @@ def plan_nbv_elevation_pose(
     joint_weights, el_floor_deg: float = 30.0,
     view_azis_deg=(0., 30., -30., 60., -60., 90., -90., 180.),
     el_extra_deg=(65., 55., 45.), el_cap_deg: float = 88.0,
-    visited=(), ensure_els=(),
+    visited=(), ensure_els=(), up_sign: float = +1.0,
 ):
     """★ 공용 NBV 자세선택 (real/sim 동일) — **부족면을 덮을 관측 elevation 자세** 선택.
 
@@ -273,7 +281,7 @@ def plan_nbv_elevation_pose(
     if not gaps:
         return None
     seen = {(round(float(e), 1), round(float(a), 1)) for e, a in visited}
-    needs = gap_normal_elevations_deg(gaps)
+    needs = gap_normal_elevations_deg(gaps, up_sign=up_sign)
     el_need = float(np.clip(np.median(needs), el_floor_deg + 5.0, el_cap_deg))
     # ★ **el_need 에 가까운 순**으로 시도한다. 예전에는 내림차순(=가장 높은 el 우선)이라
     #   el_extra_deg 의 65 가 항상 이겨 el_need 가 사실상 무시됐다. 그 결과 gap 이

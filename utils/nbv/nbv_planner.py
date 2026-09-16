@@ -30,6 +30,7 @@ sim 쪽에만 쌓였다. 2026-08 시점의 실측 격차:
 from __future__ import annotations
 
 import math
+import time as _time
 
 import numpy as np
 
@@ -41,16 +42,23 @@ UP_NZ = 0.6
 INWARD_DOT = -0.2
 
 
-def classify_gaps(gaps):
+def classify_gaps(gaps, up_sign: float = +1.0):
     """(n_up, n_down, n_side, nz list). 위/아래를 **부호로** 가른다.
 
     `abs(n_z)>0.6` 로 뭉뚱그리면 아래를 향한 gap 까지 '윗면'으로 세어, 바닥면
     미스캔이 윗면 부족처럼 보인다(그러면 더 높은 el 을 시도하게 되어 역효과).
+
+    `up_sign` — 작업 프레임에서 어느 z 방향이 '위'인가 (+1 = +Z 가 위).
+      real 의 base 는 천장 마운트라 +Z 가 **아래**(−1). 부호를 안 맞추면 윗면과
+      아랫면이 통째로 뒤바뀐다 — 2026-09-16 실물: 뚜껑 gap 3개가 '아랫면'으로
+      분류돼 NBV 대상에서 제외되고, 정작 볼 수 없는 바닥면 gap 을 겨냥했다.
+    반환하는 nz 는 **up_sign 적용 후**(+ = 위) — 호출측 usable 필터가 그대로 맞다.
     """
+    s = float(np.sign(up_sign)) or 1.0
     nz = []
     for c in gaps:
         n = np.asarray(c.n_O, float)
-        nz.append(float((n / (np.linalg.norm(n) + 1e-12))[2]))
+        nz.append(s * float((n / (np.linalg.norm(n) + 1e-12))[2]))
     n_up = sum(1 for z in nz if z > UP_NZ)
     n_dn = sum(1 for z in nz if z < DOWN_NZ)
     return n_up, n_dn, len(gaps) - n_up - n_dn, nz
@@ -89,10 +97,13 @@ class NbvPlanner:
     """
 
     def __init__(self, *, joint_weights, el_floor_deg, view_azis_deg=None,
-                 ensure_els=(), log=print, tag=""):
+                 ensure_els=(), log=print, tag="", up_sign: float = +1.0):
         self.joint_weights = joint_weights
         self.el_floor_deg = float(el_floor_deg)
         self.view_azis_deg = view_azis_deg
+        # 작업 프레임의 '위' 부호 (+1 = +Z 가 위). real(천장 마운트 base)은 −1 —
+        # gap 의 윗면/아랫면 분류·필요 elevation·frontier 기울임 방향이 전부 따른다.
+        self.up_sign = float(np.sign(up_sign)) or 1.0
         self.log = log
         self.tag = f"{tag} " if tag else ""
         self.visited = []                     # 이미 전회전 스캔한 (el, az)
@@ -114,7 +125,7 @@ class NbvPlanner:
     def plan_frontier(self, gaps, q_cur, solve_lookat_fn, swept_free_fn, *,
                       standoff_m=0.25, min_sep_m=0.02,
                       tilt_degs=(0.0, 30.0, 45.0, 60.0, 75.0),
-                      up=(0.0, 0.0, 1.0), axis_xy=None, az_pref_deg=(0.0, 30.0, -30.0)):
+                      up=None, axis_xy=None, az_pref_deg=(0.0, 30.0, -30.0)):
         """gap 을 **직접 겨냥**한다. (q, cand, roll, theta) 또는 None.
 
         축-고도각 방식은 카메라가 늘 턴테이블 축을 봐서 **gap 위치를 통째로 버린다**
@@ -128,15 +139,42 @@ class NbvPlanner:
         법선 정면이 막히면(작동거리가 물체보다 큰 오목면 등) 개구부 쪽으로 기울인다:
             d(θ_t) = normalize(n̂·cos θ_t + ẑ·sin θ_t)
         """
+        # `up` 미지정이면 planner 의 up_sign 을 따른다 — tilt 는 gap 법선에서
+        # '위' 쪽으로 기울여 내려다보게 만드는 것이라 부호가 뒤집히면 카메라가
+        # 아래에서 올려다보는 자세를 시도한다 (real 은 대부분 도달 불가·충돌).
+        if up is None:
+            up = (0.0, 0.0, self.up_sign)
         u = np.asarray(up, float); u = u / (np.linalg.norm(u) + 1e-12)
         ax = None if axis_xy is None else np.asarray(axis_xy, float)
-        cands = sorted(gaps, key=lambda c: -float(c.L))
+        # ★ 아랫면 gap 은 여기서도 제외한다 — `plan()`(축-고도각)에는 이 필터가
+        #   있었는데 frontier 경로에는 없었다. 아래를 향한 면은 밑에서 올려다봐야
+        #   해서 후보 조합(방위×기울임)이 **전부** IK 불능인데, 도달상한 사전필터는
+        #   위치만 보므로 못 거른다 → 조합마다 수치 IK 를 끝까지 소진한다.
+        #   실측 2026-09-16: 후보 25개 중 아랫면 14개, 후보당 ~20s = 5분 낭비.
+        #   아랫면은 Phase 3 flip 의 몫이다.
+        _, _, _, nz = classify_gaps(gaps, self.up_sign)
+        n_dn = sum(1 for z in nz if z < DOWN_NZ)
+        if n_dn:
+            self.log(f"{self.tag}  ↳ 아랫면 {n_dn}개 frontier 제외 (flip 필요)")
+        cands = [c for c, z in zip(gaps, nz) if z >= DOWN_NZ]
+        cands = sorted(cands, key=lambda c: -float(c.L))
         if not cands:
             return None
         self.log(f"{self.tag}gap 겨냥 — 후보 {len(cands)}개 "
                  f"(최대 L={float(cands[0].L)*1000:.0f}mm)")
         tried = {"near": 0, "dry": 0, "ik": 0, "swept": 0}
-        for c in cands:
+        # ★ 진행 로그. 이 루프는 후보×방위×기울임 조합마다 IK+swept 를 돌아서
+        #   조건이 나쁘면 수 분간 출력이 없다 — 2026-09-16 실물에서 gap 좌표가
+        #   틀려 전 조합이 도달 불가가 되자 로그 한 줄 없이 14분을 돌았다.
+        #   멈춘 것인지 도는 것인지 구분할 수 있어야 한다.
+        _t0 = _time.perf_counter()
+        _t_last = _t0
+        for _i, c in enumerate(cands):
+            if _time.perf_counter() - _t_last > 5.0:
+                _t_last = _time.perf_counter()
+                self.log(f"{self.tag}  gap 겨냥 진행 {_i}/{len(cands)} "
+                         f"({_t_last - _t0:.0f}s) — IK실패 {tried['ik']}, "
+                         f"충돌 {tried['swept']}")
             p0 = np.asarray(c.p_O, float)
             if any(np.linalg.norm(p0 - v) < min_sep_m for v in self.visited_frontier):
                 tried["near"] += 1
@@ -208,8 +246,8 @@ class NbvPlanner:
         """(q, el, az, roll) 또는 None."""
         if not gaps:
             return None
-        n_up, n_dn, n_side, nz = classify_gaps(gaps)
-        needs = p2.gap_normal_elevations_deg(gaps)
+        n_up, n_dn, n_side, nz = classify_gaps(gaps, self.up_sign)
+        needs = p2.gap_normal_elevations_deg(gaps, up_sign=self.up_sign)
         self.log(f"{self.tag}gap유형: 윗면={n_up} 아랫면={n_dn} 측면/뒷면={n_side}  "
                  f"필요 el(중앙값)={float(np.median(needs)):.0f}°")
 
@@ -244,7 +282,7 @@ class NbvPlanner:
 
         kw = dict(joint_weights=self.joint_weights,
                   el_floor_deg=self.el_floor_deg, visited=self.visited,
-                  ensure_els=self.ensure_els)
+                  ensure_els=self.ensure_els, up_sign=self.up_sign)
         if self.view_azis_deg is not None:
             kw["view_azis_deg"] = tuple(self.view_azis_deg)
         todo = [e for e in self.ensure_els
