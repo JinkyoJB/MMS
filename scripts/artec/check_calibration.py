@@ -87,7 +87,11 @@ def check_turntable() -> None:
     if "__error__" in d:
         say(FAIL, "turntable_frame.yaml 읽기 실패", d["__error__"]); return
 
-    npts = int(d.get("n_rim_points", 0))
+    # ★ 저장 쪽(`turntable_frame.save_turntable_frame_yaml`)이 쓰는 키는
+    #   **`n_points`** 다. 여기서 `n_rim_points` 만 보던 탓에 항상 0 으로 읽혀
+    #   점을 15개 찍어도 "rim 점 0개 — 다시 잡을 것" FAIL 이 났다(2026-09-16).
+    #   구 파일 호환을 위해 옛 키도 같이 본다.
+    npts = int(d.get("n_points", d.get("n_rim_points", 0)))
     if npts >= 6:
         say(OK, f"rim 점 {npts}개")
     elif npts >= 4:
@@ -121,10 +125,18 @@ def check_turntable() -> None:
         except ValueError:
             say(WARN, f"측정일 파싱 실패: {when}")
 
-    t = np.asarray(d["T_B_F0"]["translation"], float)
-    print(f"\n  원점(base) = [{t[0]:+.3f}, {t[1]:+.3f}, {t[2]:+.3f}] m   "
-          f"거리 {np.linalg.norm(t):.3f} m")
-    _cross_check_cell(t)
+    # ★ `T_B_F0` 는 **B→F** 규약이다 (x_F = R·x_B + t). 따라서 `translation` 은
+    #   턴테이블의 base 좌표가 **아니다.** F 원점(x_F=0)의 base 좌표는 −Rᵀ·t 다.
+    #   2026-09-16 까지 이 값을 그대로 원점으로 써서, 실제로는 맞는 캘리브에도
+    #   "그 자리에 아무것도 없다" FAIL 이 항상 났다 — 셀 모델을 의심하게 만든
+    #   오진이었다(실측: translation [-0.862,0.080,-0.603] → 셀 점 0개,
+    #   −Rᵀ·t [0.799,0.005,0.688] → 셀 점 25,097개).
+    M = np.asarray(d["T_B_F0"]["matrix"], float)
+    R_bf, t_bf = M[:3, :3], M[:3, 3]
+    o = -R_bf.T @ t_bf                      # F 원점을 base 로
+    print(f"\n  원점(base) = [{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}] m   "
+          f"거리 {np.linalg.norm(o):.3f} m")
+    _cross_check_cell(o)
 
 
 def _cross_check_cell(t_bf0: np.ndarray) -> None:
