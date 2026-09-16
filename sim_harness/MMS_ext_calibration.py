@@ -119,6 +119,13 @@ try:
                        "mms_artec/utils/calibration/artec_charuco_detector.py")
     ArtecCharucoDetector = _chmod.ArtecCharucoDetector
     CharucoBoardSpec = _chmod.CharucoBoardSpec
+    # ★ 보드 프리셋도 **실물과 같은 정의**에서 가져온다. 예전엔 sim 이
+    #   `HS.BoardConfig()` 기본값(5×3/20mm)을 따로 들고 있어서, 실물 기본이
+    #   spider_dense(7×5/12mm)로 바뀌자 sim 과 real 이 다른 보드를 썼다 —
+    #   sim 은 자기 텍스처를 자기 스펙으로 만들어 혼자 잘 돌지만, 그러면
+    #   sim 으로 real 을 검증한다는 전제가 깨진다 (2026-09-16).
+    BOARD_PRESETS = _chmod.BOARD_PRESETS
+    DEFAULT_BOARD_NAME = _chmod.DEFAULT_BOARD_NAME
     HandEyeCalibrator = _load_mod(
         "mms_hand_eye_calibrator", "utils/calibration/hand_eye_calibrator.py"
     ).HandEyeCalibrator
@@ -140,6 +147,7 @@ try:
     _HAS_CALIB = True
 except Exception as _e:
     ArtecCharucoDetector = CharucoBoardSpec = HandEyeCalibrator = None
+    BOARD_PRESETS = DEFAULT_BOARD_NAME = None
     geo = RobotIK = None
     _HAS_CALIB = False
     print(f"[CALIB][WARN] MMS calibration/geometry/IK 모듈 로드 실패: {_e}")
@@ -170,7 +178,15 @@ ARTEC_HOME_JOINTS_DEG = [38.92, -48.70, -65.29, 21.22, 21.46, 72.70, -96.58]
 
 # ── ChArUco 보드 (실기 spider 프리셋: 5×3, 20mm/15mm, DICT_4X4_50) ─────────────
 #   CharucoBoardSpec 는 mm 규약 → solvePnP T_MC 가 mm (HandEyeCalibrator 기대치와 일치).
-BOARD_CFG        = HS.BoardConfig()          # 공유 정의 (utils/calibration/handeye_sim)
+# ★ 실물 프리셋에서 파생 — sim·real 이 **같은 보드**를 쓰도록. 프리셋을 못 불러온
+#   경우(_HAS_CALIB=False)만 공유 기본값으로 떨어진다.
+if BOARD_PRESETS is not None:
+    BOARD_CFG    = HS.BoardConfig.from_spec(BOARD_PRESETS[DEFAULT_BOARD_NAME])
+    print(f"[CALIB] 보드 프리셋 '{DEFAULT_BOARD_NAME}' → "
+          f"{BOARD_CFG.squares_x}×{BOARD_CFG.squares_y} "
+          f"sq={BOARD_CFG.square_len_mm:g}mm mk={BOARD_CFG.marker_len_mm:g}mm")
+else:
+    BOARD_CFG    = HS.BoardConfig()          # 공유 정의 (utils/calibration/handeye_sim)
 CH_BOARD_W_M     = BOARD_CFG.width_m
 CH_BOARD_H_M     = BOARD_CFG.height_m
 CH_BOARD_THICK_M = BOARD_CFG.thick_m
@@ -219,7 +235,12 @@ PHYSICS_CB_NAME = "mms_calib_step"
 #   곳(.../code_editor/vscode/)에 묻힌다 → 스크립트 위치를 절대경로로 고정.
 OUT_DIR   = os.path.join(_BASE_DIR, "captures_calib")
 ASSET_DIR = os.path.join(_BASE_DIR, "calib_assets")
-BOARD_PNG = os.path.join(ASSET_DIR, "charuco_5x3_20_15.png")
+#: 보드 텍스처. 파일명에 스펙을 박아, 프리셋이 바뀌면 옛 PNG 를 재사용하지 않는다
+#  (5×3 텍스처를 7×5 스펙으로 검출하면 조용히 실패한다).
+BOARD_PNG = os.path.join(
+    ASSET_DIR,
+    f"charuco_{BOARD_CFG.squares_x}x{BOARD_CFG.squares_y}"
+    f"_{BOARD_CFG.square_len_mm:g}_{BOARD_CFG.marker_len_mm:g}.png")
 
 # ── 콘솔 로그 tee → 파일 (Isaac 확장 콘솔이 안 보여서; utf-8, tail -f 용) ───────
 os.makedirs(OUT_DIR, exist_ok=True)

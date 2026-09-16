@@ -33,14 +33,47 @@ PASS_R_ERR_DEG = 2.0
 
 @dataclass
 class BoardConfig:
-    """ChArUco 보드 — 실물 Spider 프리셋과 동일해야 한다(검출기·텍스처 공용)."""
-    squares_x: int = 5
-    squares_y: int = 3
-    square_len_mm: float = 20.0
-    marker_len_mm: float = 15.0
+    """ChArUco 보드 — 실물 프리셋과 **동일해야 한다**(검출기·텍스처 공용).
+
+    ★ 이 기본값은 `mms_artec/utils/calibration/artec_charuco_detector.py` 의
+      `BOARD_PRESETS["spider_dense"]` 와 맞춰 둔 사본이다. 2026-09-16 에 실물
+      기본 보드를 `spider`(5×3/20mm, 코너 8개) → `spider_dense`(7×5/12mm, 코너 24개)
+      로 바꿨는데 여기가 5×3 에 남아 있어서, sim 과 real 이 **다른 보드**를 쓰게 됐다.
+      sim 은 자기 텍스처를 자기 스펙으로 만들므로 혼자서는 잘 돌지만, 그러면
+      **sim 으로 real 을 검증한다는 전제가 깨진다.**
+
+      `utils/` 는 `mms_artec/` 를 import 하지 않는 계층 규약이라(그래서
+      `make_board_spec` 이 `CharucoBoardSpec` 을 **인자로** 받는다) 여기서 직접
+      프리셋을 끌어올 수 없다. 대신 양쪽을 다 import 하는 sim 하니스가
+      `BoardConfig.from_spec()` 으로 실물 프리셋에서 만들어 쓴다.
+    """
+    squares_x: int = 7
+    squares_y: int = 5
+    square_len_mm: float = 12.0
+    marker_len_mm: float = 9.0
     aruco_dict: str = "DICT_4X4_50"
-    img_px: tuple[int, int] = (1000, 600)
+    img_px: tuple[int, int] = (840, 600)     # 10 px/mm — 84×60mm
     thick_m: float = 0.006
+
+    @classmethod
+    def from_spec(cls, spec, *, px_per_mm: float = 10.0, thick_m: float = 0.006):
+        """실물 `CharucoBoardSpec` → sim `BoardConfig`. 이게 정본 경로다.
+
+        `aruco_dict` 는 이름이 필요하므로 cv2 상수에서 역인용한다.
+        """
+        import cv2
+        name = next((n for n in dir(cv2.aruco)
+                     if n.startswith("DICT_")
+                     and getattr(cv2.aruco, n) == spec.aruco_dict), "DICT_4X4_50")
+        return cls(
+            squares_x=int(spec.squares_x), squares_y=int(spec.squares_y),
+            square_len_mm=float(spec.square_length_mm),
+            marker_len_mm=float(spec.marker_length_mm),
+            aruco_dict=name,
+            img_px=(int(round(spec.squares_x * spec.square_length_mm * px_per_mm)),
+                    int(round(spec.squares_y * spec.square_length_mm * px_per_mm))),
+            thick_m=thick_m,
+        )
 
     @property
     def width_m(self) -> float:
