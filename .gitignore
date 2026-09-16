@@ -250,5 +250,7 @@ scripts/sim/log/
 *.ilk
 *.pdb
 
-# 캘리브 자세 생성 시 자동 백업 (gen_calib_poses.py --write)
+# 캘리브 결과 갱신 시 자동 백업
+#   gen_calib_poses.py --write · transforms.update_transform · turntable_calib 의 S 키
 config/calibration/*.yaml.bak
+config/*.yaml.bak

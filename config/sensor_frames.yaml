@@ -1,15 +1,18 @@
-# ⚠ 이 T_EC_artec 은 **구 스캐너 SP.10.36181288** 기준이다 — 재캘리브 필요.
-#   현재 장착된 스캐너는 SP.10.79103441 로 교체되었다.
-#   카메라 광학 프레임이 개체마다 다르므로 이 값을 그대로 쓰면 T_CB 가 틀어진다.
-#   재캘리브: scripts/artec/calibrate.py  (docs/1_calibration.md)
-#
-# Artec scanner (SP.10.36181288) hand-eye calibration result
-# 2026-04-29  charuco_uv3d_procrustes + solvePnP refinement
-# t_err=3.55mm  r_err=1.30°  (PARK method, n=22 poses)
-T_EC_artec:
-  translation: [0.004329194884776221, -0.17715790903434658, -0.059004772935621924]
-  rotation_quat: [0.28410265849620736, 0.7112875756035403, 0.6027294602740305, -0.22376966270073106]
+# 센서별 T_EC (E→C). **캘리브 스크립트가 직접 쓴다 — 손으로 옮겨 적지 않는다.**
+#   artec : scripts/artec/calibrate.py --only 2
+# translation 단위 m, rotation_quat 는 [qx, qy, qz, qw].
+# 각 키의 date/method/n_poses/t_err_mm 은 그 값이 어디서 나왔는지 기록이다.
 
+T_EC_artec:
+  translation: [-0.003496304902374036, -0.17016698329135782, -0.04624410840281327]
+  rotation_quat: [0.30238104651398007, 0.7053324666277916, 0.5896423590574101, -0.2517810609141951]
+  sensor: artec_spider
+  date: '2026-09-16'
+  method: charuco_solvepnp
+  n_poses: 20
+  board: 7x5_sq12
+  t_err_mm: 5.012
+  r_err_deg: 1.39
 T_EC_femto:
   rotation_quat: [0.0, 0.0, 0.0, 1.0]
   translation: [0.0, 0.0, 0.075]
