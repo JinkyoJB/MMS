@@ -24,6 +24,7 @@ Notation: pose 는 backend 가 해석하는 로봇 관절해(q). AT_CURRENT = "�
 from __future__ import annotations
 
 import os
+import time as _time
 from typing import Any, Optional, Protocol, runtime_checkable
 
 
@@ -131,6 +132,22 @@ def phase_desc(mode) -> str:
     return PHASE_DESC.get(int(mode), f"phase_mode={mode}")
 
 
+_T0 = _time.perf_counter()
+_T_LAST = _T0
+
+
+def _step(tag, title: str, detail: str = "") -> None:
+    """단계 구분선 + **직전 단계 소요시간**. sim·real 공용."""
+    global _T_LAST
+    now = _time.perf_counter()
+    dt, total = now - _T_LAST, now - _T0
+    _T_LAST = now
+    print(f"\n[phase] ═══ [{tag}] {title} " + "═" * max(4, 40 - len(title))
+          + f"  (직전 {dt:.1f}s · 누적 {total:.1f}s)")
+    if detail:
+        print(f"[phase]     {detail}")
+
+
 def run_scan_phases(backend: ScanBackend) -> Any:
     """Phase 1→2→3 순차 누적 실행 (sim/real 공용). 반환 = backend.finalize().
 
@@ -140,13 +157,56 @@ def run_scan_phases(backend: ScanBackend) -> Any:
       Phase 3 : go_home → (외부 flip → capture_rotation) 반복
     각 단계 실패/중단(False/None)이면 즉시 다음 단계 건너뛰고 finalize.
     """
+    # ★ 각 단계를 콘솔에 표시한다. 실물 스캔은 한 번에 수 분이고 중간에 멈추면
+    #   "지금 어느 단계인가" 를 알 수 없었다 — 단계 전환이 로그에 안 남아서
+    #   프롬프트와 캡처 로그 사이가 통째로 침묵이었다(2026-09-16).
+    _step(1, "Phase 1", "좋은 자세 고정 + 턴테이블 전회전")
+
     # ── Phase 1 — 좋은 포즈 고정 + 턴테이블 전회전 ──────────────────────
     # pick_phase1_pose 는 단일 pose 또는 **pose 리스트(밴드 계획)** 반환 가능.
     # 밴드(키큰 물체: 겹침 z-대역 자세들, safe-first 순서)면 대역마다 전회전.
+    _step("1.1", "시작 확인", "사용자 확인 대기 (prompt_before_first_pass)")
     if not backend.confirm_start():
         return backend.finalize()
+
+    _step("1.2", "자세 계획", "preview 수집 → 실루엣 → 관측 자세 산출")
     pose1 = backend.pick_phase1_pose()
     poses1 = list(pose1) if isinstance(pose1, (list, tuple)) else [pose1]
+    print(f"[phase]   → 자세 {len(poses1)}개 "
+          f"({'단일' if len(poses1) == 1 else '밴드 계획'})")
+
+    _step("1.3", "전회전 캡처", f"자세 {len(poses1)}개 × 턴테이블 360°")
+
+    # ★ backend 가 `capture_bands` 를 제공하면 **밴드 전체를 한 scan** 으로 넘긴다.
+    #   밴드마다 capture_rotation 을 부르면 밴드 = 별도 IScan 이 되어 SLAM 이 끊기고
+    #   밴드끼리 후처리 정합에 의존하게 된다(2026-09-16 실물에서 어긋남).
+    #   제공하지 않는 backend(sim)는 아래 기존 루프를 그대로 탄다.
+    if len(poses1) > 1 and hasattr(backend, "capture_bands"):
+        print(f"[phase]   → 밴드 {len(poses1)}개를 한 scan 으로 연속 캡처")
+        _t = _time.perf_counter()
+        ok = backend.capture_bands(poses1, phase=1)
+        globals()["_T_LAST"] = _time.perf_counter()
+        print(f"[phase]   {'✓' if ok else '✘'} 밴드 연속 캡처 "
+              f"{'완료' if ok else '실패'}  ({_time.perf_counter() - _t:.1f}s)")
+        if not ok:
+            print("[phase] ✘ Phase 1 실패 — 종료")
+            return backend.finalize()
+        if backend.phase_mode >= 2:
+            _step(2, "Phase 2", "부족면 NBV 보강 (로봇 최소이동)")
+            _run_phase2_nbv(backend)
+        if backend.phase_mode >= 3 and backend.supports_phase3():
+            _step(3, "Phase 3", "외부 flip → 바닥면 수집")
+            backend.go_home()
+            n_flip = 0
+            while backend.next_flip():
+                n_flip += 1
+                print(f"[phase]   → flip #{n_flip} 캡처")
+                if not backend.capture_rotation(AT_CURRENT,
+                                                "Phase 3 (flip 윗면)", phase=3):
+                    break
+            print(f"[phase]   → flip {n_flip}회 완료")
+        _step("F", "마무리", "모델 확정 (finalize)")
+        return backend.finalize()
     # ★ 밴드 하나가 실패해도 **중단하지 않는다**. 도달 못 한 밴드는 Phase 1 의 실패가
     #   아니라 부분적 데이터 결손이고, 그 결손을 메우는 것이 바로 Phase 2 NBV 의 역할이다.
     #   예전에는 밴드 1개 실패 → 즉시 finalize 라 Phase 2·3 이 통째로 사라졌다
@@ -154,10 +214,22 @@ def run_scan_phases(backend: ScanBackend) -> Any:
     #    스캔 결과 윗부분이 잘려 나갔다). 전부 실패했을 때만 포기한다.
     n_ok = 0
     for i, p in enumerate(poses1, 1):
+        # 라벨에 band 표기가 이미 있으므로 아래 print 에서 (i/N) 을 또 붙이지 않는다.
         label = ("Phase 1 (측면 5면)" if len(poses1) == 1
                  else f"Phase 1 (band {i}/{len(poses1)})")
-        if backend.capture_rotation(p, label, phase=1):
+        # ★ 밴드마다 소요시간을 따로 잰다. 캡처(회전 30s)와 그 **사이 간격**을
+        #   구분해야 어디서 시간이 새는지 보인다 — 2026-09-16 "밴드 사이 대기가
+        #   너무 길다" 추적용.
+        t_gap = _time.perf_counter() - _T_LAST
+        print(f"[phase]   → {label} 시작"
+              + (f"   [직전 밴드 이후 간격 {t_gap:.1f}s]" if i > 1 else ""))
+        _t_cap = _time.perf_counter()
+        _ok = backend.capture_rotation(p, label, phase=1)
+        _dt = _time.perf_counter() - _t_cap
+        globals()["_T_LAST"] = _time.perf_counter()
+        if _ok:
             n_ok += 1
+            print(f"[phase]   ✓ {label} 완료  ({_dt:.1f}s)")
         elif len(poses1) > 1:
             print(f"[phase] ⚠ {label} 실패 — 건너뛰고 계속 "
                   f"(남은 결손은 Phase 2 가 메운다)")
@@ -169,16 +241,57 @@ def run_scan_phases(backend: ScanBackend) -> Any:
 
     # ── Phase 2 — 로봇 최소이동 NBV hole-fill ───────────────────────────
     if backend.phase_mode >= 2:
+        _step(2, "Phase 2", "부족면 NBV 보강 (로봇 최소이동)")
         _run_phase2_nbv(backend)
+    else:
+        print(f"[phase] Phase 2 건너뜀 (phase_mode={backend.phase_mode})")
 
     # ── Phase 3 — 외부 flip 후 윗면(바닥면) 수집 ────────────────────────
     if backend.phase_mode >= 3 and backend.supports_phase3():
+        _step(3, "Phase 3", "외부 flip → 바닥면 수집")
         backend.go_home()                       # flip 은 로봇 고정 전제
+        n_flip = 0
         while backend.next_flip():               # 외부에서 물체 뒤집기 안내
+            n_flip += 1
+            print(f"[phase]   → flip #{n_flip} 캡처")
             if not backend.capture_rotation(AT_CURRENT, "Phase 3 (flip 윗면)", phase=3):
                 break
+        print(f"[phase]   → flip {n_flip}회 완료")
+    elif backend.phase_mode >= 3:
+        print("[phase] Phase 3 건너뜀 (backend 미지원)")
+    else:
+        print(f"[phase] Phase 3 건너뜀 (phase_mode={backend.phase_mode})")
 
+    _step("F", "마무리", "모델 확정 (finalize)")
     return backend.finalize()
+
+
+def _skip_key_pressed() -> bool:
+    """콘솔에 'n' 이 눌려 있으면 True (비차단, Enter 불요). 실패/비콘솔은 False.
+
+    Phase 2·3 는 반복이 길어서 사용자가 "이 정도면 됐다" 싶을 때 빠져나갈 손잡이가
+    필요하다 (2026-09-16 요청). Windows 콘솔은 msvcrt, POSIX 는 select 로 폴링."""
+    try:
+        import msvcrt
+        hit = False
+        while msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            if ch in ("n", "N"):
+                hit = True
+        return hit
+    except ImportError:
+        try:
+            import select, sys
+            hit = False
+            while select.select([sys.stdin], [], [], 0)[0]:
+                line = sys.stdin.readline()
+                if line.strip().lower().startswith("n"):
+                    hit = True
+            return hit
+        except Exception:                                   # noqa: BLE001
+            return False
+    except Exception:                                       # noqa: BLE001
+        return False
 
 
 def _run_phase2_nbv(backend: ScanBackend) -> None:
@@ -186,15 +299,25 @@ def _run_phase2_nbv(backend: ScanBackend) -> None:
 
     반복: 누적 mesh 생성 → 수렴이면 종료 → 부족면 관측자세(q) 계획 → 그 자세로
     전회전 캡처. feasible 자세 없거나 캡처 실패면 종료.
+    [n] 키로 언제든 남은 반복을 건너뛰고 다음 phase 로 넘어간다.
     """
+    print("[phase]   (Phase 2 진행 중 [n] 키 = 남은 보강 건너뛰고 다음 phase)")
     for k in range(backend.nbv_k_max):
+        if _skip_key_pressed():
+            print(f"[phase]   ⏭ 사용자 [n] — Phase 2 를 {k}회 보강에서 마친다")
+            break
+        print(f"[phase]   → NBV 반복 {k + 1}/{backend.nbv_k_max}: 누적 mesh 생성")
         mesh = backend.build_coverage_mesh()
         if mesh is None:
+            print("[phase]   ✘ mesh 생성 실패 — Phase 2 종료")
             break
         if backend.is_converged(mesh):
+            print(f"[phase]   ✓ 수렴 — Phase 2 종료 ({k}회 보강)")
             break
         pose = backend.plan_nbv_pose(mesh)
         if pose is None:
+            print("[phase]   ✘ 도달 가능한 NBV 자세 없음 — Phase 2 종료")
             break
         if not backend.capture_rotation(pose, f"Phase 2 NBV #{k + 1}", phase=2):
+            print(f"[phase]   ✘ NBV #{k + 1} 캡처 실패 — Phase 2 종료")
             break

@@ -44,6 +44,11 @@ class ArtecStreamingScanSessionSettings:
     # ── 회전 ──────────────────────────────────────────────────────────
     rotation_duration_s: float = 30.0      # 360° 한 바퀴 기대 시간
     rotation_overshoot_deg: float = 5.0    # 360° + 여유 (마지막 frame 보장)
+    # ★ 부분 스윕 (rad). None = 전회전(기본). Phase 2 gap 겨냥처럼 목표 각 구간만
+    #   돌 때 설정한다 — sim(`NBV_PATCH_SPAN_DEG`)과 같은 구조. 각속도는 전회전과
+    #   동일(2π/rotation_duration_s)하고 목표각·타임아웃만 구간에 비례한다.
+    #   ⚠ sim 실측: 60° 이하로 좁히면 프레임 간 중첩 부족으로 정합이 무너진다.
+    sweep_rad: Optional[float] = None
 
     # ── 시계열 로그 ───────────────────────────────────────────────────
     # poll cycle 마다 (t, theta, scanning_flag, ...) 기록 → 사후 분석.
@@ -105,6 +110,8 @@ class ArtecStreamingScanSessionSettings:
     preview_settle_s: float = 1.5
     post_record_settle_s: float = 0.5
     poll_interval_s: float = 0.05         # main loop 의 event drain 주기
+    # 밴드 전환: 로봇이 멈춘 뒤 회전을 시작하기 전 SLAM 재정착 대기.
+    band_settle_s: float = 2.0
 
     # ── 기타 ──────────────────────────────────────────────────────────
     reset_to_zero_first: bool = True
@@ -396,6 +403,14 @@ class ArtecStreamingScanResult:
     # turntable 각도 (rad). lost 발생 시 safe-back rollback 기준점.
     # tracking 이 한 번도 안 잡혔으면 0.0.
     last_good_theta_rad: float = 0.0
+    # ── 밴드 회계 ─────────────────────────────────────────────────────────
+    # 밴드 3개 중 2개가 전회전을 마치고 3번째에서 lost 된 경우, `tracking_lost`
+    # 만 보면 "전부 실패"와 구분이 안 된다. 그러면 호출자가 이미 성공한 밴드까지
+    # 처음부터 다시 돌린다 — 2026-09-16 실물에서 band1·2 완주분을 버리고
+    # pass 2·3 을 낭비하고 Phase 2 에 도달조차 못 했다.
+    n_bands: int = 1                   # 계획된 밴드 수
+    n_bands_done: int = 0              # 전회전을 끝낸 밴드 수
+    band_reasons: List[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -415,11 +430,20 @@ class ArtecStreamingScanSession:
         turntable: "Turntable",
         settings: Optional[ArtecStreamingScanSessionSettings] = None,
         live_viewer: Optional["LiveScanViewer"] = None,
+        band_poses=None,
+        move_robot_fn=None,
     ):
         self.mms = mms
         self.robot = robot
         self.turntable = turntable
         self.s = settings or ArtecStreamingScanSessionSettings()
+        #: 밴드 관절해 목록. 주면 **한 IScan 안에서** 밴드마다 전회전한다
+        #  (세션을 열어둔 채 로봇만 옮기므로 SLAM 추적이 이어진다).
+        #  None/빈 목록이면 기존 단일 회전과 완전히 동일하다.
+        self.band_poses = list(band_poses) if band_poses else None
+        #: 밴드 이동 콜백 `fn(q) -> None`. 녹화 중 호출되므로 **느리게** 움직여야
+        #  추적이 유지된다 (호출자가 속도를 정한다).
+        self.move_robot_fn = move_robot_fn
         # 선택적 라이브 뷰어 — multipass 가 pass 들 사이에 재사용하라고 넘김.
         # None 이면 모든 viewer 경로 no-op. 절대 스캔을 깨뜨리지 않음.
         self.live_viewer = live_viewer
@@ -467,21 +491,9 @@ class ArtecStreamingScanSession:
             settings.set_capture_texture(artec_scanning.CaptureTextureMethod.NONE)
         settings.set_ignore_registration_errors(s.ignore_registration_errors)
 
-        session = artec_scanning.ScanSession.create(scanner, settings)
-        if s.sensitivity is not None:
-            try: session.set_sensitivity(float(s.sensitivity))
-            except Exception: pass
-        if s.scan_range_near_mm is not None and s.scan_range_far_mm is not None:
-            try:
-                session.set_scanning_range(
-                    float(s.scan_range_near_mm), float(s.scan_range_far_mm),
-                )
-            except Exception: pass
-
-        # 3. TrackingState + frame callback
+        # 3. TrackingState (frame callback 은 세션 생성 루프에서 바인딩)
         tracking = TrackingState()
         tracking._max_reg_error = float(s.max_acceptable_reg_error)
-        session.set_frame_callback(tracking.on_frame)
 
         # 4. 턴테이블 logical 0 reset — clearpos 로 카운터만 리셋.
         #    실패하면 drive alarm trip — 회전 시도 자체를 안 하고 빈 결과 반환.
@@ -502,11 +514,64 @@ class ArtecStreamingScanSession:
                     frames_failed=0,
                 )
 
-        # 5. Preview → settle → drain (preview 단계 frame 은 카운트 안 함)
-        print(f"\n  start_preview (settle {s.preview_settle_s:.1f}s)")
-        session.start_preview()
-        time.sleep(s.preview_settle_s)
-        session.poll_events()           # preview 이벤트 비움
+        # 5. 세션 생성 + preview 헬스체크 (+1회 재초기화 회복)
+        #    ★ preview settle 동안 이벤트가 **0개**면 SDK 스캐닝 파이프라인이
+        #      웨지된 것이다 — 단일 프레임 preview(`capture_frame_handle`)는
+        #      다른 경로라 멀쩡해 보여도, record 를 시작하면 콜백이 영원히 안
+        #      온다 (2026-09-16 실물: pass 1·2 모두 frames 0 → "frame stall
+        #      2.0s"). 이때는 `_robust_capture` 와 같은 처방 — scanner
+        #      shutdown → initialize 로 세션을 새로 연다.
+        session = None
+        for _sess_try in (1, 2):
+            session = artec_scanning.ScanSession.create(scanner, settings)
+            if s.sensitivity is not None:
+                try: session.set_sensitivity(float(s.sensitivity))
+                except Exception: pass
+            if s.scan_range_near_mm is not None and s.scan_range_far_mm is not None:
+                try:
+                    session.set_scanning_range(
+                        float(s.scan_range_near_mm), float(s.scan_range_far_mm),
+                    )
+                except Exception: pass
+            session.set_frame_callback(tracking.on_frame)
+
+            print(f"\n  start_preview (settle {s.preview_settle_s:.1f}s)"
+                  + (f" — 재초기화 후 재시도" if _sess_try > 1 else ""))
+            session.start_preview()
+            time.sleep(s.preview_settle_s)
+            _prev_ev = session.poll_events()        # preview 이벤트 비움 + 카운트
+            _n_prev = len(_prev_ev) if _prev_ev else 0
+            if _n_prev > 0:
+                break                               # 파이프라인 정상
+            print(f"  ⚠ preview {s.preview_settle_s:.1f}s 동안 이벤트 0개 — "
+                  f"스캐닝 파이프라인 무반응")
+            try:
+                session.stop()
+            except Exception:
+                pass
+            if _sess_try == 1:
+                print(f"  → 스캐너 세션 재초기화 (shutdown → initialize)")
+                try:
+                    self.mms.sensor.shutdown()
+                except Exception as e:              # noqa: BLE001
+                    print(f"    shutdown 경고: {e}")
+                time.sleep(1.0)
+                try:
+                    self.mms.sensor.initialize()
+                except Exception as e:              # noqa: BLE001
+                    print(f"    ✘ 재초기화 실패: {e}")
+                    break
+                scanner = self.mms.sensor._scanner
+            else:
+                print(f"  ✘ 재초기화 후에도 무반응 — 스캐너 USB 재연결/전원 "
+                      f"재시작이 필요할 수 있다")
+                model = artec_base.create_model()
+                return ArtecStreamingScanResult(
+                    model=model, n_frames=0, rotation_actual_deg=0.0,
+                    duration_s=0.0, fps_actual=0.0, tracking_lost=True,
+                    loss_reason="scanner pipeline 무반응 (재초기화 후에도 "
+                                "preview 이벤트 0개)",
+                    frames_ok=0, frames_failed=0)
         with tracking._lock:
             tracking.frames_ok = 0
             tracking.frames_failed = 0
@@ -518,175 +583,253 @@ class ArtecStreamingScanSession:
         tracking.mark_started()                # ★ stall watchdog 기준점
         t_start = time.time()
 
-        vel_rad_s = (2.0 * np.pi) / s.rotation_duration_s
-        target_rad = 2.0 * np.pi * (1.0 + s.rotation_overshoot_deg / 360.0)
-        # Drive 친화적 polling — 50ms (20Hz) 는 EziSERVO TCP queue 에 부하.
-        # 100ms (10Hz) 면 30s 회전 동안 ~300 polls 로 충분 (회전 정밀도엔 영향 없음).
-        tt_poll_s = max(0.1, s.poll_interval_s * 2.0)
-        tt_ctrl = TurntableController(
-            self.turntable, vel_rad_s, target_rad,
-            tracking.stop_event, poll_s=tt_poll_s,
-        )
-        tt_ctrl.start()
-
-        # 6.5 라이브 뷰어 — Artec SDK 정합행렬(FrameEvent.transformation)을
-        #     그대로 누적. θ / hand-eye / turntable_frame.yaml 의존 없음.
-        live = self.live_viewer
-        live_ok = live is not None
-        if live_ok:
-            print(f"  [live] viewer 활성 — SDK 정합행렬 기반 누적")
-
-        # 7. Main loop — event drain + 종료 조건 검사 + 시계열 로그
-        timeout_s = s.rotation_duration_s + 10.0
-        end_reason = "unknown"
-        timeline: List[dict] = []      # (t, theta, scanning_flag, ...) 기록
-        last_good_theta_rad: float = 0.0   # reg_err >= 0 였던 마지막 sample 의 θ
-        # 라이브 뷰어 진단 카운터 — 검은 화면 디버깅용
-        _lv_ev = 0          # 받은 총 이벤트
-        _lv_okmesh = 0      # OK + frame_mesh + reg_err>=0 (= viewer 에 공급)
-        _lv_feederr = ""    # 첫 feed 예외 메시지
-        try:
-            while True:
-                now = time.time()
-                elapsed = now - t_start
-                if elapsed > timeout_s:
-                    end_reason = f"timeout ({timeout_s:.1f}s)"
-                    tracking.request_stop("timeout")
-                    break
-
-                # Spider event drain — SDK 큐 비움 (freeze 방지)
-                events = session.poll_events()
-
-                # ── Time-synchronized 기록 ──────────────────────────────
-                theta_rad = float(tt_ctrl.actual_pos_rad)
-                flag = tracking.scanning_flag
-
-                # ── 라이브 뷰어 공급 (메인 스레드, race 없음) ───────────
-                # OK 프레임의 frame_mesh + SDK 정합행렬(ev.transformation)을
-                # scan-world 로 누적. 예외는 viewer 내부에서 삼킴 → 스캔 영향 0.
-                #
-                # ★ 필터는 SDK 가 IScan 에 넣는 기준과 동일하게만 — viewer 는
-                #   IScan 을 그대로 비추는 거울이어야 함 ([[feedback_live_viewer
-                #   _must_mirror_scan]]). ignore_registration_errors=False 일 때
-                #   SDK 가 reg_err<0 프레임을 IScan 에 안 넣음 → viewer 도 동일
-                #   기준으로 거름. 그 외 high-error / warm-up 같은 추가 게이트는
-                #   둘 다 IScan 에 들어가니 viewer 에서도 통과시켜야 거짓말 없음.
-                if events:
-                    _lv_ev += len(events)
-                if live is not None and live_ok and events:
+        # ── 밴드 루프 ────────────────────────────────────────────────
+        #  ★ **한 IScan 안에서** 밴드마다 전회전한다. 밴드마다 세션을 새로 열면
+        #    IScan 이 분리돼 SLAM 추적이 끊기고, 밴드끼리는 후처리
+        #    GlobalRegistration 에 의존하게 된다(2026-09-16 실물에서 band1/band2
+        #    가 정합되지 않음). 세션을 열어둔 채 로봇만 옮기면 추적이 이어진다.
+        #  `band_poses` 가 없으면 기존 단일 회전과 **완전히 동일**하다.
+        bands = list(self.band_poses) if self.band_poses else [None]
+        timeline: List[dict] = []      # (t, theta, ...) — 밴드 간 누적
+        band_reasons: List[str] = []   # 밴드별 종료 사유 — 잘린 밴드를 숨기지 않는다
+        n_bands_done = 0               # 전회전을 끝낸 밴드 수
+        tt_ctrl = None
+        model = None
+        if len(bands) > 1:
+            print(f'  밴드 {len(bands)}개를 한 IScan 에서 연속 스캔한다')
+        try:                                    # outer — session.stop() 보장
+            for _bi, _band_q in enumerate(bands):
+                if _bi > 0:
+                    if tracking.tracking_lost:
+                        print('  ⚠ tracking lost — 남은 밴드 중단')
+                        break
+                    print('')
+                    print(f'  ── band {_bi+1}/{len(bands)} — 로봇 이동 (녹화 유지) ──')
                     try:
-                        FS = artec_scanning.FrameState
-                        for ev in events:
-                            if (ev.frame_state == FS.OK
-                                    and ev.frame_mesh is not None
-                                    and ev.transformation is not None
-                                    and float(ev.registration_error) >= 0.0):
-                                _lv_okmesh += 1
-                                live.add_frame(ev.frame_mesh,
-                                               ev.transformation)
+                        if self.move_robot_fn is not None and _band_q is not None:
+                            self.move_robot_fn(_band_q)
                     except Exception as e:
-                        if not _lv_feederr:
-                            _lv_feederr = f"{type(e).__name__}: {e}"
-                if live is not None and live_ok:
+                        print(f'  ⚠ 밴드 이동 실패({e}) — 남은 밴드 중단')
+                        break
+                    # 턴테이블을 0 으로 되돌리고 stop_event 를 푼다.
+                    # ★ 이전 밴드 finally 에서 set 된 채면 다음 회전이 즉시 중단된다.
                     try:
-                        live.tick(flag)
+                        self._reset_turntable_to_zero(
+                            reset_vel_rad_s=np.radians(30.0))
+                    except Exception as e:
+                        print(f'  ⚠ 턴테이블 0 복귀 실패({e})')
+                    tracking.stop_event.clear()
+                    # ★ 이동 직후 바로 회전시키지 않는다. 로봇이 멈춘 뒤 SLAM 이
+                    #   새 시점에서 정합을 다시 잡을 시간을 준다 — 이동+회전이
+                    #   겹치면 프레임 간 변화가 커져 추적이 엉뚱한 자세로 수렴할 수
+                    #   있다(SDK 는 reg_err 양수를 내며 '성공'으로 보고한다).
+                    if s.band_settle_s > 0:
+                        print(f"  이동 완료 — SLAM 재정착 {s.band_settle_s:.1f}s 대기")
+                        _t_settle = time.time()
+                        while time.time() - _t_settle < s.band_settle_s:
+                            session.poll_events()      # 큐 비움 (freeze 방지)
+                            time.sleep(s.poll_interval_s)
+                    tracking.mark_started()
+                vel_rad_s = (2.0 * np.pi) / s.rotation_duration_s
+                if s.sweep_rad is not None:            # 부분 스윕 (Phase 2 gap 겨냥)
+                    target_rad = float(abs(s.sweep_rad)) \
+                        + np.radians(s.rotation_overshoot_deg)
+                    print(f"  부분 스윕 {np.degrees(abs(s.sweep_rad)):.0f}°"
+                          f" (전회전 아님)")
+                else:
+                    target_rad = 2.0 * np.pi * (1.0 + s.rotation_overshoot_deg / 360.0)
+                # Drive 친화적 polling — 50ms (20Hz) 는 EziSERVO TCP queue 에 부하.
+                # 100ms (10Hz) 면 30s 회전 동안 ~300 polls 로 충분 (회전 정밀도엔 영향 없음).
+                tt_poll_s = max(0.1, s.poll_interval_s * 2.0)
+                tt_ctrl = TurntableController(
+                    self.turntable, vel_rad_s, target_rad,
+                    tracking.stop_event, poll_s=tt_poll_s,
+                )
+                tt_ctrl.start()
+
+                # 6.5 라이브 뷰어 — Artec SDK 정합행렬(FrameEvent.transformation)을
+                #     그대로 누적. θ / hand-eye / turntable_frame.yaml 의존 없음.
+                live = self.live_viewer
+                live_ok = live is not None
+                if live_ok:
+                    print(f"  [live] viewer 활성 — SDK 정합행렬 기반 누적")
+
+                # 7. Main loop — event drain + 종료 조건 검사 + 시계열 로그
+                #    타임아웃은 실제 목표각에 비례 (부분 스윕이면 그만큼 짧게).
+                timeout_s = (s.rotation_duration_s
+                             * (target_rad / (2.0 * np.pi))) + 10.0
+                # ★ 타임아웃은 **밴드마다** 새로 잰다. `t_start` 는 세션 전체(=IScan)
+                #   기준이라 밴드 2·3 에서는 이미 앞 밴드 시간이 쌓여 있다 —
+                #   2026-09-16: 밴드 3개를 한 scan 에 담은 뒤 band 3 이 시작 2.7초
+                #   만에 "timeout (40.0s)" 로 잘렸다(추적은 정상이었다).
+                t_band = time.time()
+                end_reason = "unknown"
+                band_ok = False            # 이 밴드가 전회전을 끝냈는가
+                # timeline 은 밴드 간 누적 — 루프 밖에서 선언한다
+                last_good_theta_rad: float = 0.0   # reg_err >= 0 였던 마지막 sample 의 θ
+                # 라이브 뷰어 진단 카운터 — 검은 화면 디버깅용
+                _lv_ev = 0          # 받은 총 이벤트
+                _lv_okmesh = 0      # OK + frame_mesh + reg_err>=0 (= viewer 에 공급)
+                _lv_feederr = ""    # 첫 feed 예외 메시지
+                try:
+                    while True:
+                        now = time.time()
+                        elapsed = now - t_band          # 이 밴드의 경과
+                        if elapsed > timeout_s:
+                            end_reason = (f"timeout ({timeout_s:.1f}s, "
+                                          f"band {_bi + 1}/{len(bands)})")
+                            tracking.request_stop("timeout")
+                            break
+
+                        # Spider event drain — SDK 큐 비움 (freeze 방지)
+                        events = session.poll_events()
+
+                        # ── Time-synchronized 기록 ──────────────────────────────
+                        theta_rad = float(tt_ctrl.actual_pos_rad)
+                        flag = tracking.scanning_flag
+
+                        # ── 라이브 뷰어 공급 (메인 스레드, race 없음) ───────────
+                        # OK 프레임의 frame_mesh + SDK 정합행렬(ev.transformation)을
+                        # scan-world 로 누적. 예외는 viewer 내부에서 삼킴 → 스캔 영향 0.
+                        #
+                        # ★ 필터는 SDK 가 IScan 에 넣는 기준과 동일하게만 — viewer 는
+                        #   IScan 을 그대로 비추는 거울이어야 함 ([[feedback_live_viewer
+                        #   _must_mirror_scan]]). ignore_registration_errors=False 일 때
+                        #   SDK 가 reg_err<0 프레임을 IScan 에 안 넣음 → viewer 도 동일
+                        #   기준으로 거름. 그 외 high-error / warm-up 같은 추가 게이트는
+                        #   둘 다 IScan 에 들어가니 viewer 에서도 통과시켜야 거짓말 없음.
+                        if events:
+                            _lv_ev += len(events)
+                        if live is not None and live_ok and events:
+                            try:
+                                FS = artec_scanning.FrameState
+                                for ev in events:
+                                    if (ev.frame_state == FS.OK
+                                            and ev.frame_mesh is not None
+                                            and ev.transformation is not None
+                                            and float(ev.registration_error) >= 0.0):
+                                        _lv_okmesh += 1
+                                        live.add_frame(ev.frame_mesh,
+                                                       ev.transformation)
+                            except Exception as e:
+                                if not _lv_feederr:
+                                    _lv_feederr = f"{type(e).__name__}: {e}"
+                        if live is not None and live_ok:
+                            try:
+                                live.tick(flag)
+                            except Exception:
+                                pass
+                        timeline.append({
+                            "t": now - t_start,     # 세션 전체 축 (밴드마다 되감기면 안 됨)
+                            "band": _bi + 1,
+                            "theta_rad": theta_rad,
+                            "theta_deg": float(np.degrees(theta_rad)),
+                            "scanning_flag": int(flag),
+                            "frames_ok": tracking.frames_ok,
+                            "frames_failed": tracking.frames_failed,
+                            "consec_lost": tracking.consecutive_lost,
+                            "last_state": tracking.last_state.name if tracking.last_state else "",
+                        })
+                        # last-good θ — tracking 이 SDK 기준 살아있는 동안의 마지막 각도.
+                        # multipass recovery 가 safe-back rollback 시 기준으로 사용.
+                        if (tracking.tracking_established
+                                and tracking.last_reg_error >= 0.0
+                                and tracking.consecutive_reg_err == 0):
+                            last_good_theta_rad = theta_rad
+
+                        # tracking lost 체크 — 네 종류
+                        #   (1) FrameState 기반 정합 실패 연속
+                        #   (2) callback stall
+                        #   (3) reg_err<0 연속
+                        #   (4) reg_err>max_acceptable 연속
+                        if tracking.should_stop(
+                            s.consecutive_loss_threshold,
+                            s.stale_threshold_s,
+                            s.consecutive_reg_err_threshold,
+                            s.consecutive_high_err_threshold,
+                        ):
+                            end_reason = f"tracking lost: {tracking.last_loss_reason}"
+                            print(f"\n  ⚠ {end_reason} — turntable 즉시 정지")
+                            break
+
+                        # rotation 정상 완료 체크
+                        if tt_ctrl.completed:
+                            end_reason = "rotation 정상 완료"
+                            band_ok = True
+                            break
+
+                        # turntable thread 자체 abort (move_velocity 실패, drive 통신
+                        # 사망 등). aborted_reason 만 보고 break — stop_event 가 이미
+                        # set 됐을 수도 있음 (turntable 의 watchdog 가 set).
+                        if tt_ctrl.aborted_reason and not tt_ctrl.completed:
+                            end_reason = f"turntable abort: {tt_ctrl.aborted_reason}"
+                            # 항상 last_loss_reason 을 turntable abort 사유로 override —
+                            # multipass 가 "drive 통신 사망/alarm trip" 키워드 보고
+                            # retry 안 띄우고 즉시 종료하도록.
+                            tracking.request_stop(end_reason)
+                            print(f"\n  ⚠ {end_reason} — scanning 즉시 중단")
+                            break
+
+                        # 진행률 1초마다 표시
+                        if int(elapsed) != int(elapsed - s.poll_interval_s):
+                            estab = "EST" if tracking.tracking_established else "warm"
+                            last_name = (tracking.last_state.name
+                                         if tracking.last_state is not None else "?")
+                            print(f"  [b{_bi+1} {elapsed:5.1f}s] θ={np.degrees(theta_rad):6.1f}°  "
+                                  f"flag={'ON ' if flag else 'OFF'}  "
+                                  f"ok={tracking.frames_ok}  fail={tracking.frames_failed}  "
+                                  f"consec={tracking.consecutive_lost}  "
+                                  f"regErr={tracking.last_reg_error:+.3f}  "
+                                  f"errLo={tracking.consecutive_reg_err}  "
+                                  f"errHi={tracking.consecutive_high_err}  "
+                                  f"trk={estab}  last={last_name}")
+                            if live is not None:
+                                _pts = getattr(live, "_n_buffered", -1)
+                                _ing = getattr(live, "_frames_ingested", -1)
+                                _dead = getattr(live, "_dead", "?")
+                                _rej = getattr(live, "_reject", "")
+                                _bb = getattr(live, "_bbox_str", "")
+                                print(f"           [live] ok={live_ok} ev={_lv_ev} "
+                                      f"okmesh={_lv_okmesh} ingest={_ing} "
+                                      f"pts={_pts} dead={_dead}"
+                                      + (f"  AABB[{_bb}]" if _bb else "")
+                                      + (f"  reject={_rej}" if _rej else "")
+                                      + (f"  feedErr={_lv_feederr}"
+                                         if _lv_feederr else ""))
+
+                        time.sleep(s.poll_interval_s)
+                finally:
+                    # 밴드 종료 — 턴테이블만 정리한다. session.stop() 은 바깥에서.
+                    # 밴드별 사유를 모은다. end_reason 하나만 두면 마지막 밴드의
+                    # 사유가 앞 밴드의 실패(잘린 회전)를 덮어버린다.
+                    _th = ""
+                    if tt_ctrl is not None:
+                        _th = f" (θ={np.degrees(float(tt_ctrl.actual_pos_rad)):.1f}°)"
+                    band_reasons.append(
+                        f"band {_bi + 1}/{len(bands)}: {end_reason}{_th}")
+                    if band_ok:
+                        n_bands_done += 1
+                    tracking.stop_event.set()
+                    if tt_ctrl is not None:
+                        tt_ctrl.join(timeout=3.0)
+                    try:
+                        self.turntable.stop()
                     except Exception:
                         pass
-                timeline.append({
-                    "t": elapsed,
-                    "theta_rad": theta_rad,
-                    "theta_deg": float(np.degrees(theta_rad)),
-                    "scanning_flag": int(flag),
-                    "frames_ok": tracking.frames_ok,
-                    "frames_failed": tracking.frames_failed,
-                    "consec_lost": tracking.consecutive_lost,
-                    "last_state": tracking.last_state.name if tracking.last_state else "",
-                })
-                # last-good θ — tracking 이 SDK 기준 살아있는 동안의 마지막 각도.
-                # multipass recovery 가 safe-back rollback 시 기준으로 사용.
-                if (tracking.tracking_established
-                        and tracking.last_reg_error >= 0.0
-                        and tracking.consecutive_reg_err == 0):
-                    last_good_theta_rad = theta_rad
-
-                # tracking lost 체크 — 네 종류
-                #   (1) FrameState 기반 정합 실패 연속
-                #   (2) callback stall
-                #   (3) reg_err<0 연속
-                #   (4) reg_err>max_acceptable 연속
-                if tracking.should_stop(
-                    s.consecutive_loss_threshold,
-                    s.stale_threshold_s,
-                    s.consecutive_reg_err_threshold,
-                    s.consecutive_high_err_threshold,
-                ):
-                    end_reason = f"tracking lost: {tracking.last_loss_reason}"
-                    print(f"\n  ⚠ {end_reason} — turntable 즉시 정지")
+                if tracking.tracking_lost:
                     break
-
-                # rotation 정상 완료 체크
-                if tt_ctrl.completed:
-                    end_reason = "rotation 정상 완료"
-                    break
-
-                # turntable thread 자체 abort (move_velocity 실패, drive 통신
-                # 사망 등). aborted_reason 만 보고 break — stop_event 가 이미
-                # set 됐을 수도 있음 (turntable 의 watchdog 가 set).
-                if tt_ctrl.aborted_reason and not tt_ctrl.completed:
-                    end_reason = f"turntable abort: {tt_ctrl.aborted_reason}"
-                    # 항상 last_loss_reason 을 turntable abort 사유로 override —
-                    # multipass 가 "drive 통신 사망/alarm trip" 키워드 보고
-                    # retry 안 띄우고 즉시 종료하도록.
-                    tracking.request_stop(end_reason)
-                    print(f"\n  ⚠ {end_reason} — scanning 즉시 중단")
-                    break
-
-                # 진행률 1초마다 표시
-                if int(elapsed) != int(elapsed - s.poll_interval_s):
-                    estab = "EST" if tracking.tracking_established else "warm"
-                    last_name = (tracking.last_state.name
-                                 if tracking.last_state is not None else "?")
-                    print(f"  [{elapsed:5.1f}s] θ={np.degrees(theta_rad):6.1f}°  "
-                          f"flag={'ON ' if flag else 'OFF'}  "
-                          f"ok={tracking.frames_ok}  fail={tracking.frames_failed}  "
-                          f"consec={tracking.consecutive_lost}  "
-                          f"regErr={tracking.last_reg_error:+.3f}  "
-                          f"errLo={tracking.consecutive_reg_err}  "
-                          f"errHi={tracking.consecutive_high_err}  "
-                          f"trk={estab}  last={last_name}")
-                    if live is not None:
-                        _pts = getattr(live, "_n_buffered", -1)
-                        _ing = getattr(live, "_frames_ingested", -1)
-                        _dead = getattr(live, "_dead", "?")
-                        _rej = getattr(live, "_reject", "")
-                        _bb = getattr(live, "_bbox_str", "")
-                        print(f"           [live] ok={live_ok} ev={_lv_ev} "
-                              f"okmesh={_lv_okmesh} ingest={_ing} "
-                              f"pts={_pts} dead={_dead}"
-                              + (f"  AABB[{_bb}]" if _bb else "")
-                              + (f"  reject={_rej}" if _rej else "")
-                              + (f"  feedErr={_lv_feederr}"
-                                 if _lv_feederr else ""))
-
-                time.sleep(s.poll_interval_s)
         finally:
-            # 8. 항상 정지
-            tracking.stop_event.set()
-            tt_ctrl.join(timeout=3.0)
+            # 모든 밴드가 끝난 뒤 **한 번만** 세션을 닫는다 → IScan 1개.
+            time.sleep(s.post_record_settle_s)
             try:
-                self.turntable.stop()        # 안전 차원 한 번 더
+                session.poll_events()
             except Exception:
                 pass
-
-            # 마지막 event drain (record 도중 큐에 남은 것)
-            time.sleep(s.post_record_settle_s)
-            session.poll_events()
-
-            print(f"  session.stop() ...")
+            print(f'  session.stop() ...')
             try:
                 model = session.stop()
             except Exception as e:
-                print(f"  ⚠ session.stop() 예외: {e}")
+                print(f'  ⚠ session.stop() 예외: {e}')
                 model = None
 
         duration = time.time() - t_start
@@ -700,8 +843,12 @@ class ArtecStreamingScanSession:
 
         print(f"\n[StreamingScan 결과]")
         print(f"  종료 사유      : {end_reason}")
+        if len(bands) > 1:
+            print(f"  밴드 완주       : {n_bands_done}/{len(bands)}")
+            for _r in band_reasons:
+                print(f"    · {_r}")
         print(f"  duration       : {duration:.1f} s")
-        print(f"  rotation       : {np.degrees(tt_ctrl.actual_pos_rad):.1f}°")
+        print(f"  rotation       : {np.degrees(tt_ctrl.actual_pos_rad):.1f}°  (마지막 밴드)")
         print(f"  scans          : {model.scan_count()}")
         print(f"  total frames   : {n_frames}  (ok={tracking.frames_ok}  fail={tracking.frames_failed})")
         print(f"  effective fps  : {fps_actual:.1f}")
@@ -746,6 +893,9 @@ class ArtecStreamingScanSession:
             frames_ok=tracking.frames_ok,
             frames_failed=tracking.frames_failed,
             last_good_theta_rad=last_good_theta_rad,
+            n_bands=len(bands),
+            n_bands_done=n_bands_done,
+            band_reasons=list(band_reasons),
         )
 
     # ── 유틸 ──────────────────────────────────────────────────────────

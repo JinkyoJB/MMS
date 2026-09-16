@@ -36,9 +36,25 @@ import numpy as np
 # ── 센서 모델 (Artec Space Spider 기본값) ────────────────────────────────────
 @dataclass
 class SensorModel:
-    hfov_deg: float = 30.0                 # 수평 FOV
-    vfov_deg: float = 22.62                # 수직 FOV (1280×960 → hfov·3/4 tan비)
-    dof: tuple = (0.20, 0.30)              # 작동거리 대역 (m, 광축 깊이)
+    # ⚠ 2026-09-16 정정 — 가로/세로가 **뒤집혀 있었다.**
+    #   옛 값(hfov 30° / vfov 22.62°)은 가로가 넓다고 봤지만, 실측 K
+    #   (`config/calibration/artec_intrinsic.yaml`: fx 2519 / fy 2513,
+    #   **960×1280 세로형**, 재투영 0.484px)로 계산하면 정반대다:
+    #       가로(960축) = 2·atan(960/2/2519) = 21.58°
+    #       세로(1280축) = 2·atan(1280/2/2513) = 28.58°
+    #   `scripts/artec/gen_calib_poses.py` 에 이미 정정 기록이 있었는데 이 모델에는
+    #   전파되지 않았다. **세로 FOV 는 한 자세가 덮는 물체 '높이' 를 결정하는 축**
+    #   이어서, 27% 과소평가가 곧 z-커버 과소평가 → 밴드 과다분할 → 밴드별
+    #   minfill 과소평가로 이어졌다.
+    hfov_deg: float = 21.58                # 수평 FOV (960축, 실측 K)
+    vfov_deg: float = 28.58                # 수직 FOV (1280축, 실측 K)
+    # 한 프레임의 **유효 심도** (m, 광축 깊이) — 스캐너 스펙의 작동거리
+    # 170~350mm ([[project_artec_spider_v1]]) 와 혼동하지 말 것. 그건 스탠드오프를
+    # 잡을 수 있는 범위고, 한 프레임에서 실제로 데이터가 나오는 깊이 창은 더 좁다.
+    #   2026-09-16 실측으로 확인: 이 값을 (0.17, 0.35) 로 넓히자 모델이
+    #   "단일 자세로 173mm 커버 (z_cover 0.88)" 라고 판단했지만, 실물에서 자세당
+    #   실제 캡처는 ~87mm 였다. 넓히면 밴드가 사라져 커버리지가 더 나빠진다.
+    dof: tuple = (0.20, 0.30)
     max_incidence_deg: float = 50.0        # 품질 기여 입사각 한계 (누적/coverage)
     track_incidence_deg: float = 75.0      # 트래킹 기여 한계 (grazing 도 추적엔 기여)
     voxel_m: float = 0.002                 # 면적 정규화 복셀 (fill 단위 산출)
@@ -98,7 +114,8 @@ def voxel_downsample(pts: np.ndarray, v: float) -> np.ndarray:
 
 def crop_object_points(pts_w: np.ndarray, axis_xy, disc_top_z: float,
                        r_max: float = 0.16, z_margin: float = 0.004,
-                       z_max_above: float = 0.45) -> np.ndarray:
+                       z_max_above: float = 0.45,
+                       up_sign: float = +1.0) -> np.ndarray:
     """★ 물체 분리 = 캘리브 기하 크롭 (세그먼트/클러스터링 금지).
     디스크상단 평면 위 + 축 실린더 안 = 전부 물체. 턴테이블을 물체로
     오인하는 실패모드(기존 adaptive prescan)가 구조적으로 불가능.
@@ -110,9 +127,14 @@ def crop_object_points(pts_w: np.ndarray, axis_xy, disc_top_z: float,
     if len(p) == 0:
         return p
     r = np.linalg.norm(p[:, :2] - np.asarray(axis_xy, float)[None, :], axis=1)
-    m = ((p[:, 2] > disc_top_z + z_margin)
-         & (p[:, 2] < disc_top_z + z_max_above)
-         & (r < r_max))
+    # ★ '디스크 위' 를 `up_sign` 으로 정한다. +1 이면 z 증가 = 위(sim world).
+    #   real 의 base 는 **천장 마운트라 +Z 가 아래**여서 −1 이어야 한다
+    #   (`docs/4_collision.md` §6.1). +1 로 두면 물체가 있는 쪽을 전부 버리고
+    #   테이블 속만 남겨 **0점**이 된다 — 2026-09-16 실물에서 정점 30,074개를
+    #   캡처했는데 "계획용 preview 0pt" 가 나온 원인이다.
+    s = float(np.sign(up_sign)) or 1.0
+    h = s * (p[:, 2] - disc_top_z)          # 디스크 상단 기준 '높이'
+    m = (h > z_margin) & (h < z_max_above) & (r < r_max)
     return p[m]
     # (z-연속 필터는 폐기 — 손잡이 구멍 물체(detergent)에서 가시점 희박 구간을
     #  유령으로 오인해 상단 절단. 유령(로봇 자기점)은 filter_robot_points 로
@@ -299,7 +321,7 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
                             d_steps=(0.30, 0.38), thetas=(0.0, math.pi / 2),
                             max_heights: int = 4, rise_m: float = 0.03,
                             start_off_m: float = 0.05, top_eps_m: float = 0.01,
-                            log=None):
+                            up_sign: float = +1.0, log=None):
     """계획용 preview 를 모아 물체 프레임(θ=0) 점군으로 돌려준다.
 
     `simulate_planning_captures` 가 sim 안에서 모사하던 전략을 **실제 장비로**
@@ -312,21 +334,45 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
     비대칭 물체의 폭을 보기 위해서다. 90° 점군은 -θ 로 역회전해 물체 프레임으로
     통일한다. 조준높이는 "새 캡처가 상단을 더 못 늘리면 종료"로 올리므로 물체
     높이에 대한 사전지식(GT)이 필요없다.
+
+    `up_sign` — 작업 프레임에서 **어느 z 방향이 '위'인가** (+1 = +Z 가 위).
+      sim 은 world 프레임이라 +1 이 맞다. real 은 base 프레임을 쓰는데 이 셀의
+      base 는 **천장 마운트라 +Z 가 아래**여서 **−1** 이어야 한다
+      (`docs/4_collision.md` §6.1).
+      +1 로 두면 시작 조준높이가 `axis_pt.z + 0.05` = 원판 표면보다 50mm **아래**
+      (테이블 속)가 되고, 높이를 올릴수록 더 파고든다. 그래서 물체가 아니라
+      **턴테이블을 겨눈다** — 2026-09-16 실물에서 관측된 증상이다.
+      상단 판정(`top`)도 같은 이유로 부호를 따른다: base 프레임에서 물체의
+      '위' 는 z 최대가 아니라 **z 최소**다.
     """
     axis_pt = np.asarray(axis_pt, float)
     acc = []
     for theta in thetas:
-        move_turntable(float(theta))
-        tz, prev_top = float(axis_pt[2]) + start_off_m, -np.inf
+        # ★ 회전 성공 여부를 **확인한다.** 실패했는데 그대로 찍으면 다른 방위의
+        #   실루엣이라고 믿으면서 실제로는 직전 각도의 점군을 한 번 더 쌓는다 —
+        #   `rot_about_axis(..., -theta)` 가 있지도 않은 회전을 되돌리므로 점들이
+        #   엉뚱한 곳으로 간다. 조용히 계획만 나빠져서 원인 추적이 어렵다
+        #   (2026-09-16 real). 콜백이 bool 을 안 주는 구현(sim)은 None → 통과.
+        moved = move_turntable(float(theta))
+        if moved is False:
+            if log:
+                log(f"θ={math.degrees(theta):+.0f}° 회전 실패 — 이 방위 실루엣 건너뜀")
+            continue
+        # 높이는 **up_sign 방향으로** 올린다. 아래 h(·) 는 "위쪽 높이" 스칼라이고
+        # up_sign=+1 이면 기존 식과 완전히 같다.
+        s = float(np.sign(up_sign)) or 1.0
+        tz, prev_top = float(axis_pt[2]) + s * start_off_m, -np.inf
         for _ in range(max_heights):
             for d in d_steps:
                 obj = preview_at(float(tz), float(d))
                 if obj is not None and len(obj):
                     acc.append(rot_about_axis(obj, axis_pt, axis_dir, -theta))
-            top = max((a[:, 2].max() for a in acc), default=tz)
+            # 물체 상단 = up_sign 방향 최댓값 (base 프레임이면 z 최소)
+            top = max(((s * a[:, 2]).max() for a in acc), default=s * tz)
             if top - prev_top < top_eps_m:      # 상단이 안 늘면 종료 (GT 불요)
                 break
-            prev_top, tz = top, top + rise_m
+            prev_top = top
+            tz = s * (top + rise_m)
     move_turntable(0.0)
     pts = np.vstack(acc) if acc else np.zeros((0, 3))
     if log:
@@ -334,7 +380,8 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
     return pts
 
 
-def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None):
+def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,
+                     fill_min: float = None):
     """계획 자세(el, standoff, target_z)마다 az 를 스윕해 도달·충돌 통과하는 q 선택.
 
     방위각은 관측 조건을 바꾸지 않고(턴테이블이 회전을 담당) **도달성과 충돌만**
@@ -344,9 +391,50 @@ def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None):
 
       solve_q(target_xyz, el_deg, az_deg, standoff) -> q or None
       is_safe(q) -> (ok: bool, why: str)            None 이면 충돌검사 생략
+
+    ★ `fill_min` 게이트 — **채점에서 이미 못 쓴다고 나온 자세는 실행하지 않는다.**
+      `min_fill_cm2` 는 최악 회전각에서 보이는 물체 면적이고 `FILL_MIN_CM2`(6cm²)는
+      SLAM 추적 요구치다. 그런데 이 함수는 IK·충돌만 보고 fill 은 무시했다.
+      2026-09-16 실물: 플래너가 `minfill=2cm²`·`0cm²` 자세를 내놨고 그대로 실행돼
+      **밴드 4 에서 즉시 tracking lost**(40프레임), 이어서 recovery 3회가 전부
+      실패하며 pass 5~8 을 태웠다. 계획 단계에서 이미 알던 정보다.
+
+      단, **전부 걸러지면 최선 하나는 남긴다** — 아무 자세도 없으면 Phase 1 이
+      통째로 사라지고, 부족한 면은 Phase 2 NBV 가 메우는 것이 설계 의도다.
     """
+    # 상수가 이 함수보다 아래에 정의돼 있어 기본인자로 못 쓴다 (def 시점 평가).
+    #
+    # ★ 배제 문턱은 `FILL_MIN_CM2`(6cm²)가 **아니다.** 그건 주석대로
+    #   "tracking-**risk**" 경고선이지 실패선이 아니다. 실측(2026-09-16):
+    #     minfill 18 → 220프레임 OK,  6 → 221프레임 OK,  2 → 224프레임 OK,
+    #     0 → 40프레임 만에 tracking lost
+    #   6cm² 를 배제선으로 쓰면 **멀쩡히 스캔되던 밴드까지 날아가서**, 215mm 짜리
+    #   물체가 밴드 1개로 줄었다. 실제로 죽는 건 0cm² 뿐이므로 그 근처만 자른다.
+    fill_hard = FILL_HARD_MIN_CM2 if fill_min is None else float(fill_min)
+    fill_warn = FILL_MIN_CM2
+    usable = [(vp, ev) for vp, ev in zip(plan.poses, plan.evals)
+              if float(ev.min_fill_cm2) > fill_hard]
+    risky = [ev.min_fill_cm2 for vp, ev in zip(plan.poses, plan.evals)
+             if fill_hard < float(ev.min_fill_cm2) < fill_warn]
+    if risky and log:
+        log(f"  ⚠ fill<{fill_warn:.0f}cm² 인 밴드 {len(risky)}개는 추적이 불안할 수 "
+            f"있다 (minfill={', '.join(f'{v:.1f}' for v in risky)}cm²) — 실행은 한다")
+    if not usable and plan.poses:
+        best = max(zip(plan.poses, plan.evals),
+                   key=lambda pe: float(pe[1].min_fill_cm2))
+        usable = [best]
+        if log:
+            log(f"  ⚠ 모든 밴드가 fill≤{fill_hard:.1f}cm² — 최선 1개만 남긴다 "
+                f"(minfill={best[1].min_fill_cm2:.1f}cm²). 부족분은 Phase 2 NBV 몫")
+    elif log and len(usable) < len(plan.poses):
+        dropped = [f"{ev.min_fill_cm2:.1f}" for vp, ev in
+                   zip(plan.poses, plan.evals)
+                   if float(ev.min_fill_cm2) <= fill_hard]
+        log(f"  fill≤{fill_hard:.1f}cm² 인 밴드 {len(dropped)}개 제외 "
+            f"(minfill={', '.join(dropped)}cm²) — 볼 면이 없어 tracking lost 난다")
+
     qs = []
-    for vp, ev in zip(plan.poses, plan.evals):
+    for vp, ev in usable:
         target = np.array([axis_xy[0], axis_xy[1], vp.target_z], float)
         q = None
         for azd in azis_deg:
@@ -371,9 +459,96 @@ def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None):
 
 # ── 계획 (단일 자세 → 부족하면 겹침 밴드 분할) ────────────────────────────────
 DEFAULT_ELS = (20.0, 30.0, 40.0, 50.0)
-FILL_MIN_CM2 = 6.0            # 최악 프레임 이보다 작으면 tracking-risk
+FILL_MIN_CM2 = 6.0            # 최악 프레임 이보다 작으면 tracking-risk (경고선)
+#: **배제선** — 이보다 작으면 볼 면이 사실상 없어 tracking lost 가 난다.
+#  실측(2026-09-16): minfill 2cm² 는 224프레임 정상, 0cm² 는 40프레임 만에 lost.
+#  경고선(6cm²)을 배제에 쓰면 멀쩡한 밴드까지 날아간다 — 215mm 물체가 1밴드가 됐다.
+FILL_HARD_MIN_CM2 = 1.0
 ZCOVER_MIN = 0.75             # 단일 자세 z-커버 임계 (미달 → 밴드 분할)
 BAND_OVERLAP = 0.35           # 인접 밴드 겹침 (relocalization 성립 조건)
+
+#: 단일 자세로 끝내려면 **물체 높이의 이 비율 이상**을 한 자세가 덮어야 한다.
+#  `z_cover_frac` 은 "닿은 z-bin 의 *비율*" 이라 위·아래가 조금씩 걸치고 가운데가
+#  비어도 높게 나온다. 실제로 필요한 건 연속된 **z 구간 길이**다.
+#  2026-09-16: FOV 를 실측값으로 고치자 z_cover 가 0.75(=임계)로 올라가
+#  "단일 자세" 판정이 났는데, 그 자세가 덮는 구간은 149mm/209mm(0.72)였다.
+#  높이 기준을 따로 두지 않으면 긴 물체가 한 자세로 처리된다.
+ZSPAN_MIN_FRAC = 0.90
+
+#: `band_h`(= 한 자세가 덮는 z 폭) 에 곱하는 **안전계수**.
+#  기하 모델은 frustum ∩ DOF ∩ 입사각만 보므로 실제 캡처량보다 낙관적이다.
+#  실측 2026-09-16: 모델 149mm vs 실물 자세당 ~87mm (밴드 3개·센터간격 34mm 로
+#  메시 155mm → 155 - 68 = 87mm). 비율 ≈ 0.58.
+#  이 계수는 밴드 수를 늘리고 센터를 물체 양 끝에 더 붙이는 방향으로만 작용한다
+#  (커버리지 보장 ↔ 스캔 시간 trade-off). 커버리지를 우선한다.
+BAND_H_SAFETY = 0.60
+
+#: 밴드 센터를 물체 양끝에서 얼마나 안쪽으로 들일지 (band_h 배수).
+#  0.5 면 센터가 [z_lo+band_h/2, z_hi-band_h/2] 에 갇힌다. 그런데
+#  (a) `h` 는 preview 가 잰 값이라 실제 물체보다 작고
+#      — 실측 2026-09-16: 플래너 h=215mm 인데 결과 메시는 252mm 였다 —
+#  (b) 끝 밴드는 공칭 반높이를 넘어서까지 캡처한다.
+#  그래서 반 밴드씩 물러나면 도달 범위를 그냥 버린다. 1/4 로 줄여 센터를
+#  양끝에 붙인다: 밴드 수(=스캔 시간)는 그대로인데 센터 간격 45→58mm,
+#  실제 overlap 44%→27%, 예상 커버 222→262mm.
+CENTER_INSET_FRAC = 0.25
+
+#: 물체 **윗면**(법선이 위를 향하는 수평면 = 뚜껑) 보강 기준.
+#  측면 점이 점수를 지배하므로 스코어러는 낮은 el 을 고르는데, 수평 윗면은
+#  입사각 제한(`max_incidence_deg`) 때문에 el 이 낮으면 **품질-가시가 0** 이다.
+#  실측 2026-09-16 (r45/h209 + 뚜껑 r18): el=20/30/40 → 뚜껑 커버 0%,
+#  el=50/60/70 → 100%. 그런데 플랜은 4밴드 전부 el=20 을 골라 뚜껑이 통째로
+#  빠졌다. 이전 실행들이 뚜껑을 잡은 건 우연히 el=60/40 이 뽑혔기 때문이다.
+CAP_COVER_MIN = 0.50          # 이 비율 미만이면 내려다보는 자세를 하나 더 넣는다
+CAP_EL_MIN_DEG = 50.0         # 윗면 보강 자세의 최소 고도각
+CAP_ZONE_M = 0.03             # '상단부' 로 볼 두께
+CAP_NORMAL_COS = 0.866        # 법선이 위와 이루는 각 ≤30° 를 '윗면' 으로 본다
+
+
+def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
+                      els, sos, n_theta, up_sign):
+    """윗면이 안 덮였으면 내려다보는 자세를 1개 추가한다 (in-place, 추가 여부 반환).
+
+    `up_sign` — 작업 프레임에서 어느 z 방향이 '위'인가 (+1 = +Z 가 위).
+      sim 은 world 프레임이라 +1, real 은 천장 마운트 base 라 −1
+      (`docs/4_collision.md` §6.1). 부호를 모르면 어느 끝이 뚜껑인지 알 수 없다.
+    """
+    s_up = float(np.sign(up_sign)) or 1.0
+    n_up = nrm_obj[:, 2] * s_up                 # +1 = 위를 향함
+    z_up = z * s_up                             # 클수록 위
+    top_up = float(z_up.max())
+    cap = (n_up > CAP_NORMAL_COS) & (z_up > top_up - CAP_ZONE_M)
+    if int(cap.sum()) < 50:
+        return False                            # 윗면이라 할 면이 없음 (구·원뿔 등)
+    cov = np.zeros(len(pts_obj), dtype=bool)
+    for e in evals:
+        cov |= e.seen_mask
+    cap_frac = float(cov[cap].mean())
+    if cap_frac >= CAP_COVER_MIN:
+        return False
+    cap_els = [float(e) for e in els if float(e) >= CAP_EL_MIN_DEG]
+    if not cap_els:
+        print(f"[phase1] ⚠ 윗면 커버 {cap_frac*100:.0f}% 인데 "
+              f"el≥{CAP_EL_MIN_DEG:.0f}° 후보가 없어 보강 못 함")
+        return False
+    tz_cap = s_up * (top_up - CAP_ZONE_M)
+    best = None
+    for el in cap_els:
+        for so in sos:
+            pose = make_view_pose(axis_xy, float(tz_cap), el, 0.0, so)
+            ev = evaluate_viewpoint(pts_obj, nrm_obj, axis_xy, pose,
+                                    sensor, n_theta=n_theta)
+            sc = float(ev.seen_mask[cap].mean())
+            if best is None or sc > best[2]:
+                best = (pose, ev, sc)
+    if best is None or best[2] <= cap_frac:
+        return False
+    poses.append(best[0])
+    evals.append(best[1])
+    print(f"[phase1] 윗면 보강 자세 추가 — el={best[0].el_deg:.0f}° "
+          f"tz={best[0].target_z*1000:.0f}mm: 뚜껑 커버 "
+          f"{cap_frac*100:.0f}% → {best[2]*100:.0f}%")
+    return True
 
 
 def _score(ev: PoseEval, fill_target: float = 12.0) -> float:
@@ -393,7 +568,8 @@ def _standoff_candidates(pts_obj, axis_xy, sensor: SensorModel):
 def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None,
                            els=DEFAULT_ELS, n_theta: int = 36,
                            fill_target: float = 12.0,
-                           fill_min: float = FILL_MIN_CM2) -> Phase1Plan:
+                           fill_min: float = FILL_MIN_CM2,
+                           up_sign: float = +1.0) -> Phase1Plan:
     """maximin 채점으로 단일 최적 자세 선택; z-커버 미달이면 겹침 밴드 분할.
     pts_obj = crop_object_points + voxel_downsample(sensor.voxel_m) 된 점군.
     fill_target/fill_min 은 SLAM 트래킹 요구치에 정렬해 넘길 것 (real 캘리브)."""
@@ -423,23 +599,63 @@ def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None
         return best
 
     pose, ev = search(tzs)
-    # 밴드 분할 여부를 가르는 값 — 높이가 아니라 **단일 자세의 z-커버율**이다.
+    # 밴드 분할 여부를 가르는 값 — 높이가 아니라 **단일 자세가 덮는 범위**다.
     # standoff 가 물체 반경에 비례해 정해지므로 가는 물체일수록 카메라가 가까워
-    # FOV 가 높이를 못 덮는다(실측: r=97mm/h=293mm 는 단일, r=34mm/h=207mm 는 3밴드).
+    # FOV 가 높이를 못 덮는다.
+    # ⚠ 옛 주석은 "r=97mm/h=293mm 는 단일" 이라고 적고 있었는데, 그건 세로 FOV 가
+    #   22.62° 로 뒤집혀 있던 시절의 결과다. 실측 FOV(28.58°)+zspan 기준에서는
+    #   그 물체도 한 자세로 146mm/290mm 밖에 못 덮어 5밴드가 된다. "단일" 판정
+    #   자체가 물체의 절반만 스캔하던 증상이었다. r=34mm/h=207mm 는 3밴드 유지.
+    h = z_hi - z_lo
+    seen_z = z[ev.seen_mask]
+    # 자세가 덮는 **연속 z 구간 길이**. z_cover_frac(닿은 bin 비율)과 달리
+    # "위아래만 조금 걸치고 가운데가 빈" 경우를 높게 봐주지 않는다.
+    seen_span = float(np.ptp(seen_z)) if len(seen_z) > 30 else 0.0
+    span_frac = seen_span / max(h, 1e-6)
     print(f"[phase1] z_cover={ev.z_cover_frac:.2f} (기준 {ZCOVER_MIN:.2f}) "
-          f"standoff={pose.standoff*1000:.0f}mm h={(z_hi-z_lo)*1000:.0f}mm "
+          f"zspan={seen_span*1000:.0f}mm={span_frac:.2f} (기준 {ZSPAN_MIN_FRAC:.2f}) "
+          f"standoff={pose.standoff*1000:.0f}mm h={h*1000:.0f}mm "
           f"minfill={ev.min_fill_cm2:.0f}cm²")
-    if ev.z_cover_frac >= ZCOVER_MIN:
-        return Phase1Plan(poses=[pose], evals=[ev], banded=False,
-                          tracking_risk=ev.min_fill_cm2 < fill_min,
-                          note="single")
+    # ★ 두 조건을 **모두** 넘어야 단일 자세로 끝낸다. z_cover 만 보면 209mm 물체가
+    #   149mm 만 덮는 자세 하나로 끝나버린다 (2026-09-16 실측).
+    if ev.z_cover_frac >= ZCOVER_MIN and span_frac >= ZSPAN_MIN_FRAC:
+        poses, evals = [pose], [ev]
+        added = _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z,
+                                  sensor, els, sos, n_theta, up_sign)
+        return Phase1Plan(poses=poses, evals=evals, banded=added,
+                          tracking_risk=any(e.min_fill_cm2 < fill_min
+                                            for e in evals),
+                          note="single+윗면" if added else "single")
 
     # ── 밴드 분할: 자세가 실제로 덮은 z-대역 폭으로 밴드 수 산정 ──────────
-    seen_z = z[ev.seen_mask]
-    band_h = max(float(np.ptp(seen_z)) if len(seen_z) > 30 else 0.06, 0.04)
-    h = z_hi - z_lo
-    m_bands = max(2, int(math.ceil(h / (band_h * (1.0 - BAND_OVERLAP)))))
-    centers = np.linspace(z_lo + band_h / 2, z_hi - band_h / 2, m_bands)
+    # 기하 모델은 실제 캡처량보다 낙관적이므로 안전계수를 곱한다. 작아진 band_h 는
+    # 밴드 수를 늘리고 센터를 물체 양 끝에 더 붙인다 = 실제 커버리지가 늘어난다.
+    band_h_model = max(seen_span if seen_span > 0 else 0.06, 0.04)
+    band_h = max(band_h_model * BAND_H_SAFETY, 0.04)
+    # ★ 밴드 수는 **센터 간격**과 맞물려야 한다. 센터는 아래 linspace 로
+    #   [z_lo+band_h/2, z_hi-band_h/2] 를 m 등분하므로 실제 간격은
+    #       step = (h - band_h) / (m - 1)
+    #   인데, 예전 식 `ceil(h / (band_h·(1-ov)))` 은 "step = band_h·(1-ov)" 를
+    #   가정해 세운 것이라 m 을 과다 산정했다. m 이 커지면 step 이 더 작아져
+    #   밴드가 서로를 덮기만 하고 **아래로 내려가지 않는다**.
+    #   실측 2026-09-16: h=209mm·band_h=106mm 에서 의도 step 69mm 인데 m=4 →
+    #   step 34mm. 조준점 3개가 68mm 안에 몰려 360° 전회전을 3번 하고도
+    #   메시가 155mm 에 그쳤다.
+    #   step = band_h·(1-ov) 를 m 에 대해 풀면 m = 1 + span/(band_h·(1-ov)).
+    #   ★ ceil 대신 round 를 쓴다. ceil 은 m 을 한 칸 올려 step 을 의도보다
+    #     작게 만들어 overlap 만 키운다 (h=215·band_h=80: 의도 52mm → 45mm,
+    #     overlap 35% → 44%). round 가 |실제 step − 의도 step| 을 최소화한다.
+    inset = band_h * CENTER_INSET_FRAC
+    lo_c, hi_c = z_lo + inset, z_hi - inset
+    span = max(hi_c - lo_c, 0.0)
+    m_bands = max(2, int(round(
+        1.0 + span / (band_h * (1.0 - BAND_OVERLAP)))))
+    centers = np.linspace(lo_c, hi_c, m_bands)
+    _step = span / max(m_bands - 1, 1)
+    print(f"[phase1] 밴드 {m_bands}개  band_h={band_h*1000:.0f}mm "
+          f"센터간격={_step*1000:.0f}mm "
+          f"overlap={(1.0 - _step / band_h)*100:.0f}% "
+          f"센터span={span*1000:.0f}mm (물체 h={h*1000:.0f}mm)")
     poses, evals = [], []
     for c in centers:
         b = search([float(c)], restrict=(c - band_h / 2, c + band_h / 2))
@@ -447,6 +663,12 @@ def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None
         # 겹침/coverage 는 전체 점군 기준으로 재평가
         evals.append(evaluate_viewpoint(pts_obj, nrm_obj, axis_xy, b[0],
                                         sensor, n_theta=n_theta))
+    # ★ 윗면(뚜껑) 보강은 **정렬 전**에 넣는다. 그래야 safe-first 정렬과
+    #   겹침(ov) 계산에 같이 들어간다.
+    n_band_only = len(poses)
+    _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z,
+                      sensor, els, sos, n_theta, up_sign)
+    n_cap = len(poses) - n_band_only
     # ★ 안전한 밴드부터 스캔 (minfill 내림차순): 위험 밴드를 나중에 돌면
     #   lost 가 나도 이미 master 가 쌓여 있어 replan/relocalization 앵커 존재.
     order = sorted(range(len(evals)),
@@ -463,7 +685,9 @@ def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None
     risk = any(e.min_fill_cm2 < fill_min for e in evals)
     return Phase1Plan(poses=poses, evals=evals, banded=True,
                       band_overlap_frac=ov, tracking_risk=risk,
-                      note=f"{m_bands} bands (band_h={band_h*1000:.0f}mm, safe-first)")
+                      note=(f"{m_bands} bands (band_h={band_h*1000:.0f}mm, "
+                            f"safe-first)"
+                            + (f" + 윗면 {n_cap}" if n_cap else "")))
 
 
 # ── Recovery 재계획 (같은 채점기 + overlap 항) ────────────────────────────────
