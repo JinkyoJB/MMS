@@ -163,7 +163,8 @@ standoff 0.313m 로 실측한 결과다.
 ### 6.1 지금 무엇을 믿고 있나 — 검증 결과
 
 ```
-CAD(STEP) ──step2usd──▶ v3_scene.usd ──export_env_mesh.py──▶ cell_env.npz ──▶ 환경 SDF
+CAD(STEP) ──step2usd──▶ 씬 USD ──export_env_mesh.py──▶ cell_env.npz ──▶ 환경 SDF
+                        (씬 생성·교체 절차는 `sim_scene.md`)
                                        (표면 샘플링 5mm       (base 프레임
                                         + base 프레임 변환)     점군 130만)
 ```
@@ -284,8 +285,8 @@ remove: []        # §6.4 — 급하지 않으면 비워 둔다
 
 #### 2단계. CAD/USD 동기화 (사무실에서, 수렴 경로)
 
-패치가 쌓이면 그걸 **작업지시서 삼아** CAD 를 고치고 `v3_scene.usd` 재생성 →
-`export_env_mesh.py` → npz 교체 → yaml 의 해당 항목 삭제.
+패치가 쌓이면 그걸 **작업지시서 삼아** CAD 를 고치고 씬을 재생성한다 — 씬 재생성부터
+npz 교체까지의 절차는 **`sim_scene.md` §3** 한 곳에 있다.
 
 yaml 을 "아직 CAD 에 반영 안 된 차이 목록"으로 운용하면 **무엇이 밀려 있는지가 파일 하나에
 보인다.** 비어 있으면 CAD 와 실물이 같다는 뜻이다.

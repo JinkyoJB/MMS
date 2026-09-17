@@ -390,6 +390,7 @@ $ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
 | 증상 | 원인 / 해결 |
 |---|---|
 | `씬이 없다: ...v3_scene.usd` | 자산 미설치 → §5.3 |
+| `씬이 없다: ...v2_real_260917.usd` | 릴리스에 없는 **생성물**이다 → `sim_scene.md` §3 의 2번 |
 | 첫 실행이 안 끝나는 것 같다 | 정상. `Simulation App Startup Complete` 까지 ~8분 |
 | `NGX DLSS ... AdapterUnsupported` | 무시. Ada 전용 기능이라 3080 에 없는 게 정상 |
 | `torch.cuda.is_available() False` | 알려진 사항 — §5.2 주석. 씬 보기에는 무관 |
@@ -408,7 +409,9 @@ $ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
 
 ⚠ **env 를 섞지 말 것.** `env_isaacsim` 은 numpy **1.26 고정**(isaacsim wheel 의 ABI), 나머지는 numpy 2.x.
 `env_isaacsim` 은 RTX GPU 가 필요하고 다운로드가 수십 GB다.
-`step2usd` 는 새 sim 씬을 CAD 에서 만들 때만 필요 — 기존 `v3_scene.usd` 로 돌릴 때는 없어도 된다.
+`step2usd` 는 sim 씬을 만들 때 필요하다. **기본 씬 `v2_real_260917.usd` 는 릴리스에
+없는 생성물이라 새 머신에서는 한 번 만들어야 한다** (`sim_scene.md` §3). 이미 있는
+씬으로 돌리기만 할 때는 없어도 된다.
 
 ### conda 를 못 쓰는 환경이라면
 

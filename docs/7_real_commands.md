@@ -35,6 +35,48 @@ ping -c2 192.168.0.10       # 턴테이블 (Ezi-SERVO)
 
 ---
 
+## 0-A. 장비 없이 먼저 — 실물 셀 기하 점검 (권장)
+
+```bash
+env -u PYTHONPATH ~/miniconda3/envs/mms-env/bin/python \
+    scripts/artec/validate_real_cell.py
+```
+
+캘리브 yaml(`T_B_F0`·`T_EC_artec`)과 충돌 캐시만으로 **계획 로직을 실물 상수로** 돌려
+본다. 로봇·스캐너·턴테이블이 없어도 된다. 네 가지를 찍는다:
+
+1. 셀 기하 — 턴테이블 축 위치, **도달한계 여유**, '위' 방향
+2. home 이 충돌 게이트를 통과하는가 (여기서 막히면 `is_path_safe` 의 start 검사에
+   걸려 **모든 이동이 거부**된다 — 실물에서 하루를 날리기 전에 잡을 것)
+3. lookaround 계획 자세(el × az)의 IK · 충돌 · **home 에서 경로** 통과율
+4. nbv NBV 가 몇 번 · 얼마나 움직이며 도는지
+
+> ### ⚠ sim 으로는 이 점검을 대신할 수 없다
+>
+> 두 셀의 기하가 다르다 (2026-09-17 실측):
+>
+> | | 턴테이블 축 (base) | 수평 | 전체 | 도달여유 |
+> |---|---|---|---|---|
+> | v3 씬 (`v3_scene.usd`, **더 이상 기본 아님**) | `[0, 0, 0.835]` | **0 mm** | 835 mm | +255 mm |
+> | real (실측 `T_B_F0`) | `[0.799, 0.005, 0.688]` | **799 mm** | 1055 mm | **+35 mm** |
+>
+> real 은 팔이 거의 다 펴진 자세(도달여유 **+35mm**)라 야코비안이 나쁘다. 같은 코드·
+> 같은 후보 격자인데 az 를 0°→+30° 바꾸는 **최대 관절이동**이
+>
+> ```
+> sim  : el45 23.3°  el55 27.7°  el65 23.9°
+> real : el45 51.3°  el55 55.5°  el65 47.7°    ≈ 2배
+> ```
+>
+> **"sim 에서 검증하고 real 에 올린다" 는 이동량에 대해서는 성립하지 않는다.**
+> 스캔 품질·SLAM·병합은 여전히 sim 에서 보고, **도달성·이동량은 이 스크립트로** 본다.
+>
+> ⚠ **IK seed 를 맞추고 비교할 것.** 해석 IK 는 국소해라 seed 를 바꾸면 결과가 크게
+> 달라진다 — 옛 home 값을 seed 로 쓰면 real 이 6/12 만 풀리고 el65 가 103° 로 나오는데,
+> 실물 home 으로 재면 **12/12 전부 풀린다.** 기하의 한계가 아니라 seed 탓이다.
+
+---
+
 ## 0. 연결 확인 (제일 먼저)
 
 ```bash
@@ -218,7 +260,8 @@ env -u PYTHONPATH python scripts/artec/main_artec_demo.py
 
 | 무엇 | 문서 |
 |---|---|
-| sim 실행·씬 생성 | `sim_commands.md` |
+| sim 실행 | `sim_commands.md` |
+| sim 씬 생성·교체 | `sim_scene.md` |
 | 캘리브 원리·함정 | `1_calibration.md` |
 | lookaround·nbv·flip 동작 | `3_lookaround.md` · `4_nbv.md` · `5_flip.md` |
 | 셀 배치·치수 | `hw_layout.md` |

@@ -3,7 +3,7 @@
 > Artec Spider + xArm7 + 턴테이블 자동 3D 스캐닝 시스템.
 > **최종 산출물 = 대상물 전면(full-coverage)의 watertight mesh + texture.**
 
-**이 문서의 역할** — 알고리즘 설계와 그 근거를 다룬다. 각 Phase가 왜 그렇게 판정하는지,
+**이 문서의 역할** — 알고리즘 설계와 그 근거를 다룬다. 각 단계가 왜 그렇게 판정하는지,
 어떤 함정이 있는지가 여기 있다.
 
 | 목적 | 볼 문서 |
@@ -13,7 +13,7 @@
 | 로봇을 손으로 움직이기 (웹 UI · 제어 스크립트) | **`docs/robot_control.md`** |
 | **캘리브레이션을 직접 돌리기** (절차·합격기준·검산) | **`docs/calibration_runbook.md`** |
 | **알고리즘이 왜 이런가** | **이 문서** §1~8 |
-| 단계별 상세 | `docs/*.md` (calibration / lookaround / nbv / collision / hw_layout) |
+| 단계별 상세 | `docs/*.md` (calibration / preview / lookaround / nbv / flip / collision / hw_layout) |
 
 ---
 
@@ -71,7 +71,7 @@ mms_artec/
     isaac/{isaac_world,isaac_xarm,isaac_turntable,isaac_scanner}.py
   sensor/artec_client.py         real 스캐너 (+ capture_points_base)
   nbv/artec_streaming_scan_session.py   lookaround streaming SLAM + 4 watchdog
-  nbv/artec_multipass_scan_session.py   lookaround+2+3 통합, view-score, recovery
+  nbv/artec_multipass_scan_session.py   lookaround+nbv+flip 통합, view-score, recovery
 utils/                           ★ sensor-agnostic 공유 코어 (real·sim 공용)
   calibration/{turntable_frame,rim_picker,hand_eye_calibrator,artec_charuco_detector}.py
   collision/{geometry,robot_collision}.py    자세별 충돌 쿼리 (real/sim 공용)
@@ -137,6 +137,7 @@ export MMS_ASSET_ROOT=~/mms-assets/2_3Dassets      # .bashrc 에 넣어 두면 �
 |---|---|---|
 | **sim** (Isaac) | `docs/sim_commands.md` | `./scripts/sim/run_e2e_gui.sh mug` |
 | **real** (실물 장비) | `docs/7_real_commands.md` | `python main_artec.py` (`BACKEND="real"`) |
+| **sim 씬** 생성·교체 | `docs/sim_scene.md` | `scripts/sim/build_scene_v2_real.py` |
 
 조정 가능한 설정은 인수인계서_A1 §4.7.
 
@@ -199,18 +200,83 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
     `env -u PYTHONPATH ~/miniconda3/envs/env_isaacsim/bin/python -u main_artec.py`
     (NVIDIA 번들 런처 `~/isaacsim/python.sh` 도 동작 — 별도 설치본이라 conda deactivate 필요)
   - ⚠ 셸에 ROS `PYTHONPATH` 가 잡혀 있으면 python3.10 패키지가 섞인다 → `env -u PYTHONPATH` 필수.
-- sim 씬(USD): `mms_artec/backends/isaac/isaac_world.py::DEFAULT_USD_PATH`
-  (`2_3Dassets/frame_xarm7_spider_turntable_v2/v3_scene.usd` = xArm+턴테이블+대상물).
-  물체별 씬은 같은 폴더의 `v3_ts_<이름>.usd`, 생성은 `scripts/sim/build_scene_v3.py`.
-  환경변수 `MMS_SIM_USD` 로 override — 물체 씬은 `MMS_SIM_OBJECT_PRIM` 도 같이 준다.
-  ⚠ 구 `v2.usd` / `testset/composed/*.usd` 는 카메라·턴테이블 prim 경로가 달라 못 쓴다.
+- sim 씬(USD): 기본은 `isaac_world.py::DEFAULT_USD_PATH` = **실물 배치를 재현한
+  `frame_xarm7_spider_turntable/v2_real_260917.usd`** 다. `MMS_SIM_USD` 로 바꾼다.
+
+  > ⚠ **v3 는 실물이 아니다.** 셀을 v3 로 바꾸기로 했다가 실제로는 안 바꿨다
+  > (2026-09-16 현장 확인). v3 는 턴테이블이 로봇 base 바로 아래(수평 0mm)인데
+  > 실물은 799mm 떨어져 있어 **자세 선정·도달성·이동량이 전혀 다르다.**
+  > 장비 없이 실물 기하만 점검하려면 `scripts/artec/validate_real_cell.py`.
+
+  → 씬 목록·생성·교체 절차는 **`docs/sim_scene.md`**.
 - 백엔드 상세: `mms_artec/backends/README.md`
+
+### ★ 작동거리 창(스캔 range)을 바꾸려면
+
+실물에서 "거리가 멀다/가깝다" 를 조정할 때 **딱 한 곳만** 바꾼다.
+
+```python
+# main_artec.py  ::  CFG = ArtecMMSConfig(artec=ArtecConfig(...))
+scan_range_near_mm = 210.0     # None = SDK 기본값
+scan_range_far_mm  = 265.0
+```
+
+이 값 하나가 **세 곳을 모두** 정한다 — 예전에는 따로 놀았다:
+
+| 쓰는 곳 | SDK 객체 | 어떻게 따라오나 |
+|---|---|---|
+| 단일 캡처 (preview) | `IFrameProcessor` | `ArtecClient.initialize()` 가 적용 |
+| 스트리밍 스캔 | `IScanningProcedure` | 세션 설정이 None 이면 스캐너 값을 따름 |
+| **계획기** `SensorModel.dof` | — | `sensor.scanning_range()` 로 **조회**해서 씀 |
+
+> ⚠ 예전에는 스트리밍 세션만 자기 설정으로 `IScanningProcedure` 를 건드리고,
+> 계획기는 `dof = (0.20, 0.30)` 을 **하드코딩 추측**으로 썼다. 둘이 어긋나도
+> 알 방법이 없었다. `dof` 는 **밴드 수와 커버리지 판정을 직접 좌우**한다.
+
+**확인** — 실행하면 실제로 걸린 값이 찍힌다. 설정과 계획 가정이 같은지 여기서 본다.
+```
+[ArtecClient] 작동거리 창 = 210~265mm
+  [p1plan]  스캐너 스캔 범위 210~265mm 를 dof 로 사용 (기본 가정 200~300mm)
+  스캔 범위 210~265mm                      ← 스트리밍 세션
+```
+
+**어떤 값을 넣을까** — 스펙(170~350mm)을 그대로 쓰면 안 된다. `SensorModel` 주석의
+실측 경고: *"(0.17, 0.35) 로 넓히면 모델이 단일 자세로 173mm 를 덮는다고 보지만
+실물 자세당 실제 캡처는 ~87mm 였다 — 넓히면 밴드가 사라져 커버리지가 더 나빠진다."*
+즉 **넓은 쪽으로 틀리면 밴드가 부족해진다.** 실측으로 정하려면:
+
+**실물은 잴 필요가 없다 — 스캐너가 답을 갖고 있다.** SDK 의
+`IFrameProcessor::getScanningRange` 를 `ArtecClient.scanning_range()` 가 그대로
+돌려주고, 파이프라인은 이미 그 값을 쓴다(`sensor_from_scanning_range`). 로봇을
+거리마다 움직여 재는 것은 실물 시간 낭비이고, 측정 오차로 **SDK 가 아는 정답을
+덮어쓰는** 짓이다. 값을 바꾸려면 `ArtecConfig.scan_range_near_mm / _far_mm`.
+
+**재야 하는 쪽은 sim 이다.** `IsaacArtecScanner.scanning_range()` 는 SDK 가 아니라
+모사라 `_wd_m` 에 넣어 둔 값을 그대로 돌려줄 뿐이고, 그게 Isaac 렌더러의 실제
+반환 범위와 맞는지는 아무도 보장하지 않는다:
+
+```bash
+env -u PYTHONPATH MMS_BACKEND=isaac MMS_SIM_WD_FILTER=0 \
+    $ISAAC_PYTHON scripts/artec/range_profile.py
+```
+거리를 훑으며 **반환점 히스토그램**을 찍는다(Artec Studio 에서 눈으로 보던 것).
+⚠ `MMS_SIM_WD_FILTER=0` 이 필수다 — 기본값(1)이면 sim 이 그 창으로 점을 미리
+잘라서 주므로 넣은 값이 그대로 나오는 **순환논법**이 된다.
+
+**sim 도 같은 계약을 모사한다** — `IsaacArtecScanner.scanning_range()` 가 같은 이름·
+단위(mm)로 답하고, `set_scanning_range()` 는 sim 캡처 필터의 창까지 같이 바꾼다.
+그래서 두 백엔드가 **같은 가정으로** 밴드를 나눈다.
 
 ---
 
+### ★ 셀 배치가 바뀌면 — 어디를 고치나
 
+로봇 연산(충돌·도달성)이 쓰는 것은 **씬 USD** 와 **충돌 점군 npz** 둘이고, **둘은 한
+몸이다.** 어긋나면 로봇이 셀 안에 박힌 것으로 판정돼 모든 자세가 거부된다.
 
+→ 6단계 절차·명령·함정은 **`docs/sim_scene.md` §3** 에 모아뒀다.
 
+---
 
 ## 알고리즘 — 어디에 무엇이 있나
 
@@ -233,7 +299,19 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 
 → **`docs/1_calibration.md`** (원리·코드 지도·규약·함정·남은 일)
 
-### 2. lookaround — 5면 스캐닝 (streaming SLAM + view planning)  ✅🔬
+### 2. preview — 형상 탐색  ✅🔬
+
+물체가 어떻게 생겼는지 모르는 채로 시작한다(실물엔 GT 가 없다). 높이·반경·적정
+작업거리를 재는 **측량 단계**이고, 이 결과가 뒤 단계 전부의 입력이다.
+
+- 조준높이를 올려 가며 훑는다 — "상단이 더 안 늘면 종료"(최대 4회)
+- 축거리는 **들어온 점군의 거리 분포로** 정한다: `d ← d + (창중앙 − 표면거리 중앙값)`
+- 반환이 0 이면 방향을 모르므로 **가까이·멀리를 번갈아** 벌린다(±40·±80mm)
+- `MMS_SIM_STAGE_UNTIL=preview` 로 여기까지만 돌릴 수 있다 (전회전 생략)
+
+→ **`docs/2_preview.md`** (거리 결정·반환 0 탐색·손잡이·코드 지도)
+
+### 3. lookaround — 5면 스캐닝 (streaming SLAM + view planning)  ✅🔬
 
 로봇을 한 자세에 고정하고 턴테이블을 360° 돌려 측면·윗면을 얻는다.
 Artec 은 frame-to-frame 상대 정합이라 **overlap 유지**가 전부다 — 연속 회전 + max FPS.
@@ -245,27 +323,27 @@ Artec 은 frame-to-frame 상대 정합이라 **overlap 유지**가 전부다 —
 
 → **`docs/3_lookaround.md`** (아키텍처·watchdog·recovery·라이브 뷰어·view-score·sim 검증)
 
-### 3. nbv — 부족면 NBV 보강  ♻️🔬
+### 4. nbv — 부족면 NBV 보강  ♻️🔬
 
 누적 점군에서 구멍을 찾아 그 지점만 겨냥해 부분 스윕(±45°). 최대 8회.
 종료는 **신규 점유 복셀 비율**로 판정한다(경계 길이는 방향이 반대라 쓰면 안 된다).
 
 → **`docs/4_nbv.md`** (NBV 루프·수렴 지표·성능 병목·정합 게이트)
 
-### 4. flip — 바닥면 flip & 병합  ♻️🔬
+### 5. flip — 바닥면 flip & 병합  ♻️🔬
 
 물체를 뒤집어 바닥면을 얻고 앞 결과와 합친다. 각 IScan 은 자기 첫 프레임을 원점으로
 잡으므로 `T_pre` 로 master 좌표에 끌어와야 한다.
 
 → **`docs/5_flip.md`** (flip 판정·`T_pre` 3가지 경우·face-merging 문제)
 
-### 5. 충돌 · 특이점  ✅
+### 6. 충돌 · 특이점  ✅
 
 자세를 실행 **전에** 걸러낸다. 캡슐 근사, real/sim 공용.
 
 → **`docs/collision.md`** · 레이아웃 실측은 **`docs/hw_layout.md`**
 
-### 6. 후처리 & 라이브 시각화  ♻️🔬 / ✅
+### 7. 후처리 & 라이브 시각화  ♻️🔬 / ✅
 
 SDK General Pipeline 으로 최종 메시 생성. **Cleaning 은 반드시 Fusion 앞에.**
 

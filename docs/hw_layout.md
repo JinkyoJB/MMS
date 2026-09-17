@@ -7,7 +7,13 @@
 
 ---
 
-## 1. 실측 치수 (v3_scene 기준)
+## 1. 치수 (v3_scene CAD 기준)
+
+> ⚠ **이 절의 값은 v3 CAD 이고 실물이 아니다.** 셀을 v3 로 바꾸기로 했다가 실제로는
+> 안 바꿨다(2026-09-16 확인). 실물 값은 `config/calibration/turntable_frame.yaml`
+> (`T_B_F0`) 과 `utils/collision/data/cell_env.npz` 이고, 재현 씬은
+> `sim_scene.md` §1 의 `v2_real_260917.usd` 다 — 턴테이블 축이 base 에서 수평
+> **799mm** 로, 아래 표의 0mm 와 전혀 다르다.
 
 ```
 로봇 base (world)   (0.365, 0, 1.500)      ← 천장 마운트 하면
