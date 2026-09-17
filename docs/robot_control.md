@@ -1,7 +1,7 @@
 # 로봇 제어 — xArm7
 
 > 실물 xArm7 을 손으로 다루는 방법. 웹 UI 와 `scripts/robot/*` 두 가지.
-> Phase 1~3 자동 스캔은 `main_artec.py` 가 하고, 이 문서는 **그 전후에 사람이 하는 조작**을 다룬다.
+> lookaround~3 자동 스캔은 `main_artec.py` 가 하고, 이 문서는 **그 전후에 사람이 하는 조작**을 다룬다.
 
 | 하고 싶은 것 | 방법 |
 |---|---|
@@ -199,5 +199,5 @@ sim 전용 전제다.
 - 장비 3종 연결 점검 — `scripts/check_devices.py`
 - 좌표계 규약 · 장비 IP — `README.md`
 - hand-eye / 턴테이블 축 캘리브 — `docs/1_calibration.md`
-- 충돌 검사 — `docs/4_collision.md`
+- 충돌 검사 — `docs/collision.md`
 - 실물 실행 명령 — `docs/7_real_commands.md`

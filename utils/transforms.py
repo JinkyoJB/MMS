@@ -141,10 +141,10 @@ class TurntableTransformConfig:
     #   그 열은 변환 성분이지 base 좌표가 아니다. 반드시 역변환이다.
     #
     #   2026-09-16 실물에서 이 실수로 **EE 가 로봇 base 에 충돌했다** —
-    #   Phase 1 플래너가 실측 원판 [0.799,0.005,0.688] 대신
+    #   lookaround 플래너가 실측 원판 [0.799,0.005,0.688] 대신
     #   [-0.862,0.080,-0.603] (2105mm 떨어진 base 반대쪽)을 겨눴다.
     #   축 방향도 18.1° 틀렸다. 같은 실수가 check_calibration 교차검증,
-    #   Phase 2 NBV 충돌 world, recovery 조준에도 퍼져 있었다.
+    #   nbv NBV 충돌 world, recovery 조준에도 퍼져 있었다.
     #
     #   그래서 계산을 여기 한 곳에 두고 호출부는 이것만 쓴다.
 

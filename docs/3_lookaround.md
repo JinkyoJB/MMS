@@ -1,9 +1,9 @@
-# Phase 1 — 5면 스캐닝
+# lookaround — 5면 스캐닝
 
 > 턴테이블이 한 바퀴 도는 동안 로봇은 **한 자세에 고정**된 채 연속 스캔해 윗면과 옆면
-> 4개, 합쳐서 5면을 얻는다. 바닥면은 원판에 닿아 있어 Phase 3(뒤집기)의 몫이다.
+> 4개, 합쳐서 5면을 얻는다. 바닥면은 원판에 닿아 있어 flip(뒤집기)의 몫이다.
 >
-> 앞 단계 `1_calibration.md` · 부족면 보강 `3_phase2.md`
+> 앞 단계 `1_calibration.md` · 부족면 보강 `4_nbv.md`
 >
 > **쓰기만 하면 §1(실행)·§2(sim·real 차이)로 충분하다.** §3 이후는 왜 그렇게 도는지다.
 > 문제가 생기면 맨 뒤 부록(T1~T9)을 본다.
@@ -15,15 +15,15 @@
 ### sim
 
 ```bash
-./scripts/sim/run_e2e_gui.sh                     # 기본 씬, Phase 1
+./scripts/sim/run_e2e_gui.sh                     # 기본 씬, lookaround
 ./scripts/sim/run_e2e_gui.sh spray_can           # 물체별 씬 (부분이름, 3밴드 사례)
-./scripts/sim/run_e2e_gui.sh mug 2 planner 10    # Phase 1→2, 베이스 +10cm
+./scripts/sim/run_e2e_gui.sh mug 2 planner 10    # lookaround→2, 베이스 +10cm
 ```
 
-인자는 `[물체] [phase_mode] [planner|legacy] [ΔH cm]` 다. `phase_mode` 는 누적이라
+인자는 `[물체] [stage_until] [planner|legacy] [ΔH cm]` 다. `stage_until` 는 누적이라
 `1`=5면, `2`=+NBV, `3`=+바닥면이다.
 
-![sim Phase 1 실행 화면](figures/phase1/sim_run_spray_can.png)
+![sim lookaround 실행 화면](figures/lookaround/sim_run_spray_can.png)
 
 오른쪽은 종료 후 뜨는 결과 뷰어(`utils/viz.py::show_composite_mesh`)다. 파란 원판은
 턴테이블 상면 기준 도형이고, 물체가 **단색 빨강인 것은 `paint_uniform_color` 탓**이지
@@ -31,7 +31,7 @@
 
 | 환경변수 | 뜻 | 기본 |
 |---|---|---|
-| `MMS_SIM_PHASE_MODE` | 1 / 2 / 3 (누적) | 1 |
+| `MMS_SIM_STAGE_UNTIL` | 1 / 2 / 3 (누적) | 1 |
 | `MMS_SIM_P1_MODE` | `planner`(§4 채점기) 또는 `legacy` | planner |
 | `MMS_SIM_P1_ELS` | 채점할 고도각 후보(°) | `30,40,50,60,70` |
 | `MMS_SIM_NTHETA` | 한 바퀴 캡처 프레임 수 | 24 |
@@ -48,16 +48,16 @@ env -u PYTHONPATH $MMS_PYTHON scripts/sim/build_scene_v3.py \
 
 ### 실물
 
-`main_artec.py` 의 `BACKEND = "real"` 로 바꾸고 실행한다. 회전 시간 등 Phase 1 설정은
+`main_artec.py` 의 `BACKEND = "real"` 로 바꾸고 실행한다. 회전 시간 등 lookaround 설정은
 같은 파일 `STREAM_SETTINGS` 에 있고 기본은 `rotation_duration_s = 30.0` 이다.
 
 ```bash
 env -u PYTHONPATH $MMS_PYTHON main_artec.py
 ```
 
-시작 자세는 §4 플래너가 고른다. 끄려면 `phase1_planner_enabled=False`.
+시작 자세는 §4 플래너가 고른다. 끄려면 `lookaround_planner_enabled=False`.
 
-> **첫 실물 테스트는 `phase_mode = 1` 로 5면부터.** Phase 2·3 도, 자세 선정도 실물
+> **첫 실물 테스트는 `stage_until = 1` 로 5면부터.** nbv·flip 도, 자세 선정도 실물
 > 검증 전이다(T7).
 
 ---
@@ -65,7 +65,7 @@ env -u PYTHONPATH $MMS_PYTHON main_artec.py
 ## 2. sim 과 real — 무엇이 같고 무엇이 다른가
 
 판단 로직(자세 선정 §4, 밴드 분할 §5)은 **같은 코드다.** `collect_planning_points` →
-`plan_phase1_viewpoints` → `solve_plan_poses` 를 두 백엔드가 그대로 부르고, 주입하는
+`plan_lookaround_viewpoints` → `solve_plan_poses` 를 두 백엔드가 그대로 부르고, 주입하는
 것은 콜백 세 개(preview 캡처 / 자세 IK / 충돌 게이트)뿐이다. 작업 프레임만 sim=world,
 real=base 로 다르다.
 
@@ -102,7 +102,7 @@ Artec Spider 는 프레임 좌표를 **직전 프레임에 정합해서** 얻는
 
 ## 4. 자세 선정 — 전회전 maximin 채점
 
-`utils/nbv/phase1_viewpoint.py::plan_phase1_viewpoints` (sim·real 공용).
+`utils/nbv/lookaround.py::plan_lookaround_viewpoints` (sim·real 공용).
 
 물체가 도는 동안 로봇은 고정이므로, 자세를 고르는 일은 **360° 전체를 그 자세 하나로
 감당할 수 있는가**를 묻는 일이다. 후보마다 θ 를 36등분해 한 바퀴를 미리 시뮬레이션하고
@@ -143,18 +143,18 @@ score = 2.0 · min(min_fill / 12cm², 1)   ← 최악 프레임 가시면적 (�
 
 한 자세로 높이를 다 못 덮으면 z 방향으로 겹치는 밴드를 나눠 여러 번 돈다.
 
-![밴드 분할 계획](figures/phase1_viewpoint/fig4_bands.png)
+![밴드 분할 계획](figures/lookaround/fig4_bands.png)
 
 **기준은 높이가 아니라 §4 에서 고른 자세의 z-커버율**이다(`< ZCOVER_MIN 0.75` 이면 분할).
 standoff 가 물체 반경에 비례하므로 **가는 물체일수록** 카메라가 가까워 시야가 높이를 못
 덮는다 — 293mm 세제(지름 194)가 2밴드인데 207mm 스프레이캔(지름 68)은 3밴드다.
-`[phase1] z_cover=` 로그로 확인한다.
+`[lookaround] z_cover=` 로그로 확인한다.
 
 밴드 높이는 자세가 실제로 덮은 z 폭으로 잡고 `BAND_OVERLAP = 0.35` 만큼 겹친다. 이 겹침이
 곧 relocalization 성립 조건이다. 순서는 **안전한 것부터**(min_fill 내림차순) — 위험한
 밴드를 나중에 돌면 그때까지 쌓인 모델이 복구의 기준점으로 남는다.
 
-밴드 하나가 실패해도 중단하지 않고 건너뛴다. 도달 못 한 대역은 Phase 2 가 메운다(T3).
+밴드 하나가 실패해도 중단하지 않고 건너뛴다. 도달 못 한 대역은 nbv 가 메운다(T3).
 
 ---
 
@@ -203,9 +203,9 @@ standoff 가 물체 반경에 비례하므로 **가는 물체일수록** 카메�
 않고 preview 한 장만 본다 — 물체로 분류된 점이 **최적거리 225mm 근처 FOV 안에** 얼마나
 모였는지를 `w(d) = exp(−((d−225)/25)²)` 로 가중해 합산한다. 후보는 `[-5°, 0°, +5°]` 로
 줄여 30초 안에 끝낸다. 구현은 `artec_multipass_scan_session.py::_elevation_search`,
-`_phase1_view_score`. 한계는 T6.
+`_lookaround_view_score`. 한계는 T6.
 
-sim 검증은 `sim_harness/MMS_ext_phase1_recovery1.py`(빗나가게 조준 → 점 0 → lost),
+sim 검증은 `sim_harness/MMS_ext_lookaround_recovery1.py`(빗나가게 조준 → 점 0 → lost),
 `recovery2.py`(el 을 낮춰 윗면 grazing → lost) 두 개다. 둘 다 safe-back → 자세 재탐색 →
 재개로 5면을 완성한다.
 
@@ -225,13 +225,13 @@ p_obj = Rz(−θ) · (p_world − axis_point) + axis_point
 ```
 
 θ 가 정확하면(sim 은 GT) 모든 옆면이 정확히 겹쳐 쌓인다. 실물의 SLAM 은 이렇게 검증된
-누적 위에 그대로 올라간다. 하니스는 `sim_harness/MMS_ext_phase1.py`.
+누적 위에 그대로 올라간다. 하니스는 `sim_harness/MMS_ext_lookaround.py`.
 
 Isaac 없이 밴드 계획만 확인하려면:
 
 ```bash
 ~/isaacsim/python.sh scripts/sim/extract_testset_points.py   # 점군 캐시(1회)
-$MMS_PYTHON scripts/sim/validate_phase1_viewpoint.py
+$MMS_PYTHON scripts/sim/validate_lookaround.py
 ```
 
 ---
@@ -239,12 +239,12 @@ $MMS_PYTHON scripts/sim/validate_phase1_viewpoint.py
 ## 9. 코드 지도
 
 ```
-utils/nbv/phase1_viewpoint.py       ★ 자세 선정 전부 (sim·real 공용)
+utils/nbv/lookaround.py       ★ 자세 선정 전부 (sim·real 공용)
     collect_planning_points()           # §4 preview 수집 루프
-    plan_phase1_viewpoints()            # §4 maximin 채점 + §5 밴드 분할
+    plan_lookaround_viewpoints()            # §4 maximin 채점 + §5 밴드 분할
     solve_plan_poses()                  # az 스윕 IK + 충돌 게이트
     crop_object_points / filter_robot_points
-utils/nbv/scan_phase_controller.py  # Phase 1→2→3 순서 (밴드 실패 허용)
+utils/nbv/scan_stage_controller.py  # lookaround→2→3 순서 (밴드 실패 허용)
 
 mms_artec/nbv/artec_streaming_scan_session.py   ★ 실물 streaming SLAM
     TrackingState(watchdog 4종) · TurntableController · run()
@@ -254,8 +254,8 @@ mms_artec/nbv/recovery_pose_selector.py         # 복구용 Spider 광학 상수
 mms_artec/backends/isaac/isaac_turntable.py     # sim 턴테이블 (kinematic 직접 회전)
 utils/turntable/turntable_interface.py          # 실물 턴테이블 (UDP)
 
-scripts/sim/run_e2e_gui.sh · validate_phase1_viewpoint.py
-sim_harness/MMS_ext_phase1{,_recovery1,_recovery2}.py
+scripts/sim/run_e2e_gui.sh · validate_lookaround.py
+sim_harness/MMS_ext_lookaround{,_recovery1,_recovery2}.py
 ```
 
 ---
@@ -271,7 +271,7 @@ sim_harness/MMS_ext_phase1{,_recovery1,_recovery2}.py
 구간에서 socket 이 막힌다.
 
 ### T3. 밴드/자세 관련 회귀 3건 (모두 수정됨)
-- 밴드 하나가 도달 불가하면 즉시 finalize 해서 **Phase 2·3 이 통째로 사라졌다.** 지금은
+- 밴드 하나가 도달 불가하면 즉시 finalize 해서 **nbv·flip 이 통째로 사라졌다.** 지금은
   건너뛰고 계속, 전부 실패했을 때만 포기한다.
 - **충돌 게이트가 밴드 경로에만 없었다.** IK 해가 나오면 충돌을 안 보고 확정해서, 충돌
   없는 다른 az 를 시도조차 못 했다(실측: az 0°는 tool↔link4 4mm 자가충돌, az 30°는 통과).
@@ -302,19 +302,19 @@ az 는 도달성·충돌만 좌우하므로 `solve_plan_poses` 가 스윕한다.
    통과하지만 첫 시도는 비상정지 옆에서 볼 것.
 3. `T_BF0` 가 없으면 플래너가 포기하고 home 고정으로 간다 — 캘리브부터.
 
-막히면 `phase1_planner_enabled=False` 로 예전 동작(home 고정)으로 돌아갈 수 있다.
+막히면 `lookaround_planner_enabled=False` 로 예전 동작(home 고정)으로 돌아갈 수 있다.
 
 ### T8. sim 물체가 회색이거나, 30초 만에 빈 결과로 끝난다
 - **회색** — 텍스처 참조 결손. `UsdPreviewSurface` 는 텍스처가 안 열리면 말없이 회색으로
   렌더한다. 9종 중 8종은 복구했고 `0263_protein_drink` 만 남았다(`2_데이터/README.md`).
-  Phase 1~3 은 형상만 쓰므로 결과에는 영향이 없다.
+  lookaround~3 은 형상만 쓰므로 결과에는 영향이 없다.
 - **빈 결과** — 구 v2 씬(`v2.usd`, `composed/*_on_turntable.usd`)을 쓴 것이다. 카메라·
   턴테이블 prim 경로가 달라 스캔 없이 끝난다. v3 씬만 쓴다(§1).
 
 ### T9. 지켜야 할 규약
 - **연속 회전 + 최대 FPS.** 겹침이 생명이라 각도를 띄엄띄엄 옮기지 않는다.
 - **자세 선정은 sim·real 이 같은 코드.** 한쪽만 고치면 갈라진다 — 백엔드가 아니라
-  `utils/nbv/phase1_viewpoint.py` 를 고친다.
+  `utils/nbv/lookaround.py` 를 고친다.
 - **라이브 뷰어 누적은 SDK 정합행렬만.** θ·hand-eye 를 섞으면 디버깅 가치가 사라진다.
 - **sim 은 SLAM 이 없다.** sim 이 잘 된다고 실물 정합이 잘 된다는 뜻이 아니다.
 - **last-good θ** 는 복구 safe-back 의 유일한 기준이다.

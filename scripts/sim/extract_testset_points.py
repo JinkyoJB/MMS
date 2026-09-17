@@ -3,7 +3,7 @@ extract_testset_points.py — testset 점군 + 씬 상수 캐시 (Isaac headless
 
 물체별 **v3 씬**(`v3_ts_*.usd`, prim=/World/ScanTarget/TestObject)에서 물체 표면
 점군(world, 면적비례 샘플 + 2mm voxel)을 npz 로, 기본 v3 씬(`v3_scene.usd`)에서
-씬 상수(axis_w, disc_top, T_WB, T_EC)를 json 으로 저장한다. 이후 Phase1 viewpoint
+씬 상수(axis_w, disc_top, T_WB, T_EC)를 json 으로 저장한다. 이후 lookaround viewpoint
 검증은 Isaac 없이 오프라인(numpy)으로 빠르게 반복한다.
 
 ★ 구 `testset/composed/*_on_turntable.usd` 는 **v2 레이아웃**이라 카메라·턴테이블

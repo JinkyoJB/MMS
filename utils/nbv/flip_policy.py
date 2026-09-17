@@ -1,4 +1,4 @@
-"""flip_policy.py — Phase 3 flip 각 정책 (sim·real 공용).
+"""flip_policy.py — flip flip 각 정책 (sim·real 공용).
 
 물체 종횡비(키/지름)로 flip 각 목록을 정한다. 근거(2026-08-19, sim GT 대조):
 
@@ -82,7 +82,7 @@ def el_needed_for_face(max_incidence_deg: float) -> float:
 
 
 def describe_flip(angle_deg: float) -> str:
-    """사람 안내 문구 (real Phase 3 프롬프트용)."""
+    """사람 안내 문구 (real flip 프롬프트용)."""
     a = float(angle_deg) % 360.0
     if abs(a - 90.0) < 1e-6 or abs(a - 270.0) < 1e-6:
         return "옆으로 눕혀 주세요 (90° — 긴 축이 수평이 되게)"

@@ -117,7 +117,7 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3
 - rim 이 한 화면에 다 안 들어오면 보이는 호(arc)에서 클릭. 3점이면 되지만 호가 짧으면 정밀도 저하
 - 기준값: **0.015° / 0.7mm**
 
-> ⚠ 현재 저장된 값은 **2026-04-23**, Artec 장착 이전이다. Phase 2 조준·recovery·충돌
+> ⚠ 현재 저장된 값은 **2026-04-23**, Artec 장착 이전이다. nbv 조준·recovery·충돌
 > 회피가 전부 여기 의존하므로 **실물 재개 시 이것부터 다시 잡을 것.**
 
 ---
@@ -146,7 +146,7 @@ env -u PYTHONPATH python scripts/artec/live_scan_view.py
 ### 2.3 턴테이블 단독 조작
 
 ```bash
-env -u PYTHONPATH python scripts/turntable/phase1_speed_rotation.py   # 회전 테스트
+env -u PYTHONPATH python scripts/turntable/lookaround_speed_rotation.py   # 회전 테스트
 env -u PYTHONPATH python scripts/turntable/turntable_stop.py          # 비상 정지
 ```
 
@@ -187,9 +187,9 @@ env -u PYTHONPATH python scripts/artec/main_artec_demo.py
 | `No module named 'omni.usd'` | `sim_harness/` 하니스를 standalone 으로 실행한 것 → Isaac GUI Script Editor 에서 실행 (`1_calibration.md` T6) |
 | `connect socket failed` | 로봇 미도달 → §0 네트워크 확인 |
 | `scan settings import 불가` | Artec SDK python 바인딩 미빌드 → `artec_SDK/artec0_build_guide.md`. sim 은 정상 동작 |
-| 스캔이 자꾸 끊긴다 | 시작 자세가 나쁘다. 물체를 조준한 상태로 시작하고, 그래도 반복되면 recovery 로그의 elevation 을 확인 (`2_phase1.md` §7) |
-| 물체를 치웠는데 계속 스캔됨 | 정합이 `ICP` 로 되어 있을 수 있다 → `HYBRID` 확인 (`2_phase1.md`) |
-| 결과 메시가 어긋남·떠 있음 | 거의 항상 `T_pre` 문제 → `5_phase3_merge.md` |
+| 스캔이 자꾸 끊긴다 | 시작 자세가 나쁘다. 물체를 조준한 상태로 시작하고, 그래도 반복되면 recovery 로그의 elevation 을 확인 (`3_lookaround.md` §7) |
+| 물체를 치웠는데 계속 스캔됨 | 정합이 `ICP` 로 되어 있을 수 있다 → `HYBRID` 확인 (`3_lookaround.md`) |
+| 결과 메시가 어긋남·떠 있음 | 거의 항상 `T_pre` 문제 → `5_flip.md` |
 | 콘솔 이모지 깨짐 | `PYTHONIOENCODING=utf-8` |
 
 > SDK 바인딩 변경 시 재빌드:
@@ -204,10 +204,10 @@ env -u PYTHONPATH python scripts/artec/main_artec_demo.py
 | 무엇 | 어디 |
 |---|---|
 | 캘리브 보드 프리셋·자세 수 | `1_calibration.md` §2·§4 |
-| Phase 1 — 자세 후보, 캡처 밀도, 회전 시간, watchdog 임계 | `2_phase1.md` §1 |
-| Phase 2 — NBV 반복, 거리, 충돌 world 치수, 수렴 임계 | `3_phase2.md` §1 |
-| 충돌 — 안전 여유, 특이점 임계, SDF 격자 | `4_collision.md` §1 |
-| Phase 3 — flip 축·각, pass 상한 | `5_phase3_merge.md` §1 |
+| lookaround — 자세 후보, 캡처 밀도, 회전 시간, watchdog 임계 | `3_lookaround.md` §1 |
+| nbv — NBV 반복, 거리, 충돌 world 치수, 수렴 임계 | `4_nbv.md` §1 |
+| 충돌 — 안전 여유, 특이점 임계, SDF 격자 | `collision.md` §1 |
+| flip — flip 축·각, pass 상한 | `5_flip.md` §1 |
 | 후처리 — 단계별 on/off, fusion 방식 | `6_postprocess.md` §1 |
 
 하드웨어 IP·홈 자세 같은 상수는 `main_artec.py` 상단에 모여 있다.
@@ -220,5 +220,5 @@ env -u PYTHONPATH python scripts/artec/main_artec_demo.py
 |---|---|
 | sim 실행·씬 생성 | `sim_commands.md` |
 | 캘리브 원리·함정 | `1_calibration.md` |
-| Phase 1·2·3 동작 | `2_phase1.md` · `3_phase2.md` · `5_phase3_merge.md` |
+| lookaround·nbv·flip 동작 | `3_lookaround.md` · `4_nbv.md` · `5_flip.md` |
 | 셀 배치·치수 | `hw_layout.md` |

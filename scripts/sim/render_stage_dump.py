@@ -1,8 +1,8 @@
-"""render_stage_dump.py — Phase 2 단계별 메시(MMS_SIM_STAGE_DUMP)를 같은 카메라로 렌더.
+"""render_stage_dump.py — nbv 단계별 메시(MMS_SIM_STAGE_DUMP)를 같은 카메라로 렌더.
 
 각 단계를 **고정 카메라**로 찍는다. 메시마다 bbox 에 맞춰 카메라를 새로 잡으면
 크기·위치가 미묘하게 달라져 "무엇이 나빠졌나"를 눈으로 비교할 수 없다.
-기준 카메라는 첫 단계(=Phase 1 직후) 메시의 bbox 로 한 번만 정한다.
+기준 카메라는 첫 단계(=lookaround 직후) 메시의 bbox 로 한 번만 정한다.
 
     python scripts/sim/render_stage_dump.py --dir scripts/sim/log/stage_dump/hand_drill
 """

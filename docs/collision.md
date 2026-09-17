@@ -1,7 +1,7 @@
 # 충돌 검사와 IK
 
 > 로봇을 어떤 자세로 보낼 수 있는가(IK)와 가는 길에 무엇을 치지 않는가(충돌)를 다룬다.
-> Phase 1 은 로봇이 고정이라 거의 안 걸리지만, **Phase 2 는 매번 자세를 새로 풀고 매번
+> lookaround 은 로봇이 고정이라 거의 안 걸리지만, **nbv 는 매번 자세를 새로 풀고 매번
 > 경로를 검사**하므로 여기가 부실하면 그때 티가 난다.
 >
 > **도달 불가·충돌 판정이 나오면 하드웨어 한계보다 평가 코드를 먼저 의심한다.** 이 셀에서
@@ -12,7 +12,7 @@
 ## 1. 사용법과 설정
 
 검사는 **모든 이동이 지나는 한 곳**에 있다. sim 은 `_drive()`, real 은
-`_move_robot_to_q()` 가 `CollisionModel` 을 부르므로 Phase 1·2·3 이 자동으로 덮인다.
+`_move_robot_to_q()` 가 `CollisionModel` 을 부르므로 lookaround·nbv·flip 이 자동으로 덮인다.
 호출부에서 따로 할 일은 없다.
 
 ```python
@@ -50,7 +50,7 @@ base 프레임으로 굽기 때문에 **sim·real 공용**이다. **실물 셀�
 | `max_query_pts` | 링크당 질의점 상한 | 2500 |
 
 sim 은 앞의 둘을 환경변수로도 받는다 — `MMS_SIM_SELF_CLEAR`, `MMS_SIM_ENV_CLEAR`.
-Phase 2 의 캡슐 world 치수(`nbv_turntable_radius_mm` 등)는 `3_phase2.md` T2 를 본다.
+nbv 의 캡슐 world 치수(`nbv_turntable_radius_mm` 등)는 `4_nbv.md` T2 를 본다.
 
 `min_sigma = 0` 으로 주면 특이점 판정만 끄고 충돌만 본다(평가 스크립트가 그렇게 쓴다).
 
@@ -321,7 +321,7 @@ yaml 을 "아직 CAD 에 반영 안 된 차이 목록"으로 운용하면 **무�
 |---|---|
 | margin 을 올려서 때우기 | 미탐에 안 듣는다 (§6.2-3) |
 | npz 를 지우거나 못 읽는 채로 운전 | `get_default()` 가 `None` 을 돌려주고 **검사가 통째로 skip 된다**(§1). 현장에서 제일 위험한 선택 |
-| 캡슐 world 만 고치고 메시 env 를 안 고치기 | 캡슐(`robot_collision.CollisionWorld`)은 Phase 2 후보 **사전 필터**일 뿐이고 최종 게이트는 메시다(T4). 순서는 캡슐 scene → 메시 env → 메시 self |
+| 캡슐 world 만 고치고 메시 env 를 안 고치기 | 캡슐(`robot_collision.CollisionWorld`)은 nbv 후보 **사전 필터**일 뿐이고 최종 게이트는 메시다(T4). 순서는 캡슐 scene → 메시 env → 메시 self |
 | world 좌표로 yaml 적기 | base 프레임이다. Z 부호가 반대다 (§6.1) |
 
 ### 6.7 한편, 오늘 당장 되는 것 — 턴테이블 쪽은 이미 파라미터다
@@ -349,7 +349,7 @@ world 는 `T_B_F0`(캘리브 결과) + 설정값으로 매번 새로 만든다
 ```
 utils/collision/collision_model.py   ★ 단일 게이트 (clearance/is_pose_safe/is_path_safe)
 utils/collision/mesh_sampling.py     # 삼각형 면적비례 표면 샘플링 (T3)
-utils/collision/robot_collision.py   # 캡슐 world + swept_pose_collision (Phase 2 후보 필터)
+utils/collision/robot_collision.py   # 캡슐 world + swept_pose_collision (nbv 후보 필터)
 utils/collision/data/*.npz           # 링크·셀 점군 캐시 (base 프레임, sim·real 공용)
 utils/collision/env_patch.py         # 〔미구현 §6.3〕 실측 프리미티브 yaml → 점군
 config/cell_env_patch.yaml           # 〔미구현 §6.3〕 CAD 와 실물의 차이 목록
@@ -403,7 +403,7 @@ CAD 압출·판재는 정점이 모서리에만 있다. `GetPointsAttr()` 만 �
 링크 캡슐이 관절 원점을 잇는 직선이라 꺾인 link4 를 덮으면 빈 공간까지 침범한다.
 **실측: 캡슐 축간 58mm 로 "충돌"인데 실제 메시 거리는 93mm.**
 
-Phase 2 후보 필터의 캡슐 world 는 과대평가(안전 방향)라 그대로 두고 메시 검사를
+nbv 후보 필터의 캡슐 world 는 과대평가(안전 방향)라 그대로 두고 메시 검사를
 **추가**했다. 순서는 캡슐 scene → 메시 env → 메시 self 다.
 
 ### T5. `start` 거부 연쇄 — 명령각 vs 실측각

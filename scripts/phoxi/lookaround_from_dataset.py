@@ -1,17 +1,17 @@
 #!/usr/bin/env python
-# scripts/phase1_from_dataset.py
+# scripts/lookaround_from_dataset.py
 #
 # 저장된 dataset 을 live PhoXi 대신 `PhoxiDatasetReplay` 로 사용해
 # **ScanSession** 을 그대로 실행.
 #
-# Phase 1 로직은 `mms/nbv/scan_session.py::_rule_based_scan` 에 있고
+# lookaround 로직은 `mms/nbv/scan_session.py::_rule_based_scan` 에 있고
 # 이 스크립트는 단순 wrapper 역할만 — 중복 로직 없음.
 #
 # 사용
 # ----
-#   python scripts/phase1_from_dataset.py --dataset datasets/phoxi_20260424_141529
-#   python scripts/phase1_from_dataset.py --dataset ... --no-icp
-#   python scripts/phase1_from_dataset.py --dataset ... --poisson both
+#   python scripts/lookaround_from_dataset.py --dataset datasets/phoxi_20260424_141529
+#   python scripts/lookaround_from_dataset.py --dataset ... --no-icp
+#   python scripts/lookaround_from_dataset.py --dataset ... --poisson both
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _resolve_dataset(arg: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Dataset 으로 Phase 1 실행 (ScanSession offline)"
+        description="Dataset 으로 lookaround 실행 (ScanSession offline)"
     )
     parser.add_argument("--dataset", required=True,
                         help="datasets/<session> 경로")
@@ -91,8 +91,8 @@ def main() -> None:
     if not (he.exists() and tt.exists()):
         sys.exit(f"calibration 파일 없음: {calib}")
 
-    print(f"[phase1] dataset    = {dataset_path}")
-    print(f"[phase1] output dir = {out_dir}")
+    print(f"[lookaround] dataset    = {dataset_path}")
+    print(f"[lookaround] output dir = {out_dir}")
 
     # ── MMS 구성 (dataset 의 calibration yaml 로) ──────────────────────
     cfg = MMSConfig(
@@ -106,22 +106,22 @@ def main() -> None:
     replay = PhoxiDatasetReplay(PhoxiDatasetConfig(dataset_dir=str(dataset_path)))
     mms.sensor = replay
 
-    # ── Phase 1 settings — ScanSessionSettings 그대로 사용 ────────────
+    # ── lookaround settings — ScanSessionSettings 그대로 사용 ────────────
     settings = ScanSessionSettings(
         # voxel
         tsdf_voxel_length = args.voxel,
         tsdf_depth_trunc  = args.depth_trunc,
 
-        # Phase 1
-        phase1_enabled           = True,
-        phase1_show_progress     = args.show_progress,
-        phase1_wait_window_close = True,
-        phase1_icp_refine        = args.icp_refine,
-        phase1_poisson_backend   = args.poisson,
+        # lookaround
+        lookaround_enabled           = True,
+        lookaround_show_progress     = args.show_progress,
+        lookaround_wait_window_close = True,
+        lookaround_icp_refine        = args.icp_refine,
+        lookaround_poisson_backend   = args.poisson,
 
         # Export
-        phase1_export_pcd_path   = str(out_dir / "phase1_merged.ply"),
-        phase1_export_mesh_path  = str(out_dir / "phase1_mesh.ply"),
+        lookaround_export_pcd_path   = str(out_dir / "lookaround_merged.ply"),
+        lookaround_export_mesh_path  = str(out_dir / "lookaround_mesh.ply"),
 
         # ICP gate
         icp_max_correspondence_m = args.icp_max_corr,
@@ -130,8 +130,8 @@ def main() -> None:
         icp_drift_trans_m        = args.icp_drift_trans,
         icp_drift_rot_deg        = args.icp_drift_rot,
 
-        # Offline 에서는 Phase 2 / confirm 불필요
-        phase2_enabled       = False,
+        # Offline 에서는 nbv / confirm 불필요
+        nbv_enabled       = False,
         confirm_each_move    = False,
     )
 
@@ -145,7 +145,7 @@ def main() -> None:
         session.run()
 
     n = len(session.state.T_CO_list)
-    print(f"\n[phase1] 완료 — {n} 프레임 통합  outputs in {out_dir}")
+    print(f"\n[lookaround] 완료 — {n} 프레임 통합  outputs in {out_dir}")
 
 
 if __name__ == "__main__":

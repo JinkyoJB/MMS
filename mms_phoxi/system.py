@@ -310,7 +310,7 @@ class MMS:
         return batch
 
     # MMS.preprocess(...) 는 제거됨.
-    # Phase 1 (scan_session) 은 센서 원본(_last_organized_pts)을 직접 사용하며,
+    # lookaround (scan_session) 은 센서 원본(_last_organized_pts)을 직접 사용하며,
     # 모든 cleanup 은 PcdAccumulateVolume 내부에서 옵션으로 처리한다.
 
     # ── buffer management ──────────────────────────────────────────────────

@@ -10,7 +10,7 @@ headless 에서도 동작한다. 씬에 관찰 카메라를 만들고 replicator
     MMS_SIM_REC_FPS=30                 출력 fps
     MMS_SIM_REC_ORBIT=1                턴테이블처럼 카메라를 천천히 선회
 
-Phase 마다 파일이 나뉜다(`Phase_1.mp4` …). 종료 시 전체본도 만든다.
+단계마다 파일이 나뉜다(`Phase_1.mp4` …). 종료 시 전체본도 만든다.
 
 ⚠ 스캐너 카메라(annotator)와 별개 자원이다. 스캐너 렌더 프로덕트를 재사용하면
   캡처 해상도가 바뀌어 스캔 결과가 달라진다.
@@ -36,7 +36,7 @@ OUT_DIR  = os.environ.get("MMS_SIM_REC_DIR", "scripts/sim/log/rec")
 EVERY    = int(_envf("MMS_SIM_REC_EVERY", 3))
 FPS      = int(_envf("MMS_SIM_REC_FPS", 30))
 ORBIT    = os.environ.get("MMS_SIM_REC_ORBIT", "0") == "1"
-# 1 이면 Phase 마다 파일 분리, 0 이면 전체를 한 파일로 (자료용 기본)
+# 1 이면 단계마다 파일 분리, 0 이면 전체를 한 파일로 (자료용 기본)
 SPLIT    = os.environ.get("MMS_SIM_REC_SPLIT", "0") == "1"
 ORBIT_DEG_PER_FRAME = _envf("MMS_SIM_REC_ORBIT_SPEED", 0.15)
 RES = tuple(int(x) for x in os.environ.get("MMS_SIM_REC_RES", "1280,720").split(",")[:2])
@@ -130,7 +130,7 @@ class Recorder:
     def begin(self, label: str):
         """새 구간 시작. 직전 구간이 있으면 먼저 인코딩한다.
 
-        Phase 마다 파일을 나누면 자료로 쓸 때 필요한 구간만 골라 넣을 수 있고,
+        단계마다 파일을 나누면 자료로 쓸 때 필요한 구간만 골라 넣을 수 있고,
         한 파일이 지나치게 길어지지 않는다.
         """
         if not self.ok:

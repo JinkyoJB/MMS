@@ -1,15 +1,15 @@
 #!/usr/bin/env python
-# scripts/turntable/phase1_speed_rotation.py
+# scripts/turntable/lookaround_speed_rotation.py
 #
-# Phase 1 과 동일한 속도(rotation_duration_s=30s, vel=2π/30 rad/s)로
+# lookaround 과 동일한 속도(rotation_duration_s=30s, vel=2π/30 rad/s)로
 # 턴테이블을 한 바퀴(+overshoot) 회전시키는 standalone 스크립트.
 #
 # 용도: Artec Studio 의 Recording 을 띄워둔 채로 이 스크립트를 실행하면,
-# Phase 1 과 똑같은 회전 조건에서 Studio 의 'tracking lost' 검출 동작을
+# lookaround 과 똑같은 회전 조건에서 Studio 의 'tracking lost' 검출 동작을
 # 비교 확인할 수 있음. 회전 중 손으로 아이템을 가리거나 빼서 Studio 가
 # tracking lost 를 잡는지 테스트.
 #
-# 실행: python scripts/turntable/phase1_speed_rotation.py
+# 실행: python scripts/turntable/lookaround_speed_rotation.py
 # 중단: Ctrl+C — 즉시 stop() + servo OFF + disconnect.
 
 import sys
@@ -27,7 +27,7 @@ from utils.turntable import Turntable
 TURNTABLE_IP    = "192.168.0.10"
 TURNTABLE_BD_ID = 0
 
-# ── Phase 1 과 동일 회전 파라미터 (main_artec.py 와 일치) ──────────────
+# ── lookaround 과 동일 회전 파라미터 (main_artec.py 와 일치) ──────────────
 ROTATION_DURATION_S    = 30.0       # 360° 한 바퀴 기대 시간
 ROTATION_OVERSHOOT_DEG = 5.0        # 마지막 frame 보장용 여유
 ACCEL_DEG_S2           = 180.0      # 가속도/감속도
@@ -93,7 +93,7 @@ def main() -> None:
     vel_deg_s   = np.degrees(vel_rad_s)
     target_deg  = np.degrees(target_rad)
 
-    print("═══════════════ Phase1-speed turntable test ═══════════════")
+    print("═══════════════ lookaround-speed turntable test ═══════════════")
     print(f"  rotation_duration_s : {ROTATION_DURATION_S:.1f}")
     print(f"  vel                 : {vel_deg_s:.2f} °/s ({vel_rad_s:.4f} rad/s)")
     print(f"  target              : {target_deg:.1f}° (overshoot {ROTATION_OVERSHOOT_DEG}°)")

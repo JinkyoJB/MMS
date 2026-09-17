@@ -90,23 +90,23 @@ class ScanSessionSettings:
     boundary_length_stop: float = 0.01
 
     # Phase 제어
-    phase1_enabled: bool = True                 # rule-based 15° × 360° 회전 스캔
-    phase1_theta_step_deg: float = 15.0
-    phase1_dwell_s: float = 0.40                # 턴테이블 정지 후 캡처 전 대기 (기계 settling)
-    phase1_show_progress: bool = True           # non-blocking TSDF 뷰어
-    phase1_wait_window_close: bool = True       # Phase 1 완료 후 창 닫힐 때까지 대기
+    lookaround_enabled: bool = True                 # rule-based 15° × 360° 회전 스캔
+    lookaround_theta_step_deg: float = 15.0
+    lookaround_dwell_s: float = 0.40                # 턴테이블 정지 후 캡처 전 대기 (기계 settling)
+    lookaround_show_progress: bool = True           # non-blocking TSDF 뷰어
+    lookaround_wait_window_close: bool = True       # lookaround 완료 후 창 닫힐 때까지 대기
 
-    # Phase 1 incremental ICP refinement — 2번째 프레임부터
-    phase1_icp_refine: bool = True
-    phase1_icp_sor_nb: int = 20                 # denoise (statistical outlier) 이웃 수
-    phase1_icp_sor_std: float = 2.0             # denoise std ratio
+    # lookaround incremental ICP refinement — 2번째 프레임부터
+    lookaround_icp_refine: bool = True
+    lookaround_icp_sor_nb: int = 20                 # denoise (statistical outlier) 이웃 수
+    lookaround_icp_sor_std: float = 2.0             # denoise std ratio
 
-    # Phase 1 종료 후 mesh/pcd 덤프 (Photoneo / CloudCompare 비교용)
-    phase1_export_pcd_path: Optional[str] = None        # "output/phase1_merged.ply" 등
-    phase1_export_mesh_path: Optional[str] = None       # "output/phase1_mesh.ply"
-    phase1_poisson_backend: str = "open3d"              # "open3d" | "photoneo_exe" | "both"
+    # lookaround 종료 후 mesh/pcd 덤프 (Photoneo / CloudCompare 비교용)
+    lookaround_export_pcd_path: Optional[str] = None        # "output/lookaround_merged.ply" 등
+    lookaround_export_mesh_path: Optional[str] = None       # "output/lookaround_mesh.ply"
+    lookaround_poisson_backend: str = "open3d"              # "open3d" | "photoneo_exe" | "both"
 
-    phase2_enabled: bool = True                 # frontier NBV (Phase 2)
+    nbv_enabled: bool = True                 # frontier NBV (nbv)
 
     # 기타
     confirm_each_move: bool = True
@@ -231,7 +231,7 @@ class ScanSession:
                 print("  ⚠ move_abs 명령 거부됨 — skip.")
                 return None
             self.turntable.wait_motion_done()
-        time.sleep(float(s.phase1_dwell_s))
+        time.sleep(float(s.lookaround_dwell_s))
 
         theta_act = self._read_theta(fallback=float(theta_target_rad))
         if abs(theta_act - theta_target_rad) > np.radians(2.0):
@@ -336,24 +336,24 @@ class ScanSession:
     def run(self) -> None:
         self._prepare()
 
-        # Phase 1 — rule-based 15° × 360° 턴테이블 회전 스캔
-        if self.settings.phase1_enabled:
+        # lookaround — rule-based 15° × 360° 턴테이블 회전 스캔
+        if self.settings.lookaround_enabled:
             self._rule_based_scan()
         else:
             self._frame0()
 
-        # Phase 2 — frontier NBV 루프 (offline 에서는 실행 불가 — 로봇/턴테이블 필요)
-        if self.settings.phase2_enabled:
+        # nbv — frontier NBV 루프 (offline 에서는 실행 불가 — 로봇/턴테이블 필요)
+        if self.settings.nbv_enabled:
             if self.is_offline:
-                print("\n[ScanSession] Phase 2 skip — offline 모드에서는 "
+                print("\n[ScanSession] nbv skip — offline 모드에서는 "
                       "실제 로봇/턴테이블 이동이 불가능합니다.")
             else:
-                print("\n═══════════════ Phase 2 — Frontier NBV ═══════════════")
+                print("\n═══════════════ nbv — Frontier NBV ═══════════════")
                 for _ in range(self.settings.K_max):
                     if not self._step():
                         break
                     if self._terminate():
-                        print("[ScanSession] 종료 조건 충족 — Phase 2 루프 종료.")
+                        print("[ScanSession] 종료 조건 충족 — nbv 루프 종료.")
                         break
 
         print(f"[ScanSession] 완료  총 {len(self.state.T_CO_list)} 프레임 적분됨.")
@@ -412,20 +412,20 @@ class ScanSession:
         print(f"[ScanSession] M_0: verts={len(mesh_0.vertices)} "
               f"tris={len(mesh_0.triangles)}  area={area*1e4:.1f} cm²")
 
-    # ── Phase 1: rule-based 턴테이블 회전 스캔 (15° × 24) ─────────────
+    # ── lookaround: rule-based 턴테이블 회전 스캔 (15° × 24) ─────────────
 
     def _rule_based_scan(self) -> None:
         """
-        scan_start 자세 고정 + 턴테이블을 `phase1_theta_step_deg` 간격으로 360°
+        scan_start 자세 고정 + 턴테이블을 `lookaround_theta_step_deg` 간격으로 360°
         회전하며 각 각도에서 캡처·TSDF integrate.
 
         ICP 미사용 — 턴테이블 엔코더 + hand-eye + FK 로 계산한 `T_CO` 를 그대로
         사용 (기계적 회전이므로 θ 가 정확히 알려져 있음).
 
-        `phase1_show_progress=True` 면 매 프레임 non-blocking 뷰어에 누적 mesh 갱신.
+        `lookaround_show_progress=True` 면 매 프레임 non-blocking 뷰어에 누적 mesh 갱신.
         """
         s = self.settings
-        step = np.radians(float(s.phase1_theta_step_deg))
+        step = np.radians(float(s.lookaround_theta_step_deg))
         n = int(round(2.0 * np.pi / step))
         # offline 에서는 dataset 의 실제 프레임 수로 cap
         if self.is_offline:
@@ -436,21 +436,21 @@ class ScanSession:
                 n = n_available
         thetas = [i * step for i in range(n)]
 
-        print(f"\n═══════════════ Phase 1 — Rule-based {n} frames ═══════════════")
-        print(f"  θ step = {s.phase1_theta_step_deg:.1f}°  "
+        print(f"\n═══════════════ lookaround — Rule-based {n} frames ═══════════════")
+        print(f"  θ step = {s.lookaround_theta_step_deg:.1f}°  "
               f"turntable_vel = {np.degrees(s.turntable_vel_rad_s):.1f}°/s  "
-              f"dwell = {s.phase1_dwell_s:.2f}s  "
+              f"dwell = {s.lookaround_dwell_s:.2f}s  "
               f"voxel = {s.tsdf_voxel_length*1000:.1f}mm")
 
         vis: Optional[ProgressVisualizer] = None
-        if s.phase1_show_progress:
+        if s.lookaround_show_progress:
             vis = ProgressVisualizer(
-                window_title=f"Phase 1 — TSDF progress ({n} frames)",
+                window_title=f"lookaround — TSDF progress ({n} frames)",
             )
 
         try:
             for i, theta_tgt in enumerate(thetas):
-                print(f"\n─── Phase 1 [{i+1}/{n}] θ_target = "
+                print(f"\n─── lookaround [{i+1}/{n}] θ_target = "
                       f"{np.degrees(theta_tgt):+.1f}° ───")
 
                 # 프레임 컨텍스트 — live 에서는 turntable+robot+capture, offline 은 replay
@@ -471,7 +471,7 @@ class ScanSession:
                 # ICP refinement — 2번째 프레임(i>=1)부터,
                 #   pcd_accumulate backend 에서만 (누적 pcd 를 target 으로 씀).
                 use_icp = (
-                    s.phase1_icp_refine and i >= 1 and
+                    s.lookaround_icp_refine and i >= 1 and
                     isinstance(self._volume, PcdAccumulateVolume)
                 )
                 if use_icp:
@@ -485,15 +485,15 @@ class ScanSession:
                         source_pcd = source_pcd.voxel_down_sample(s.tsdf_voxel_length)
                         try:
                             source_pcd, _ = source_pcd.remove_statistical_outlier(
-                                nb_neighbors=s.phase1_icp_sor_nb,
-                                std_ratio=s.phase1_icp_sor_std,
+                                nb_neighbors=s.lookaround_icp_sor_nb,
+                                std_ratio=s.lookaround_icp_sor_std,
                             )
                         except Exception:
                             pass
                         try:
                             target_pcd, _ = target_pcd.remove_statistical_outlier(
-                                nb_neighbors=s.phase1_icp_sor_nb,
-                                std_ratio=s.phase1_icp_sor_std,
+                                nb_neighbors=s.lookaround_icp_sor_nb,
+                                std_ratio=s.lookaround_icp_sor_std,
                             )
                         except Exception:
                             pass
@@ -529,7 +529,7 @@ class ScanSession:
                 self.state.step = i
 
                 if is_pcd:
-                    # 빠른 path — 누적 pcd 만 계산. Poisson 은 Phase 1 끝에 한 번.
+                    # 빠른 path — 누적 pcd 만 계산. Poisson 은 lookaround 끝에 한 번.
                     pcd_merged = self._volume.merged_pcd()
                     n_pts = len(pcd_merged.points)
                     self.state.surface_areas.append(float(n_pts))   # 대용 지표
@@ -551,28 +551,28 @@ class ScanSession:
                         vis.update_mesh(mesh)
                         vis.update_camera_trajectory(self.state.T_CO_list)
 
-            # Phase 1 loop 종료 — pcd_accumulate backend 면 덤프 + Poisson
+            # lookaround loop 종료 — pcd_accumulate backend 면 덤프 + Poisson
             if isinstance(self._volume, PcdAccumulateVolume):
-                print(f"\n[Phase 1] {self._volume.n_integrated} 프레임 누적 완료.")
+                print(f"\n[lookaround] {self._volume.n_integrated} 프레임 누적 완료.")
 
                 # PCD 덤프 (비교용)
-                if s.phase1_export_pcd_path:
+                if s.lookaround_export_pcd_path:
                     self._volume.save_pcd(
-                        path=s.phase1_export_pcd_path,
+                        path=s.lookaround_export_pcd_path,
                         with_normals=True,
                     )
 
-                backend = (s.phase1_poisson_backend or "open3d").lower()
+                backend = (s.lookaround_poisson_backend or "open3d").lower()
                 mesh_out = None
 
                 if backend in ("open3d", "both"):
-                    print("[Phase 1] Open3D Poisson 생성 중...")
+                    print("[lookaround] Open3D Poisson 생성 중...")
                     mesh_o = self._volume.extract_mesh(verbose=True)
                     print(f"  [open3d] verts={len(mesh_o.vertices):,}  "
                           f"tris={len(mesh_o.triangles):,}  "
                           f"has_colors={mesh_o.has_vertex_colors()}")
-                    if s.phase1_export_mesh_path:
-                        path = s.phase1_export_mesh_path
+                    if s.lookaround_export_mesh_path:
+                        path = s.lookaround_export_mesh_path
                         if backend == "both":
                             path = str(Path(path).with_stem(Path(path).stem + "_open3d"))
                         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -599,12 +599,12 @@ class ScanSession:
 
                 if backend in ("photoneo_exe", "both"):
                     try:
-                        print("[Phase 1] Photoneo PoissonRecon.exe 실행 중...")
+                        print("[lookaround] Photoneo PoissonRecon.exe 실행 중...")
                         mesh_p = self._volume.extract_mesh_photoneo(verbose=True)
                         print(f"  [photoneo] verts={len(mesh_p.vertices):,}  "
                               f"tris={len(mesh_p.triangles):,}")
-                        if s.phase1_export_mesh_path:
-                            path = s.phase1_export_mesh_path
+                        if s.lookaround_export_mesh_path:
+                            path = s.lookaround_export_mesh_path
                             if backend == "both":
                                 path = str(Path(path).with_stem(Path(path).stem + "_photoneo"))
                             Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -628,8 +628,8 @@ class ScanSession:
                     vis.update_mesh(mesh_out)
         finally:
             if vis is not None:
-                if self.settings.phase1_wait_window_close:
-                    print("\n[Phase 1] 완료. 뷰어 창 닫으면 Phase 2 진행.")
+                if self.settings.lookaround_wait_window_close:
+                    print("\n[lookaround] 완료. 뷰어 창 닫으면 nbv 진행.")
                     vis.run_until_closed()
                 else:
                     vis.close()

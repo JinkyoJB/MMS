@@ -12,7 +12,7 @@ real 에 올린 것이다. 기준점만 다르게 잡는다.
 왜 셀 모델을 기준으로 잡나
 --------------------------
 보드는 턴테이블 원판 위에 놓인다. 그리고 원판이 base 어디 있는지는 **실측 셀 모델이
-이미 안다**(`utils/collision/data/cell_env.npz`, `4_collision.md` §6). 이 값은
+이미 안다**(`utils/collision/data/cell_env.npz`, `collision.md` §6). 이 값은
 `T_EC` 와 완전히 독립이라, **지금 구하려는 값에 의존하지 않고** 자세를 만들 수 있다.
 
 생성 후 **해석 IK + 충돌 게이트**로 거른다. 2026-09-15 FK 재교정으로 해석 모델이
@@ -91,7 +91,7 @@ STANDOFF_M = 0.32
 def find_disc(npz: Path, hint_xy=None, band=(0.55, 1.05)):
     """셀 점군에서 **턴테이블 원판 상면**을 찾아 (center, normal, radius) 반환.
 
-    base 프레임은 천장 마운트라 **+Z 가 아래**다(`4_collision.md` §6.1). 그래서
+    base 프레임은 천장 마운트라 **+Z 가 아래**다(`collision.md` §6.1). 그래서
     '상면' = 그 덩어리에서 z 가 **가장 작은** 쪽이다. 여기서 부호를 틀리면 반구가
     바닥을 향한다.
     """
@@ -137,7 +137,7 @@ def find_disc(npz: Path, hint_xy=None, band=(0.55, 1.05)):
 
     if hint_xy is None:
         # ★ 자동으로 고르지 않는다. 셀 점군은 부재 이름이 전부 'mesh' 라
-        #   (4_collision.md §6.1) 무엇이 턴테이블인지 데이터만으론 구별할 수 없다.
+        #   (collision.md §6.1) 무엇이 턴테이블인지 데이터만으론 구별할 수 없다.
         #   실측에서 자동 선택이 **키보드**를 집은 적이 있다.
         print("\n  원판 후보 (base 프레임):")
         for n_pts, z0, c, r95 in uniq[:8]:
@@ -369,7 +369,7 @@ def main() -> int:
     #   곱한다. 그런데 `T_EC_artec` 는 hand-eye 와 짝인 **OpenCV 규약**(광축 = +Z)이다.
     #   그대로 넣으면 실제 카메라가 타깃을 **정확히 180° 등지고** 선다(실측 확인).
     #   sim 은 T_EC_gt 가 USD 규약이라 이 문제가 없었다 — real 로 올리며 드러난 것.
-    #   두 규약 차이는 카메라 로컬 Y축 180° 회전 하나뿐이다(`4_collision.md` §3).
+    #   두 규약 차이는 카메라 로컬 Y축 180° 회전 하나뿐이다(`collision.md` §3).
     T_EC_usd = vp.FLIP_USD_TO_CV @ T_EC
     # `generate_hemisphere_poses` 는 roll·거리를 `k % len` 으로 **순환**시킨다 —
     # (polar, az) 하나당 roll 이 하나뿐이다. 게이트에서 절반 넘게 걸러지면 남는 게

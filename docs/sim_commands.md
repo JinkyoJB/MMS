@@ -158,10 +158,10 @@ env -u PYTHONPATH MMS_ISAAC_HEADLESS=1 MMS_SIM_NO_VIZ=1 PYTHONUNBUFFERED=1 \
     $ISAAC -u main_artec.py                                                     # 헤드리스
 ```
 
-phase 는 `main_artec.py::MULTIPASS_SETTINGS.phase_mode` 를 따른다(1=Phase1 / 2=+NBV /
+phase 는 `main_artec.py::MULTIPASS_SETTINGS.stage_until` 를 따른다(1=lookaround / 2=+NBV /
 3=+바닥면 flip). 환경변수로 override 가능:
 ```bash
-MMS_SIM_PHASE_MODE=1     # 스윕 스크립트용 override
+MMS_SIM_STAGE_UNTIL=1     # 스윕 스크립트용 override
 MMS_SIM_NTHETA=8         # 회전 프레임 수(기본 240 = MMS_SIM_FRAMES_PER_REV) — 빠른 확인용
 MMS_SIM_DRIVE_STEPS=6
 MMS_SIM_USD=<usd>        # 씬 override
@@ -179,9 +179,9 @@ mms_testset_dir         # 대상물 USD 트리
 env -u PYTHONPATH $U2 scripts/sim/build_scene_v3.py --dir "$(mms_v3_dir)" \
     --out v3_ts_<이름>.usd --object "$(mms_testset_dir)/<이름>.usd"
 
-# Phase 1 만 가볍게 9종 순회
+# lookaround 만 가볍게 9종 순회
 scripts/sim/e2e_sweep.sh
-# 9종 전체 Phase 1→2→3 스윕 (물체당 ~5분, summary.tsv 생성)
+# 9종 전체 lookaround→2→3 스윕 (물체당 ~5분, summary.tsv 생성)
 scripts/sim/testset_sweep.sh              # 전체
 scripts/sim/testset_sweep.sh 0146_mug     # 특정 물체만
 ```
@@ -205,7 +205,7 @@ python scripts/sim/build_results_page.py   # docs/testset_results.md 의 웹판 
 |---|---|---|
 | `MMS_SIM_PROFILE_EVERY` | 20 | N프레임마다 단계별 소요시간 (0=끔) |
 | `MMS_SIM_ICP_DEBUG` | 0 | ICP 스케일별 fitness/drift 출력 |
-| `MMS_SIM_STAGE_DUMP` | — | Phase2 반복마다 메시+누적점군 덤프 dir |
+| `MMS_SIM_STAGE_DUMP` | — | nbv 반복마다 메시+누적점군 덤프 dir |
 | `MMS_SIM_CONV_NEW_EPS` / `_N` | 0.005 / 3 | 전역 수렴 백스톱 (신규복셀 비율/연속횟수) |
 | `MMS_SIM_DRY_EPS` | 0.015 | gap 패치 생산성 판정 (dry 회계) |
 | `MMS_SIM_FLIP_ASPECT` | 2.0 | 세장형(90° flip 추가) 종횡비 임계 |

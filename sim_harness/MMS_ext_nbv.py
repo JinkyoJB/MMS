@@ -1,29 +1,29 @@
 """
-MMS Phase 1 → Phase 2 시뮬레이션 (부족면 NBV 보강) - Isaac Sim 5.1.0 (Extension)
+MMS lookaround → nbv 시뮬레이션 (부족면 NBV 보강) - Isaac Sim 5.1.0 (Extension)
 
 목적
 ----
-Phase 1(5면 GT 누적) → **Phase 2(부족면 NBV 보강)** 를 sim 에서 end-to-end 검증.
-docs/3_phase2.md. Phase 1 은 MMS_ext_phase1.py 와 동일(턴테이블 회전·로봇 고정·−θ 누적).
+lookaround(5면 GT 누적) → **nbv(부족면 NBV 보강)** 를 sim 에서 end-to-end 검증.
+docs/4_nbv.md. lookaround 은 MMS_ext_lookaround.py 와 동일(턴테이블 회전·로봇 고정·−θ 누적).
 
 ★ "특정 위치에서 부분적으로 스캔 안되는 환경" = **입사각(incidence) 필터**.
-   구조광 스캐너는 표면을 grazing(스침)으로 보면 실패한다. Phase 1 은 로봇이 **낮은
+   구조광 스캐너는 표면을 grazing(스침)으로 보면 실패한다. lookaround 은 로봇이 **낮은
    측면 자세**로 고정 → **윗면**을 grazing 으로만 봄 → 윗면 점이 안 쌓임 = **윗면 gap**.
    (옆면은 정면으로 보여 잘 쌓임.) 이 gap 은 viewpoint 의존 — 로봇을 들어올려 내려다보면 잡힌다.
 
 흐름
 ----
 0. 로봇 낮은 측면 자세 고정, 대상물 box 세움.
-1. [Phase 1] 턴테이블 θ 회전(0..350°,10°) → 캡처 → **입사각 필터** → −θ 누적. 옆면 4 OK, 윗면 gap.
-2. [Phase 1 판정] 윗면 점 희박(gap) 확인.
-3. [Phase 2] 누적점에서 **윗면 gap 검출** → **NBV 포즈**(들어올려 내려다봄) 후보 생성 →
+1. [lookaround] 턴테이블 θ 회전(0..350°,10°) → 캡처 → **입사각 필터** → −θ 누적. 옆면 4 OK, 윗면 gap.
+2. [lookaround 판정] 윗면 점 희박(gap) 확인.
+3. [nbv] 누적점에서 **윗면 gap 검출** → **NBV 포즈**(들어올려 내려다봄) 후보 생성 →
    **해석 IK + 궤적(swept) 충돌검사** 통과 + **관절이동 최소** 자세 선택 → 로봇 이동.
-4. [Phase 2 캡처] 윗면을 정면(낮은 입사각)으로 봄 → 윗면 점 누적 = **gap 메움**.
-5. [Phase 2 판정] 윗면 점 급증 → PASS.
+4. [nbv 캡처] 윗면을 정면(낮은 입사각)으로 봄 → 윗면 점 누적 = **gap 메움**.
+5. [nbv 판정] 윗면 점 급증 → PASS.
 
 자기완결 모듈(kin, geo)만 로드(Isaac utils 충돌 회피). 입사각필터·gap검출·NBV·swept충돌은
-인라인(프로덕션 = utils/nbv/phase2_nbv.py + robot_collision.swept_pose_collision, 별도 단위검증).
-실행: VSCode Isaac 확장/Script Editor. 결과 → captures_phase2_nbv/.
+인라인(프로덕션 = utils/nbv/nbv_core.py + robot_collision.swept_pose_collision, 별도 단위검증).
+실행: VSCode Isaac 확장/Script Editor. 결과 → captures_nbv/.
 """
 
 import os
@@ -95,7 +95,7 @@ try:
     _HAS_CORE = True
 except Exception as _e:
     _HAS_CORE = False
-    print(f"[PHASE2][WARN] MMS 코어 로드 실패: {_e}")
+    print(f"[NBV][WARN] MMS 코어 로드 실패: {_e}")
 
 try:
     from isaacsim.util.debug_draw import _debug_draw
@@ -113,7 +113,7 @@ SCANNER_PRIM = "/World/xarm7/link7/Artec_Space_Spider_mm"     # 자가충돌용 
 LINK7_PRIM   = "/World/xarm7/link7"
 MARBLE_PRIM_PATH = os.environ.get("MMS_SIM_OBJECT_PRIM", "/World/ScanTarget/TestObject")
 TURNTABLE_MESH = "/World/frame/turntable_disc"
-OBJ_PATH     = "/World/Phase2Object"
+OBJ_PATH     = "/World/nbvObject"
 
 INITIAL_JOINT_POS = {f"joint{i}": 0.0 for i in range(1, 8)}
 
@@ -122,7 +122,7 @@ SPIDER_FOCUS_DISTANCE, SCANNER_RESOLUTION = 0.25, (1280, 960)
 ROBOT_IP, USE_XARM_SDK = "192.168.1.210", False
 ARTEC_HOME_JOINTS_DEG = [38.92, -48.70, -65.29, 21.22, 21.46, 72.70, -96.58]
 
-# Phase 1 측면 관측 — elevation 30°(팔 덜 뻗음=중력토크↓, 진동 억제). 윗면 gap 은
+# lookaround 측면 관측 — elevation 30°(팔 덜 뻗음=중력토크↓, 진동 억제). 윗면 gap 은
 # 입사각 임계(아래)로 유도하므로 굳이 더 낮출 필요 없음. 도달 가능 azimuth 채택.
 VIEW_EL_DEG    = 30.0
 VIEW_STANDOFF  = 0.26
@@ -133,7 +133,7 @@ VOXEL_M        = 0.002
 # el=30° 에서 윗면(≈60° 입사) 은 버리고 측면(≈30°) 은 살리도록 50° 로.
 MAX_INCIDENCE_DEG = 50.0
 
-# Phase 2 NBV — 윗면 gap 을 **옆에서 비스듬히** 내려다봄. 곧장 위로 뻗는 무리한(특이점/접촉)
+# nbv NBV — 윗면 gap 을 **옆에서 비스듬히** 내려다봄. 곧장 위로 뻗는 무리한(특이점/접촉)
 # 자세를 피하려 낮은 앙각 우선(50~65°, 윗면 입사각<50° 라 여전히 잡힘). min-motion 이 측면
 # 자세(el=30)에 가까운 낮은 앙각을 자연히 선호. standoff 키워 스캐너-물체 여유 확보.
 NBV_STANDOFF       = 0.27
@@ -180,9 +180,9 @@ WIDEN_JOINT1_LIMIT_DEG = 175.0
 FIX_DRIVE_GAINS, DRIVE_STIFFNESS, DRIVE_DAMPING = True, 2000.0, 800.0
 PHYSICS_DT = 1.0 / 120.0        # 1/60→1/120: 강성 드라이브 수치 안정 (스텝상수도 ×2)
 WARMUP_STEPS, SETTLE_STABLE_N, MOVE_TIMEOUT_N, JOINT_SETTLE_TOL = 120, 24, 800, 0.01
-PHYSICS_CB_NAME = "mms_phase2_step"
+PHYSICS_CB_NAME = "mms_nbv_step"
 
-OUT_DIR   = os.path.join(_BASE_DIR, "captures_phase2_nbv")
+OUT_DIR   = os.path.join(_BASE_DIR, "captures_nbv")
 os.makedirs(OUT_DIR, exist_ok=True)
 LOG_PATH  = os.path.join(OUT_DIR, "calib_log.txt")
 try:
@@ -198,10 +198,10 @@ def print(*a, **k):                      # noqa: A001 — tee → 파일
     except Exception:
         pass
 
-print(f"[PHASE2] ===== run start =====  (core={_HAS_CORE})")
+print(f"[NBV] ===== run start =====  (core={_HAS_CORE})")
 
 
-# ── USD/Isaac 헬퍼 (phase1 과 동일) ───────────────────────────────────────────
+# ── USD/Isaac 헬퍼 (lookaround 과 동일) ───────────────────────────────────────────
 def bake_joint_initial_state(stage, scope, joint_pos):
     for jn, ang in joint_pos.items():
         jp = stage.GetPrimAtPath(f"{scope}/{jn}")
@@ -252,7 +252,7 @@ def _compute_scanner_corners_l7(stage, xc):
     try:
         sp = stage.GetPrimAtPath(SCANNER_PRIM)
         if not sp.IsValid():
-            print(f"[PHASE2][WARN] 스캐너 prim 없음: {SCANNER_PRIM}")
+            print(f"[NBV][WARN] 스캐너 prim 없음: {SCANNER_PRIM}")
             return None
         bbc = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
                                 [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
@@ -267,10 +267,10 @@ def _compute_scanner_corners_l7(stage, xc):
         T_l7_W = inv_T(get_prim_world_T(stage, xc, LINK7_PRIM))
         cl = (wc @ T_l7_W[:3, :3].T) + T_l7_W[:3, 3]          # link7 로컬
         ext = (wc.max(0) - wc.min(0)) * 1000.0
-        print(f"[PHASE2] 스캐너 bbox(mm) ≈ {np.round(ext,0).tolist()} (oriented, 타이트) → 자가충돌 실 mesh")
+        print(f"[NBV] 스캐너 bbox(mm) ≈ {np.round(ext,0).tolist()} (oriented, 타이트) → 자가충돌 실 mesh")
         return cl
     except Exception as e:
-        print(f"[PHASE2][WARN] 스캐너 bbox 계산 실패 ({e}) — 캡슐 근사로 fallback")
+        print(f"[NBV][WARN] 스캐너 bbox 계산 실패 ({e}) — 캡슐 근사로 fallback")
         return None
 
 
@@ -279,17 +279,17 @@ def _turntable_radius(stage, xc):
     try:
         tp = stage.GetPrimAtPath(TURNTABLE_MESH)
         if not tp.IsValid():
-            print(f"[PHASE2][WARN] 턴테이블 prim 없음: {TURNTABLE_MESH}")
+            print(f"[NBV][WARN] 턴테이블 prim 없음: {TURNTABLE_MESH}")
             return None
         bbc = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
                                 [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
         rng = bbc.ComputeWorldBound(tp).ComputeAlignedRange()
         ext = np.array(rng.GetMax(), float) - np.array(rng.GetMin(), float)
         r = float(max(ext[0], ext[1]) / 2.0)
-        print(f"[PHASE2] 턴테이블 반경 ≈ {r*1000:.0f}mm (keepout 원기둥 지름 일치)")
+        print(f"[NBV] 턴테이블 반경 ≈ {r*1000:.0f}mm (keepout 원기둥 지름 일치)")
         return r
     except Exception as e:
-        print(f"[PHASE2][WARN] 턴테이블 반경 계산 실패 ({e})")
+        print(f"[NBV][WARN] 턴테이블 반경 계산 실패 ({e})")
         return None
 
 
@@ -329,7 +329,7 @@ def _configure_shape():
         "stepped":  (0.070, 0.050, 0.080),
     }.get(OBJECT_SHAPE, (0.060, 0.040, 0.070))
     OBJ_W, OBJ_D, OBJ_H = dims
-    print(f"[PHASE2] 대상물 형상='{OBJECT_SHAPE}'  bbox(cm)="
+    print(f"[NBV] 대상물 형상='{OBJECT_SHAPE}'  bbox(cm)="
           f"{OBJ_W*100:.0f}×{OBJ_D*100:.0f}×{OBJ_H*100:.0f}")
 
 
@@ -376,7 +376,7 @@ def create_object(stage, center_xy, top_z):
     if s in ADD_MARKER_SHAPES:               # 비대칭 marker (PCA 법선/방위 확인)
         _cube(stage, OBJ_PATH + "/marker", OBJ_W * 0.5, 0.0, OBJ_H * 0.4,
               0.018, 0.018, 0.025, (0.2, 0.45, 0.9))
-    print(f"[PHASE2] 대상물 '{s}' 생성 @ disc 중심 (marker={'O' if s in ADD_MARKER_SHAPES else 'X'})")
+    print(f"[NBV] 대상물 '{s}' 생성 @ disc 중심 (marker={'O' if s in ADD_MARKER_SHAPES else 'X'})")
 
 
 def set_object_theta(stage, theta):
@@ -630,16 +630,16 @@ def _capture_object_points(theta, apply_incidence=True):
     return obj
 
 
-def _phase1_capture(i):
+def _lookaround_capture(i):
     th = float(_ctx["thetas"][i])
     obj_w = _capture_object_points(th, apply_incidence=True)
     if obj_w is None or len(obj_w) < 10:
-        print(f"[PHASE2]   θ={math.degrees(th):4.0f}°: 대상물 점 부족")
+        print(f"[NBV]   θ={math.degrees(th):4.0f}°: 대상물 점 부족")
         return
     c = _ctx["axis_point"]
     obj_canon = (obj_w - c) @ _Rz(-th).T + c                  # −θ 역회전 → canonical
     _ctx["accum"].append(obj_canon)
-    print(f"[PHASE2]   θ={math.degrees(th):4.0f}°: {len(obj_w)}점 (총 "
+    print(f"[NBV]   θ={math.degrees(th):4.0f}°: {len(obj_w)}점 (총 "
           f"{sum(len(a) for a in _ctx['accum'])})")
 
 
@@ -654,7 +654,7 @@ def _top_count(pts):
     return int(np.count_nonzero((pts[:, 2] > z_top - 0.004) & (r < r_in)))
 
 
-def _finish_phase1():
+def _finish_lookaround():
     pts = np.vstack(_ctx["accum"]) if _ctx["accum"] else np.zeros((0, 3))
     c = _ctx["axis_point"]
     side = pts[pts[:, 2] < DISC_TOP_Z + OBJ_H - 0.012]
@@ -662,20 +662,20 @@ def _finish_phase1():
     quad = set((np.round(az / (np.pi / 2.0)).astype(int) % 4).tolist())
     n_top = _top_count(pts)
     _ctx["n_top_p1"] = n_top
-    print("\n[PHASE2] ===== Phase 1 결과 =====")
-    print(f"[PHASE2] 총 점={len(pts)}  옆면4 점유={len(quad)}/4  윗면 점={n_top}")
+    print("\n[NBV] ===== lookaround 결과 =====")
+    print(f"[NBV] 총 점={len(pts)}  옆면4 점유={len(quad)}/4  윗면 점={n_top}")
     gap_ok = (len(quad) == 4 and n_top < 25)
     msg = "확인 ✅ (희박)" if gap_ok else "CHECK ⚠ (윗면 과다 — VIEW_EL_DEG↓/MAX_INCIDENCE_DEG↓)"
-    print(f"[PHASE2] 윗면 gap {msg}  (옆면4={len(quad)==4}, top={n_top})")
-    _save_ply(os.path.join(OUT_DIR, "phase1.ply"), pts)
+    print(f"[NBV] 윗면 gap {msg}  (옆면4={len(quad)==4}, top={n_top})")
+    _save_ply(os.path.join(OUT_DIR, "lookaround.ply"), pts)
     _draw_pts(pts, (0.0, 1.0, 1.0, 1.0))
     return gap_ok
 
 
-# ── Phase 2 — NBV 계획 ────────────────────────────────────────────────────────
+# ── nbv — NBV 계획 ────────────────────────────────────────────────────────
 def _plan_nbv():
     """윗면 gap → NBV 카메라 포즈 후보 생성 → 해석 IK + swept 충돌 통과 + 관절이동 최소 선택.
-    프로덕션 경로 = phase2_nbv.detect_gaps/nbv_pose_from_candidate + _rank_nbv_candidates
+    프로덕션 경로 = nbv_core.detect_gaps/nbv_pose_from_candidate + _rank_nbv_candidates
     (open3d). 여기선 gap=윗면(엔지니어링됨)이라 윗면중심+상향법선으로 직접 NBV 포즈 산출."""
     O_top = _obj_center_world() + np.array([0, 0, OBJ_H / 2.0])   # 윗면 중심
     Twb, T_EC = _ctx["T_W_base"], _ctx["T_EC_gt"]
@@ -715,17 +715,17 @@ def _plan_nbv():
             if best is None or cost < best[0]:
                 best = (cost, q, T_WC, eld, azd)
     n_path = n_collide - n_scene - n_keep - n_sscan - n_scap
-    print(f"[PHASE2] NBV 후보탐색: IK실패={n_ikfail} 충돌reject={n_collide} "
+    print(f"[NBV] NBV 후보탐색: IK실패={n_ikfail} 충돌reject={n_collide} "
           f"[scene={n_scene} keepout={n_keep} scanner={n_sscan} arm={n_scap} path중간={n_path}]  "
           f"feasible={'있음' if best else '없음'}")
     if best is None:
-        print("[PHASE2][ERROR] NBV: feasible(IK+swept충돌) 포즈 없음")
+        print("[NBV][ERROR] NBV: feasible(IK+swept충돌) 포즈 없음")
         return None
     cost, q, T_WC, eld, azd = best
     clr, pair = _self_min_clearance(q)
-    print(f"[PHASE2] NBV 선택: el={eld:.0f}° az={azd:.0f}°  관절이동cost={cost:.4f}")
-    print(f"[PHASE2]   q(deg)={np.round(np.degrees(q),1).tolist()}")
-    print(f"[PHASE2]   자가충돌 최소여유={clr*1000:+.0f}mm (가까운 쌍 {pair[0]}↔{pair[1]}; "
+    print(f"[NBV] NBV 선택: el={eld:.0f}° az={azd:.0f}°  관절이동cost={cost:.4f}")
+    print(f"[NBV]   q(deg)={np.round(np.degrees(q),1).tolist()}")
+    print(f"[NBV]   자가충돌 최소여유={clr*1000:+.0f}mm (가까운 쌍 {pair[0]}↔{pair[1]}; "
           f"cap0=link1..cap5=link6, scanner_mesh=실 스캐너)")
     return q
 
@@ -751,7 +751,7 @@ def _draw_keepout():
     _draw.draw_lines([tuple(map(float, s)) for s in starts],
                      [tuple(map(float, e)) for e in ends],
                      [col] * len(starts), [2.0] * len(starts))
-    print(f"[PHASE2] 충돌금지 원기둥 표시 — 중심=({cx:.3f},{cy:.3f}) R={R*1000:.0f}mm H={KEEPOUT_HEIGHT_M*1000:.0f}mm")
+    print(f"[NBV] 충돌금지 원기둥 표시 — 중심=({cx:.3f},{cy:.3f}) R={R*1000:.0f}mm H={KEEPOUT_HEIGHT_M*1000:.0f}mm")
 
 
 def _draw_pts(pts, color):
@@ -762,22 +762,22 @@ def _draw_pts(pts, color):
     _draw.draw_points(pts_l, [color] * len(pts_l), [4] * len(pts_l))
 
 
-def _finish_phase2():
+def _finish_nbv():
     pts = np.vstack(_ctx["accum"]) if _ctx["accum"] else np.zeros((0, 3))
     n_top2 = _top_count(pts)
     n_top1 = _ctx.get("n_top_p1", 0)
-    print("\n[PHASE2] ===== Phase 2 결과 (NBV 보강 후) =====")
-    print(f"[PHASE2] 윗면(상부 gap) 점: Phase1={n_top1} → Phase2={n_top2}  (총 점={len(pts)})")
+    print("\n[NBV] ===== nbv 결과 (NBV 보강 후) =====")
+    print(f"[NBV] 윗면(상부 gap) 점: lookaround={n_top1} → nbv={n_top2}  (총 점={len(pts)})")
     # 형상별 상부 면적이 달라(cone/sphere=작음) 절대치 대신 증가량 기준.
     filled = (n_top2 >= max(30, n_top1 + 30))
     verdict = "PASS ✅ (윗면 gap 메움)" if filled else "CHECK ⚠ (윗면 보강 부족 — NBV 자세/입사각 확인)"
-    print(f"[PHASE2] 판정: {verdict}")
-    _save_ply(os.path.join(OUT_DIR, "phase2_filled.ply"), pts)
+    print(f"[NBV] 판정: {verdict}")
+    _save_ply(os.path.join(OUT_DIR, "nbv_filled.ply"), pts)
     if _draw is not None:
         _draw.clear_points()
     _draw_pts(pts, (1.0, 0.55, 0.0, 1.0))
-    print("[PHASE2] viewport: 주황점=NBV 보강 후 누적 (phase2_filled.ply 저장)")
-    print("[PHASE2] ===== COMPLETE =====\n")
+    print("[NBV] viewport: 주황점=NBV 보강 후 누적 (nbv_filled.ply 저장)")
+    print("[NBV] ===== COMPLETE =====\n")
 
 
 # ── 런타임 상태 + 상태머신 ────────────────────────────────────────────────────
@@ -806,15 +806,15 @@ def _on_physics_step(step_size):
         if _ctx["phase_step"] == 1:
             set_object_theta(_ctx["stage"], float(_ctx["thetas"][i]))
         elif _ctx["phase_step"] >= WAIT_PER_THETA:
-            _phase1_capture(i)
+            _lookaround_capture(i)
             if i + 1 >= len(_ctx["thetas"]):
-                _finish_phase1()
+                _finish_lookaround()
                 _ctx["phase"], _ctx["phase_step"] = "P2_PLAN", 0
             else:
                 _ctx["theta_idx"], _ctx["phase_step"] = i + 1, 0
 
     elif ph == "P2_PLAN":
-        print("\n[PHASE2] ====== Phase 2 — 부족면 NBV 보강 ======")
+        print("\n[NBV] ====== nbv — 부족면 NBV 보강 ======")
         nbv_q = _plan_nbv()
         if nbv_q is None:
             _ctx["phase"] = "DONE"
@@ -836,8 +836,8 @@ def _on_physics_step(step_size):
             obj_w = _capture_object_points(0.0, apply_incidence=True)   # θ=0 canonical
             if obj_w is not None and len(obj_w) > 0:
                 _ctx["accum"].append(obj_w)
-                print(f"[PHASE2] NBV 캡처: 윗면 포함 {len(obj_w)}점 누적")
-            _finish_phase2()
+                print(f"[NBV] NBV 캡처: 윗면 포함 {len(obj_w)}점 누적")
+            _finish_nbv()
             _ctx["phase"] = "DONE"
 
     elif ph == "DONE":
@@ -848,7 +848,7 @@ def _on_physics_step(step_size):
 # ── setup ─────────────────────────────────────────────────────────────────────
 async def setup_async():
     if not _HAS_CORE:
-        print("[PHASE2][ERROR] MMS 코어 로드 실패 — 중단.")
+        print("[NBV][ERROR] MMS 코어 로드 실패 — 중단.")
         return
     if World.instance() is not None:
         try:
@@ -860,7 +860,7 @@ async def setup_async():
         _draw.clear_points()
         _draw.clear_lines()
 
-    print(f"[PHASE2] Opening USD: {USD_PATH}")
+    print(f"[NBV] Opening USD: {USD_PATH}")
     open_stage(usd_path=USD_PATH)
     stage = omni.usd.get_context().get_stage()
 
@@ -907,7 +907,7 @@ async def setup_async():
                        xarm_sdk_path=_XARM_SDK, logger=print)
     home_q = np.radians(ARTEC_HOME_JOINTS_DEG)
 
-    # Phase 1 측면 관측 자세 (낮은 elevation → 윗면 grazing → gap)
+    # lookaround 측면 관측 자세 (낮은 elevation → 윗면 grazing → gap)
     el = math.radians(VIEW_EL_DEG)
     view_q = None
     for azd in VIEW_AZIS_DEG:
@@ -919,10 +919,10 @@ async def setup_async():
         q, ok = provider.ik(pose6d, seed=home_q)
         if ok:
             view_q = np.asarray(q, float)
-            print(f"[PHASE2] Phase1 측면 자세: az={azd:.0f}° el={VIEW_EL_DEG:.0f}° IK ok")
+            print(f"[NBV] lookaround 측면 자세: az={azd:.0f}° el={VIEW_EL_DEG:.0f}° IK ok")
             break
     if view_q is None:
-        print("[PHASE2][WARN] 측면 자세 IK 실패 — home fallback")
+        print("[NBV][WARN] 측면 자세 IK 실패 — home fallback")
         view_q = home_q
 
     _ctx.update(world=world, stage=stage, robot=robot, camera=cam,
@@ -935,11 +935,11 @@ async def setup_async():
                 phase="SETTLE", phase_step=0, stable_n=0, step=0)
     drive_joints(view_q)
     _draw_keepout()                              # 충돌금지 원기둥 wireframe 표시
-    print(f"[PHASE2] disc 중심={np.round(center_xy,4).tolist()} | "
-          f"Phase1(측면 GT 누적, 윗면 gap) → Phase2(NBV 보강)")
+    print(f"[NBV] disc 중심={np.round(center_xy,4).tolist()} | "
+          f"lookaround(측면 GT 누적, 윗면 gap) → nbv(NBV 보강)")
     world.add_physics_callback(PHYSICS_CB_NAME, _on_physics_step)
     await world.play_async()
-    print("[PHASE2] 시작.")
+    print("[NBV] 시작.")
 
 
 def stop():
@@ -950,7 +950,7 @@ def stop():
         except Exception:
             pass
         world.stop()
-    print("[PHASE2] Stopped.")
+    print("[NBV] Stopped.")
 
 
 asyncio.ensure_future(setup_async())

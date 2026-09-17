@@ -229,7 +229,7 @@ def self_collision(capsules: List[Tuple[str, Capsule]], scale: float = 0.7,
     ★ 스캐너 전용 규칙(2026-07-08, exclude_last=False 일 때): 스캐너는 gap 규칙
       대신 **link1~5 전부**와 검사(link6 만 제외 — 캡슐이 플랜지 끝점을 공유해
       거리 0 이 구조적이라 무의미). 기존 gap=3 은 scanner↔link5 를 미검사해
-      Phase2 고도각 자세의 스캐너-손목 충돌을 놓쳤음. scanner_scale(0.80)로
+      nbv 고도각 자세의 스캐너-손목 충돌을 놓쳤음. scanner_scale(0.80)로
       링크쌍(0.7)보다 엄격하게 보되 known-good 자세 오탐은 회피.
     Returns: [(name_i, name_j, 침투 m), …] (비면 충돌 없음).
     """

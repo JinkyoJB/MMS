@@ -3,8 +3,8 @@
 언제 쓰나 — 두 정합 문제의 구분
 ------------------------------
     문제                        초기값        중첩    방법
-    Phase 1·2 패스 간 (수 mm)   있음(FK+θ)    높음    ICP  ← utils/nbv/icp_strategy
-    **Phase 3 flip 후**         **없음**      낮음    **이 모듈**
+    lookaround·nbv 패스 간 (수 mm)   있음(FK+θ)    높음    ICP  ← utils/nbv/icp_strategy
+    **flip flip 후**         **없음**      낮음    **이 모듈**
 
 flip 은 사람이(또는 sim 이) 물체를 뒤집으므로 상대자세를 신뢰할 수 없다.
 

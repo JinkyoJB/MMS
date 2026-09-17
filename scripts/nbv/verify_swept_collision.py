@@ -1,6 +1,6 @@
-"""Phase 2 — swept-path 충돌검사 검증 (numpy 만, open3d 불요).
+"""nbv — swept-path 충돌검사 검증 (numpy 만, open3d 불요).
 
-실행:  python scripts/phase2/verify_swept_collision.py
+실행:  python scripts/nbv/verify_swept_collision.py
 q_cur→q_des 관절보간 경로의 충돌을 endpoint 검사가 놓치는 중간 관통까지 잡는지 확인.
 """
 import os

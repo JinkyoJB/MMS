@@ -1,6 +1,6 @@
 # mms_artec/nbv/artec_streaming_scan_session.py
 #
-# Artec **IScanningProcedure** (streaming) 기반 Phase 1.
+# Artec **IScanningProcedure** (streaming) 기반 lookaround.
 #
 # 핵심 설계 — Spider ↔ Turntable 양방향 피드백
 # --------------------------------------------
@@ -44,7 +44,7 @@ class ArtecStreamingScanSessionSettings:
     # ── 회전 ──────────────────────────────────────────────────────────
     rotation_duration_s: float = 30.0      # 360° 한 바퀴 기대 시간
     rotation_overshoot_deg: float = 5.0    # 360° + 여유 (마지막 frame 보장)
-    # ★ 부분 스윕 (rad). None = 전회전(기본). Phase 2 gap 겨냥처럼 목표 각 구간만
+    # ★ 부분 스윕 (rad). None = 전회전(기본). nbv gap 겨냥처럼 목표 각 구간만
     #   돌 때 설정한다 — sim(`NBV_PATCH_SPAN_DEG`)과 같은 구조. 각속도는 전회전과
     #   동일(2π/rotation_duration_s)하고 목표각·타임아웃만 구간에 비례한다.
     #   ⚠ sim 실측: 60° 이하로 좁히면 프레임 간 중첩 부족으로 정합이 무너진다.
@@ -103,7 +103,7 @@ class ArtecStreamingScanSessionSettings:
 
     # ── 프레임 수 제한 ────────────────────────────────────────────────
     # SDK default 100 — 도달하면 silent auto-stop. 0 = unlimited.
-    # docs/7_artec_phase1.md §12 의 freeze 원인.
+    # docs/7_artec_lookaround.md §12 의 freeze 원인.
     max_frame_count: int = 0
 
     # ── 타이밍 ────────────────────────────────────────────────────────
@@ -407,7 +407,7 @@ class ArtecStreamingScanResult:
     # 밴드 3개 중 2개가 전회전을 마치고 3번째에서 lost 된 경우, `tracking_lost`
     # 만 보면 "전부 실패"와 구분이 안 된다. 그러면 호출자가 이미 성공한 밴드까지
     # 처음부터 다시 돌린다 — 2026-09-16 실물에서 band1·2 완주분을 버리고
-    # pass 2·3 을 낭비하고 Phase 2 에 도달조차 못 했다.
+    # pass 2·3 을 낭비하고 nbv 에 도달조차 못 했다.
     n_bands: int = 1                   # 계획된 밴드 수
     n_bands_done: int = 0              # 전회전을 끝낸 밴드 수
     band_reasons: List[str] = field(default_factory=list)
@@ -419,7 +419,7 @@ class ArtecStreamingScanResult:
 
 class ArtecStreamingScanSession:
     """
-    연속 회전 + 실시간 SLAM Phase 1.
+    연속 회전 + 실시간 SLAM lookaround.
     Spider frame_callback ↔ Turntable thread 양방향 피드백.
     """
 
@@ -469,7 +469,7 @@ class ArtecStreamingScanSession:
             target_fps = max_fps
 
         reg_name = artec_scanning.RegistrationType(s.registration_type).name
-        print(f"\n═══════════════ Artec Streaming Phase 1 ═══════════════")
+        print(f"\n═══════════════ Artec Streaming lookaround ═══════════════")
         print(f"  fps                : {target_fps:.1f} / max {max_fps:.1f}")
         print(f"  rotation_duration_s: {s.rotation_duration_s:.1f}")
         print(f"  registration       : {reg_name}")
@@ -631,7 +631,7 @@ class ArtecStreamingScanSession:
                             time.sleep(s.poll_interval_s)
                     tracking.mark_started()
                 vel_rad_s = (2.0 * np.pi) / s.rotation_duration_s
-                if s.sweep_rad is not None:            # 부분 스윕 (Phase 2 gap 겨냥)
+                if s.sweep_rad is not None:            # 부분 스윕 (nbv gap 겨냥)
                     target_rad = float(abs(s.sweep_rad)) \
                         + np.radians(s.rotation_overshoot_deg)
                     print(f"  부분 스윕 {np.degrees(abs(s.sweep_rad)):.0f}°"

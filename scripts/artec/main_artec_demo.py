@@ -1,5 +1,5 @@
 """
-🎬 Artec Phase 1 데모 — 중간 보고용 영상 촬영 스크립트.
+🎬 Artec lookaround 데모 — 중간 보고용 영상 촬영 스크립트.
 
 평소 알고리즘은 "tracking lost 가 안 나면 robot 이 거의 안 움직이는" 게 의도
 (docs §3 rule). 영상 보고용으로 보여주려면 동선이 부족해서, 이 스크립트가
@@ -16,7 +16,7 @@
      → 영상 시청자에게는 "robot 이 객체를 평가하고 best 자세 결정하는"
         퍼포먼스로 보임
 
-  ③ Phase 1 scan + 후처리
+  ③ lookaround scan + 후처리
      - turntable 360° 회전 (~30초, robot 고정)
      - GlobalReg / Cleaning / Poisson / Texturize → OBJ
      - 최종 textured mesh viewer
@@ -132,7 +132,7 @@ def main() -> None:
             robot.go_home(sensor="artec", speed=10, confirm=True)
 
             print("\n╔══════════════════════════════════════════════╗")
-            print("║   🎥 Artec Phase 1 — 데모 모드 (영상 보고용)    ║")
+            print("║   🎥 Artec lookaround — 데모 모드 (영상 보고용)    ║")
             print("╚══════════════════════════════════════════════╝")
             print(f"  T_EC      : {CFG.T_EC_key}")
             print(f"  fusion    : {PROCESS_SETTINGS.fusion}")
@@ -140,7 +140,7 @@ def main() -> None:
             print(f"\n  📋 흐름:")
             print(f"     ① Hollywood intro  (~10s, robot orbit)")
             print(f"     ② Adaptive prescan (~1min, probe + elevation search)")
-            print(f"     ③ Phase 1 scan     (~30s, turntable 360°)")
+            print(f"     ③ lookaround scan     (~30s, turntable 360°)")
             print(f"     ④ 후처리 + export OBJ\n")
 
             # ① 영상미용 orbit
@@ -150,7 +150,7 @@ def main() -> None:
             adaptive_preposition_for_demo(mms, robot, turntable)
 
             # ③+④ 평소 scan + 후처리
-            print("══════════════════ 📸 Phase 1 Scan ══════════════════")
+            print("══════════════════ 📸 lookaround Scan ══════════════════")
             result = None
             try:
                 result = mms.artec_process(

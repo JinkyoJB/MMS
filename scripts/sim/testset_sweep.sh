@@ -1,7 +1,7 @@
 #!/bin/bash
-# testset_sweep.sh — 9종 testset 에 대해 **전체 Phase 1→2→3** 을 돌려 일반성 검증.
+# testset_sweep.sh — 9종 testset 에 대해 **전체 lookaround→2→3** 을 돌려 일반성 검증.
 #
-# 기존 e2e_sweep.sh 는 Phase1 만 NTHETA=12 로 도는 가벼운 점검이다. 이 스크립트는
+# 기존 e2e_sweep.sh 는 lookaround 만 NTHETA=12 로 도는 가벼운 점검이다. 이 스크립트는
 # 실제 운용 설정(120프레임/rev)으로 끝까지 돌려 물체별 품질·시간을 표로 남긴다.
 #
 #   scripts/sim/testset_sweep.sh              # 9종 전부
@@ -41,7 +41,7 @@ for usd in "${LIST[@]}"; do
   timeout "$TIMEOUT" env -u PYTHONPATH $PY -u main_artec.py > "$OUT/$name.log" 2>&1
   code=$?; dt=$(( $(date +%s) - t0 ))
 
-  # Phase1 = 첫 boundary, Phase2 = 마지막 boundary (flip 전까지)
+  # lookaround = 첫 boundary, nbv = 마지막 boundary (flip 전까지)
   mapfile -t B < <(grep -a "boundary=" "$OUT/$name.log" | sed -E 's/.*boundary=([0-9]+)mm.*gaps=([0-9]+).*/\1 \2/')
   p1=${B[0]:-"-"}; p2=${B[${#B[@]}-1]:-"-"}
   flip=$(grep -a "flip 정합 채택\|flip 국소정합 적용" "$OUT/$name.log" | head -1 | sed 's/.*] *//' | cut -c1-28)
@@ -49,11 +49,11 @@ for usd in "${LIST[@]}"; do
   pts=$(grep -a "완료 — 누적" "$OUT/$name.log" | tail -1 | sed -E 's/.*누적 ([0-9]+)점.*/\1/')
   # 새 신호들 — 밴드 수 / NBV 패치 수 / 종료 사유 / 적용된 flip 각
   bands=$(grep -a "P1 플랜:" "$OUT/$name.log" | head -1 | sed -E 's/.*플랜: ([0-9]+) bands.*/\1/;t;s/.*플랜: single.*/1/')
-  npatch=$(grep -ac "=== patch: Phase 2 NBV" "$OUT/$name.log")
+  npatch=$(grep -ac "=== patch: nbv NBV" "$OUT/$name.log")
   if grep -aq "수렴 — 새로 보이는 곳이 없다" "$OUT/$name.log"; then conv="조기(복셀)"
   elif grep -aq "gap 겨냥 실패" "$OUT/$name.log"; then conv="후보소진"
   else conv="상한"; fi
-  fang=$(grep -a "Phase 3: 물체" "$OUT/$name.log" | sed -E 's/.*축 ([0-9]+)°.*/\1/' | paste -sd+ -)
+  fang=$(grep -a "flip: 물체" "$OUT/$name.log" | sed -E 's/.*축 ([0-9]+)°.*/\1/' | paste -sd+ -)
   [ -z "$fang" ] && fang="-"
   printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "$name" "$code" "${bands:-1}" "${p1% *}" "${p1#* }" "$npatch" "$conv" \

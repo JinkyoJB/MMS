@@ -1,10 +1,10 @@
-# Phase 2 — 부족면 NBV 보강
+# nbv — 부족면 NBV 보강
 
-> Phase 1 이 만든 5면에는 반드시 구멍이 남는다 — 윗면·옆면 경계의 grazing 영역, 옆면
-> 사이 occlusion 띠, 손잡이나 오목부. Phase 2 는 그 구멍을 자동으로 찾아(frontier)
+> lookaround 이 만든 5면에는 반드시 구멍이 남는다 — 윗면·옆면 경계의 grazing 영역, 옆면
+> 사이 occlusion 띠, 손잡이나 오목부. nbv 는 그 구멍을 자동으로 찾아(frontier)
 > 로봇이 그쪽을 조준해(NBV) 추가로 찍고 붙인다.
 >
-> 앞 단계 `2_phase1.md` · 바닥면 `5_phase3_merge.md`
+> 앞 단계 `3_lookaround.md` · 바닥면 `5_flip.md`
 >
 > **쓰기만 하면 §1(실행)·§2(sim·real 차이)로 충분하다.** 문제가 생기면 부록(T1~T8)을 본다.
 >
@@ -14,10 +14,10 @@
 
 ## 1. 실행
 
-Phase 2 만 따로 돌릴 수는 없다 — 메울 구멍이 있어야 하므로 `phase_mode` 는 누적이다.
+nbv 만 따로 돌릴 수는 없다 — 메울 구멍이 있어야 하므로 `stage_until` 는 누적이다.
 
 ```bash
-./scripts/sim/run_e2e_gui.sh spray_can 2 planner    # Phase 1 → 2
+./scripts/sim/run_e2e_gui.sh spray_can 2 planner    # lookaround → 2
 ```
 
 | 환경변수 | 뜻 | 기본 |
@@ -30,14 +30,14 @@ Phase 2 만 따로 돌릴 수는 없다 — 메울 구멍이 있어야 하므로
 | `MMS_SIM_STAGE_DUMP` | 반복마다 메시·누적점군 덤프 디렉터리 | (끔) |
 | `MMS_SIM_PROFILE_EVERY` | N 프레임마다 단계별 소요시간 (0=끔) | 20 |
 
-**실물**은 `BACKEND = "real"` + `MULTIPASS_SETTINGS.phase_mode = 2` 로 두고 실행한다.
+**실물**은 `BACKEND = "real"` + `MULTIPASS_SETTINGS.stage_until = 2` 로 두고 실행한다.
 주요 설정(`ArtecMultiPassScanSessionSettings`):
 
 | 키 | 기본 | 뜻 |
 |---|---|---|
 | `nbv_K_max` | 12 | 최대 반복 |
 | `nbv_distance_mm` | 225 | 턴테이블 축에서 카메라까지 standoff |
-| `nbv_el_floor_deg` | 30 | 관측 고도각 하한 (Phase 1 측면각 위에서만 보강). `el_need` clip 에도 쓰인다 |
+| `nbv_el_floor_deg` | 30 | 관측 고도각 하한 (lookaround 측면각 위에서만 보강). `el_need` clip 에도 쓰인다 |
 | `nbv_swept_steps` | 12 | 궤적 충돌검사 보간 지점 수 |
 | `nbv_theta_assist` | False | True 면 턴테이블을 보조 자유도로 |
 | `nbv_frontier_enabled` | True | False = 축-고도각만 (2026-09-10 이전 동작) |
@@ -70,7 +70,7 @@ Phase 2 만 따로 돌릴 수는 없다 — 메울 구멍이 있어야 하므로
 
 ## 3. 한 바퀴에 무슨 일이 일어나나
 
-Phase 1 은 로봇을 고정하고 턴테이블을 돌렸다. Phase 2 는 반대로 **물체가 서 있고 로봇이
+lookaround 은 로봇을 고정하고 턴테이블을 돌렸다. nbv 는 반대로 **물체가 서 있고 로봇이
 움직인다.** 그래서 자세 하나가 아니라 **가는 경로 전체**를 검사해야 한다(§4).
 
 ```
@@ -124,7 +124,7 @@ base 쪽 큰 관절이 비싸므로 같은 목표면 **손목을 먼저 쓴다.*
 필수인데, 안 넘기면 직전 자세의 이동비용이 0 이라 **같은 자세를 무한 반복**한다(실측:
 el 65 / az −30 을 4회 연속 선택, gap 18→18→20→19).
 
-아랫면 gap(`n_z < −0.6`)은 후보에서 제외한다 — 관측으로는 못 메우고 Phase 3 flip 이
+아랫면 gap(`n_z < −0.6`)은 후보에서 제외한다 — 관측으로는 못 메우고 flip flip 이
 유일한 해법이다(`hw_layout.md` T4).
 
 ### gap 직접 겨냥 (`plan_frontier`) — 주경로
@@ -154,8 +154,8 @@ d(θ_t) = normalize(n̂·cos θ_t + ẑ·sin θ_t)      θ_t ∈ {0, 30, 45, 60,
 `nbv_swept_steps`(12) 지점으로 나눠 전부 검사한다(`swept_pose_collision`). 한 곳이라도
 걸리면 그 후보를 버린다. 끝점이 포함되므로 단일 자세 검사를 대체한다.
 
-Phase 1 은 로봇이 고정이라 필요 없던 검사다 — 여기서는 **가는 길이 문제**다. SDK IK 는
-쓰지 않는다(2026-06 결정, `4_collision.md` §3).
+lookaround 은 로봇이 고정이라 필요 없던 검사다 — 여기서는 **가는 길이 문제**다. SDK IK 는
+쓰지 않는다(2026-06 결정, `collision.md` §3).
 
 ---
 
@@ -170,9 +170,9 @@ real 은 현재 전회전으로 찍고 새 IScan 을 다음 변환으로 master 
 T_pre = T_BC_master · inv(T_BC_nbv)
 ```
 
-`T_BC_master` 는 Phase 1 시점의 카메라-base 변환(= master 좌표의 정의), `T_BC_nbv` 는 새
+`T_BC_master` 는 lookaround 시점의 카메라-base 변환(= master 좌표의 정의), `T_BC_nbv` 는 새
 자세의 FK + hand-eye 다. **물체가 돌지 않았으므로 두 시점의 차이는 카메라 이동뿐**이다
-(`R_phys = I`. Phase 3 의 flip hint 와 섞지 말 것). 이 `T_pre` 를 초기값으로 ICP 를 한 번
+(`R_phys = I`. flip 의 flip hint 와 섞지 말 것). 이 `T_pre` 를 초기값으로 ICP 를 한 번
 더 돌려 다듬고(`hint_icp_refine_static`) master 에 합친다.
 
 설계상으로는 SDK relocalization 으로 이 변환 자체를 생략할 수 있지만 아직 배선되지
@@ -192,7 +192,7 @@ T_pre = T_BC_master · inv(T_BC_nbv)
 | hand_drill | 519 → 800mm ("악화") | **37.9 → 52.7%** (개선) |
 | mug | 533 → 586mm ("악화") | **33.1 → 37.7%** (개선) |
 
-상관은 r=+0.96 으로 높지만 **부호가 반대**다. 이걸 거꾸로 읽어 "Phase 2 가 머그를
+상관은 r=+0.96 으로 높지만 **부호가 반대**다. 이걸 거꾸로 읽어 "nbv 가 머그를
 악화시킨다"는 결론을 한동안 유지했었다(T4).
 
 ### 대신 "새 표면이 더 안 붙는가"를 본다
@@ -228,8 +228,8 @@ python scripts/sim/eval_vs_gt.py --scan <obj> --gt scripts/sim/log/gt/<name>.npz
 python scripts/sim/validate_convergence.py --dirs scripts/sim/log/conv_val/*
 ```
 
-Isaac 하니스 `sim_harness/MMS_ext_phase2_nbv.py` 는 Phase 1 을 낮은 고도각으로 돌려
-**윗면에 일부러 구멍을 내고** Phase 2 가 그걸 검출·보강하는지 본다.
+Isaac 하니스 `sim_harness/MMS_ext_nbv.py` 는 lookaround 을 낮은 고도각으로 돌려
+**윗면에 일부러 구멍을 내고** nbv 가 그걸 검출·보강하는지 본다.
 
 ---
 
@@ -237,7 +237,7 @@ Isaac 하니스 `sim_harness/MMS_ext_phase2_nbv.py` 는 Phase 1 을 낮은 고�
 
 ```
 utils/nbv/frontier.py              # 경계 edge → 구멍 후보
-utils/nbv/phase2_nbv.py            # pcd_to_mesh_poisson / detect_gaps / coverage_state
+utils/nbv/nbv_core.py            # pcd_to_mesh_poisson / detect_gaps / coverage_state
                                    #   nbv_pose_from_candidate / joint_motion_cost
 utils/nbv/nbv_planner.py           # 후보 순위 · dry gap 회계(report_patch)
 utils/nbv/manual_picker.py         # compute_camera_pose_from_normal
@@ -245,13 +245,13 @@ utils/nbv/icp_strategy.py          # icp_with_gates / pick_icp_roll
 utils/collision/robot_collision.py # swept_pose_collision / collision_free_ik
 utils/control/theta_planner.py     # DEFAULT_JOINT_WEIGHTS, θ assist 최소이동
 
-mms_artec/nbv/artec_multipass_scan_session.py   ★ real Phase 2
+mms_artec/nbv/artec_multipass_scan_session.py   ★ real nbv
     _build_master_mesh_B · _nbv_feasible_q · _rank_nbv_candidates
     _capture_nbv_pose · _merge_into_master · is_converged · _build_collision_world
 mms_artec/backends/isaac/isaac_scan_session.py  # sim (_scan_patch 부분 스윕)
 
 scripts/sim/{extract_gt_mesh,eval_vs_gt,validate_convergence}.py
-sim_harness/MMS_ext_phase2_nbv.py
+sim_harness/MMS_ext_nbv.py
 ```
 
 ---
@@ -278,7 +278,7 @@ sim_harness/MMS_ext_phase2_nbv.py
 다투지 말 것.** 넓히려면 `validate_convergence.py`.
 
 ### T4. 〔교훈〕 지표의 부호를 GT 로 한 번은 확인할 것
-boundary 를 "작을수록 좋다"로 읽어 Phase 2 가 물체를 악화시킨다고 한동안 결론 냈었다.
+boundary 를 "작을수록 좋다"로 읽어 nbv 가 물체를 악화시킨다고 한동안 결론 냈었다.
 단계별 메시를 덤프해 보니 반대였다 — 떠 있던 파편이 본체에 연결되며 경계가 늘어난
 것이었다. **런타임 지표는 그 자체로 옳다는 보장이 없다.** sim 에서만이라도 정답과 대조해
 부호와 상관을 확인한 뒤 판단에 쓴다.
@@ -288,7 +288,7 @@ boundary 를 "작을수록 좋다"로 읽어 Phase 2 가 물체를 악화시킨�
 나고, 기존 표면을 다시 비추면 SDK 가 재고정해 프레임이 **곧바로 master 좌표로** 들어온다
 (`T_pre = I`). 노출 경로 후보는 둘이다.
 
-- **R1** — Phase 1 의 `IScanningProcedure` 를 stop 하지 않고 유지. 이동 중 PREVIEW,
+- **R1** — lookaround 의 `IScanningProcedure` 를 stop 하지 않고 유지. 이동 중 PREVIEW,
   재고정 후 RECORD 토글. `ArtecStreamingScanSession` 확장 필요.
 - **R2** — `ScanningState.CONTINUE_RECORD` 로 master 를 입력 삼아 record 재개. SDK enum 은
   있으나 문서상 비권장이라 동작 검증 필요.
@@ -296,7 +296,7 @@ boundary 를 "작을수록 좋다"로 읽어 Phase 2 가 물체를 악화시킨�
 둘 다 실기 검증 전이라 현재는 §5 의 camera-motion `T_pre` 경로로 간다. 실기에서 볼 것은
 relocalize 성공률·재고정 시간·필요 overlap 이다. relocalize 는 기존 표면과 **overlap 이
 있어야** 성립하는데 NBV 는 구멍 가장자리를 보므로 대개 충족된다. 부족하면 스윕 각을
-키우거나 standoff 를 조정한다. 정합은 **HYBRID 필수**(`2_phase1.md` T1).
+키우거나 standoff 를 조정한다. 정합은 **HYBRID 필수**(`3_lookaround.md` T1).
 
 ### T6. 〔미배선〕 real 캡처가 아직 전회전이다
 
@@ -317,7 +317,7 @@ relocalize 성공률·재고정 시간·필요 overlap 이다. relocalize 는 �
 (real 동일). 실제 종료는 gap 회계와 `nbv_K_max` 가 낸다. 살리려면 임계를 실측 분포에
 맞춰 다시 잡아야 한다.
 
-### T8. Phase 2 가 느리다 / 같은 자리를 계속 겨냥한다
+### T8. nbv 가 느리다 / 같은 자리를 계속 겨냥한다
 - **느림** — 점군에 O(N²) 파이썬 루프를 넣지 말 것. 입사각 필터의 `_pca_normals` 가 점마다
   전수 거리 계산 + 3×3 고유분해를 돌려 프레임당 2초를 먹었고 한 패치가 4분을 넘겼다.
   KD-tree + 배치 `eigh` 로 37배 빨라졌고 판정 결과는 동일했다. 추측으로 두 번 헛짚었으니

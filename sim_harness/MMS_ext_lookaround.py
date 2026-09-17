@@ -1,11 +1,11 @@
 """
-MMS Phase 1 시뮬레이션 (5면 스캐닝, ground-truth 누적) - Isaac Sim 5.1.0 (Extension)
+MMS lookaround 시뮬레이션 (5면 스캐닝, ground-truth 누적) - Isaac Sim 5.1.0 (Extension)
 
 목적
 ----
-Phase 1(턴테이블 360° 회전으로 윗면+옆면4=5면 취득)의 **누적 로직**을 sim 에서 검증.
+lookaround(턴테이블 360° 회전으로 윗면+옆면4=5면 취득)의 **누적 로직**을 sim 에서 검증.
 sim 엔 Artec SLAM 이 없으므로, 턴테이블 θ(ground-truth)+회전축으로 점군을 누적한다.
-(cf. docs/2_phase1.md §7) real 의 streaming/SLAM 은 이 검증된 누적 위에 그대로 올린다.
+(cf. docs/3_lookaround.md §7) real 의 streaming/SLAM 은 이 검증된 누적 위에 그대로 올린다.
 
 흐름
 ----
@@ -17,8 +17,8 @@ sim 엔 Artec SLAM 이 없으므로, 턴테이블 θ(ground-truth)+회전축으�
 핵심: p_obj = Rz(−θ)·(p_world − axis_point) + axis_point   (axis = 턴테이블 회전축).
       θ 가 정확하면(sim GT) 모든 옆면이 정확히 겹쳐 쌓인다 = "SLAM 대신 GT 누적".
 
-★ 로봇은 Phase 1 동안 고정(home). 대상물만 회전. real 도 회전 중 robot 고정(불변식).
-실행: VSCode Isaac 확장/Script Editor. 결과 → captures_phase1/ (calib_log.txt tail, scan.ply).
+★ 로봇은 lookaround 동안 고정(home). 대상물만 회전. real 도 회전 중 robot 고정(불변식).
+실행: VSCode Isaac 확장/Script Editor. 결과 → captures_lookaround/ (calib_log.txt tail, scan.ply).
 """
 
 import os
@@ -89,7 +89,7 @@ try:
     _HAS_CORE = True
 except Exception as _e:
     _HAS_CORE = False
-    print(f"[PHASE1][WARN] MMS 코어 로드 실패: {_e}")
+    print(f"[LOOKAROUND][WARN] MMS 코어 로드 실패: {_e}")
 
 # ── debug_draw (누적 결과 시각화) ─────────────────────────────────────────────
 try:
@@ -106,7 +106,7 @@ JOINTS_SCOPE = "/World/xarm7/joints"
 CAMERA_PRIM  = "/World/xarm7/link7/tool/spider/Camera"
 MARBLE_PRIM_PATH = os.environ.get("MMS_SIM_OBJECT_PRIM", "/World/ScanTarget/TestObject")
 TURNTABLE_MESH = "/World/frame/turntable_disc"
-OBJ_PATH     = "/World/Phase1Object"
+OBJ_PATH     = "/World/lookaroundObject"
 
 INITIAL_JOINT_POS = {f"joint{i}": 0.0 for i in range(1, 8)}
 
@@ -139,9 +139,9 @@ OBJ_XY_CROP    = 0.06
 WIDEN_JOINT1_LIMIT_DEG = 175.0
 FIX_DRIVE_GAINS, DRIVE_STIFFNESS, DRIVE_DAMPING = True, 2000.0, 200.0
 WARMUP_STEPS, SETTLE_STABLE_N, MOVE_TIMEOUT_N, JOINT_SETTLE_TOL = 60, 12, 400, 0.01
-PHYSICS_CB_NAME = "mms_phase1_step"
+PHYSICS_CB_NAME = "mms_lookaround_step"
 
-OUT_DIR   = os.path.join(_BASE_DIR, "captures_phase1")
+OUT_DIR   = os.path.join(_BASE_DIR, "captures_lookaround")
 os.makedirs(OUT_DIR, exist_ok=True)
 LOG_PATH  = os.path.join(OUT_DIR, "calib_log.txt")
 try:
@@ -157,8 +157,8 @@ def print(*a, **k):                      # noqa: A001 — tee → 파일
     except Exception:
         pass
 
-print(f"[PHASE1] ===== run start =====  (core={_HAS_CORE})")
-print(f"[PHASE1] log file: {LOG_PATH}")
+print(f"[LOOKAROUND] ===== run start =====  (core={_HAS_CORE})")
+print(f"[LOOKAROUND] log file: {LOG_PATH}")
 
 
 # ── USD/Isaac 헬퍼 ────────────────────────────────────────────────────────────
@@ -247,7 +247,7 @@ def create_object(stage, center_xy, top_z):
     mk.AddTranslateOp().Set(Gf.Vec3f(OBJ_W * 0.5, 0.0, OBJ_H * 0.5))
     mk.AddScaleOp().Set(Gf.Vec3f(0.018, 0.018, 0.025))
     mk.CreateDisplayColorAttr([Gf.Vec3f(0.2, 0.45, 0.9)])
-    print(f"[PHASE1] 대상물 box {OBJ_W*100:.0f}×{OBJ_D*100:.0f}×{OBJ_H*100:.0f}cm @ disc 중심")
+    print(f"[LOOKAROUND] 대상물 box {OBJ_W*100:.0f}×{OBJ_D*100:.0f}×{OBJ_H*100:.0f}cm @ disc 중심")
 
 
 def set_object_theta(stage, theta):
@@ -288,7 +288,7 @@ def _capture_accumulate(i):
     th = float(_ctx["thetas"][i])
     pc = _ctx["camera"].get_pointcloud()
     if pc is None or getattr(pc, "size", 0) == 0:
-        print(f"[PHASE1]   θ={math.degrees(th):.0f}°: 렌더 미준비 — skip")
+        print(f"[LOOKAROUND]   θ={math.degrees(th):.0f}°: 렌더 미준비 — skip")
         return
     pc = np.asarray(pc, dtype=float).reshape(-1, 3)
     c = _ctx["axis_point"]
@@ -297,18 +297,18 @@ def _capture_accumulate(i):
          & (rxy < OBJ_XY_CROP))
     obj_w = voxel_ds(pc[m], VOXEL_M)         # 다운샘플 (점수 폭발 방지)
     if len(obj_w) < 20:
-        print(f"[PHASE1]   θ={math.degrees(th):.0f}°: 대상물 점 부족({len(obj_w)})")
+        print(f"[LOOKAROUND]   θ={math.degrees(th):.0f}°: 대상물 점 부족({len(obj_w)})")
         return
     # 축(수직, 중심 통과) 둘레 −θ 역회전 → 대상물 프레임(θ=0) 누적
     obj_canon = (obj_w - c) @ _Rz(-th).T + c
     _ctx["accum"].append(obj_canon)
-    print(f"[PHASE1]   θ={math.degrees(th):4.0f}°: 대상물 {len(obj_w)}점 누적 "
+    print(f"[LOOKAROUND]   θ={math.degrees(th):4.0f}°: 대상물 {len(obj_w)}점 누적 "
           f"(총 {sum(len(a) for a in _ctx['accum'])})")
 
 
 def _finish():
     if not _ctx["accum"]:
-        print("[PHASE1][ERROR] 누적 점 없음")
+        print("[LOOKAROUND][ERROR] 누적 점 없음")
         return
     pts = np.vstack(_ctx["accum"])
     c = _ctx["axis_point"]
@@ -323,23 +323,23 @@ def _finish():
     quad = set((np.round(az / (np.pi / 2.0)).astype(int) % 4).tolist())
     cov_bins = len(np.unique(((np.arctan2(pts[:, 1]-c[1], pts[:, 0]-c[0]) + np.pi)
                               / (2*np.pi) * 36).astype(int) % 36))
-    print("\n[PHASE1] ===== 누적 결과 =====")
-    print(f"[PHASE1] 총 점={len(pts)}  θ뷰={len(_ctx['accum'])}")
-    print(f"[PHASE1] 크기(cm)≈ {size[0]*100:.1f}×{size[1]*100:.1f}×{size[2]*100:.1f} "
+    print("\n[LOOKAROUND] ===== 누적 결과 =====")
+    print(f"[LOOKAROUND] 총 점={len(pts)}  θ뷰={len(_ctx['accum'])}")
+    print(f"[LOOKAROUND] 크기(cm)≈ {size[0]*100:.1f}×{size[1]*100:.1f}×{size[2]*100:.1f} "
           f"(대상물 {OBJ_W*100:.0f}×{OBJ_D*100:.0f}×{OBJ_H*100:.0f})")
-    print(f"[PHASE1] 옆면 4면 점유={len(quad)}/4  윗면 점={len(top)}  방위커버리지={cov_bins}/36")
+    print(f"[LOOKAROUND] 옆면 4면 점유={len(quad)}/4  윗면 점={len(top)}  방위커버리지={cov_bins}/36")
     # bbox xy 가 대상물 크기와 ~1cm 이내 일치 = 전 옆면 도달
     bbox_ok = (abs(size[0] - OBJ_W) < 0.012 and abs(size[1] - OBJ_D) < 0.012)
     ok = (len(quad) == 4 and len(top) > 30 and bbox_ok)
     verdict = "PASS ✅ (5면 재구성)" if ok else "CHECK ⚠"
-    print(f"[PHASE1] 판정: {verdict}  (옆면4={len(quad)==4}, 윗면={len(top)>30}, bbox={bbox_ok})")
+    print(f"[LOOKAROUND] 판정: {verdict}  (옆면4={len(quad)==4}, 윗면={len(top)>30}, bbox={bbox_ok})")
     _save_ply(os.path.join(OUT_DIR, "scan.ply"), pts)
-    np.savez(os.path.join(OUT_DIR, "phase1_result.npz"), pts=pts, coverage=cov_bins,
+    np.savez(os.path.join(OUT_DIR, "lookaround_result.npz"), pts=pts, coverage=cov_bins,
              bbox_lo=bb_lo, bbox_hi=bb_hi)
     _ctx["viz"] = pts[:: max(1, len(pts) // 3000)]
     _draw_accum()
-    print("[PHASE1] viewport: 청록점=누적 재구성 (scan.ply 도 저장)")
-    print("[PHASE1] ===== COMPLETE =====\n")
+    print("[LOOKAROUND] viewport: 청록점=누적 재구성 (scan.ply 도 저장)")
+    print("[LOOKAROUND] ===== COMPLETE =====\n")
 
 
 def _save_ply(path, pts):
@@ -388,7 +388,7 @@ def _on_physics_step(step_size):
 # ── setup ─────────────────────────────────────────────────────────────────────
 async def setup_async():
     if not _HAS_CORE:
-        print("[PHASE1][ERROR] MMS 코어 로드 실패 — 중단.")
+        print("[LOOKAROUND][ERROR] MMS 코어 로드 실패 — 중단.")
         return
     if World.instance() is not None:
         try:
@@ -400,7 +400,7 @@ async def setup_async():
         _draw.clear_points()
         _draw.clear_lines()
 
-    print(f"[PHASE1] Opening USD: {USD_PATH}")
+    print(f"[LOOKAROUND] Opening USD: {USD_PATH}")
     open_stage(usd_path=USD_PATH)
     stage = omni.usd.get_context().get_stage()
 
@@ -456,10 +456,10 @@ async def setup_async():
         q, ok = provider.ik(pose6d, seed=home_q)
         if ok:
             view_q = np.asarray(q, float)
-            print(f"[PHASE1] 측면 자세: az={azd:.0f}° el={VIEW_EL_DEG:.0f}° IK ok")
+            print(f"[LOOKAROUND] 측면 자세: az={azd:.0f}° el={VIEW_EL_DEG:.0f}° IK ok")
             break
     if view_q is None:
-        print("[PHASE1][WARN] 측면 자세 IK 전부 실패 — home fallback (옆면 불충분 가능)")
+        print("[LOOKAROUND][WARN] 측면 자세 IK 전부 실패 — home fallback (옆면 불충분 가능)")
         view_q = home_q
 
     _ctx.update(world=world, stage=stage, robot=robot, camera=cam,
@@ -467,11 +467,11 @@ async def setup_async():
                 axis_point=np.array([center_xy[0], center_xy[1], DISC_TOP_Z], dtype=float),
                 thetas=np.linspace(0.0, 2*np.pi, N_THETA, endpoint=False),
                 theta_idx=0, accum=[], phase="SETTLE", phase_step=0, stable_n=0, step=0)
-    drive_joints(view_q)            # 측면 자세로 이동 후 고정 (Phase 1 동안 불변)
-    print(f"[PHASE1] disc 중심={np.round(center_xy,4).tolist()} | θ {N_THETA}스텝(10°) GT 누적")
+    drive_joints(view_q)            # 측면 자세로 이동 후 고정 (lookaround 동안 불변)
+    print(f"[LOOKAROUND] disc 중심={np.round(center_xy,4).tolist()} | θ {N_THETA}스텝(10°) GT 누적")
     world.add_physics_callback(PHYSICS_CB_NAME, _on_physics_step)
     await world.play_async()
-    print("[PHASE1] 시작: home 고정 → 대상물 θ 회전 → 캡처·−θ 누적 → 5면 재구성.")
+    print("[LOOKAROUND] 시작: home 고정 → 대상물 θ 회전 → 캡처·−θ 누적 → 5면 재구성.")
 
 
 def stop():
@@ -482,7 +482,7 @@ def stop():
         except Exception:
             pass
         world.stop()
-    print("[PHASE1] Stopped.")
+    print("[LOOKAROUND] Stopped.")
 
 
 asyncio.ensure_future(setup_async())

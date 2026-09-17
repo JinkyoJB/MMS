@@ -1,7 +1,7 @@
-"""Phase 2 Step 2/3 검증 — phase2_nbv 코어 (pcd→mesh→구멍검출→커버리지→NBV 포즈).
+"""nbv Step 2/3 검증 — nbv_core 코어 (pcd→mesh→구멍검출→커버리지→NBV 포즈).
 
 open3d 필요 (MMS 런타임 환경에서 실행).
-실행:  python scripts/phase2/verify_phase2_core.py
+실행:  python scripts/nbv/verify_nbv_core.py
 구-구멍 합성 pcd 로 frontier 구멍 검출 / 커버리지 지표 / NBV 카메라 포즈 타당성 검증.
 """
 import os
@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import open3d as o3d
-from utils.nbv import phase2_nbv as p2
+from utils.nbv import nbv_core as p2
 
 
 def sphere_pcd(center, radius, n=8000, hole_axis=None, hole_halfangle_deg=35.0, seed=0):

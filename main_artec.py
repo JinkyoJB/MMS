@@ -10,8 +10,8 @@ import numpy as np
 
 from utils import PROJECT_ROOT
 from utils.viz import show_composite_mesh   # open3d 는 함수 안에서 lazy import
-# phase_mode 해석은 sim·real·main 공용 (기본값 불일치 방지)
-from utils.nbv.scan_phase_controller import resolve_phase_mode, phase_desc
+# stage_until 해석은 sim·real·main 공용 (기본값 불일치 방지)
+from utils.nbv.scan_stage_controller import resolve_stage_until, stage_desc
 
 # excure command:
 # env -u PYTHONPATH $MMS_PYTHON main_artec.py   # 기본: ~/miniconda3/envs/env_isaacsim/bin/python
@@ -151,7 +151,7 @@ DEV_MODE = True
 # isaac(Phase A) 에선 None — 모션/제어 개발만, 스캐너는 Phase B.
 PROCESS_SETTINGS = None
 if _SCAN_SETTINGS_AVAILABLE:
-    # ── Streaming Phase 1 (Artec IScanningProcedure 기반, 연속 회전) ──────
+    # ── Streaming lookaround (Artec IScanningProcedure 기반, 연속 회전) ──────
     STREAM_SETTINGS = ArtecStreamingScanSessionSettings(
         rotation_duration_s=30.0,         # 30초에 한 바퀴
         rotation_overshoot_deg=5.0,
@@ -161,16 +161,16 @@ if _SCAN_SETTINGS_AVAILABLE:
         preview_settle_s=1.5,
         post_record_settle_s=0.5,
         reset_to_zero_first=True,
-        timeline_csv_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}_timeline.csv"),
+        timeline_csv_path=str(PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}_timeline.csv"),
     )
 
-    # ── Multi-pass: phase_mode = Phase 1 부터 **순차 누적** 실행 ────────────
-    #   1 = Phase1(5면) / 2 = Phase1→2(NBV) / 3 = Phase1→2→3(바닥면 flip)
-    # ★ 첫 Spider 테스트는 phase_mode=1 로 5면 확인 후 2→3 으로 올릴 것(2·3 미검증).
-    # pose_physical_rotations = Phase 3(바닥면 flip) 손회전 설정.
+    # ── Multi-pass: stage_until = lookaround 부터 **순차 누적** 실행 ────────────
+    #   1 = lookaround(5면) / 2 = lookaround→2(NBV) / 3 = lookaround→2→3(바닥면 flip)
+    # ★ 첫 Spider 테스트는 stage_until=1 로 5면 확인 후 2→3 으로 올릴 것(2·3 미검증).
+    # pose_physical_rotations = flip(바닥면 flip) 손회전 설정.
     POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
     MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
-        phase_mode=3,                 # 순차 누적: 1=5면 / 2=+NBV / 3=+바닥면 flip
+        stage_until=3,                 # 순차 누적: 1=5면 / 2=+NBV / 3=+바닥면 flip
         streaming_settings=STREAM_SETTINGS,
         pose_physical_rotations=POSE_ROTATIONS,
         max_passes=8,
@@ -199,14 +199,14 @@ if _SCAN_SETTINGS_AVAILABLE:
         do_small_objects_filter=True,
         do_simplify=False,
         do_texturize=True,
-        export_obj_path=str(PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.obj"),
+        export_obj_path=str(PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}.obj"),
         # ★ sproj 저장은 **기본 끔**. 실측 458초 실행에서 sproj 저장에만 47초가
         #   들었다(중간 저장 포함하면 더). 필요할 때 `--sproj` 로 켠다.
         export_sproj_path=None,
     )
 elif CFG.backend == "isaac":
     # isaac: Artec SDK scan-settings 없이 sim 스캔(IsaacScanSession) 실행.
-    # IsaacScanSession = Phase1 GT 누적 + Phase2 NBV(공용 phase2_nbv/robot_collision).
+    # IsaacScanSession = lookaround GT 누적 + nbv NBV(공용 nbv_core/robot_collision).
     # 후처리(GlobalReg/Fusion/Texturize)는 sim sensor stub 가 skip → 결과=점군/mesh.
     PROCESS_SETTINGS = ArtecProcessSettings(
         dev_mode=DEV_MODE, use_multipass_scan=True,
@@ -255,13 +255,13 @@ def main() -> None:
                       "  · sim:  BACKEND='isaac' 로 실행하면 sim 스캔이 빌드됩니다.")
                 return
 
-            # phase_mode 해석은 **공용 함수 한 곳**에서만 한다 — 예전엔 여기와
+            # stage_until 해석은 **공용 함수 한 곳**에서만 한다 — 예전엔 여기와
             # isaac_scan_session 이 각자 해석했고 기본값도 달라(1 vs 2), 설정이 빠지면
             # 화면에 찍히는 단계와 실제 도는 단계가 갈렸다.
-            _pm, _pm_src = resolve_phase_mode(
+            _pm, _pm_src = resolve_stage_until(
                 MULTIPASS_SETTINGS if _SCAN_SETTINGS_AVAILABLE else None,
                 allow_env=(CFG.backend == "isaac"))   # env override 는 sim 만
-            _pm_desc = phase_desc(_pm)
+            _pm_desc = stage_desc(_pm)
             print(f"\n[main] === Artec {_pm_desc}  ({_pm_src}) ===")
             print(f"  T_EC: {CFG.T_EC_key}")
             print(f"  fusion: {PROCESS_SETTINGS.fusion}")
@@ -269,7 +269,7 @@ def main() -> None:
             print(f"  export sproj: "
                   f"{PROCESS_SETTINGS.export_sproj_path or '끔 (--sproj 로 켜기)'}")
 
-            # 흐름: home → Phase 1→2→3 → home  (sim/real 공통)
+            # 흐름: home → lookaround→2→3 → home  (sim/real 공통)
             _go_home(robot, confirm_home, "시작")
 
             result = None
@@ -286,7 +286,7 @@ def main() -> None:
                 print(f"\n[main] ✘ {type(e).__name__}: {e}")
                 traceback.print_exc()
 
-            _go_home(robot, confirm_home, "종료")    # Phase 3 후 home 복귀
+            _go_home(robot, confirm_home, "종료")    # flip 후 home 복귀
 
             if result is not None and os.environ.get("MMS_SIM_NO_VIZ") != "1":
                 show_composite_mesh(
@@ -344,7 +344,7 @@ def _apply_cli() -> None:
     """실물 파이프라인을 **단계별로** 돌리기 위한 인자.
 
     ★ 왜 필요한가 — 실물 스캔은 한 번에 수 분이고, 중간에 뭔가 틀리면 어느
-      단계가 문제인지 구분이 안 된다. 예전엔 `phase_mode`·`max_passes` 같은
+      단계가 문제인지 구분이 안 된다. 예전엔 `stage_until`·`max_passes` 같은
       스위치가 이 파일에 **하드코딩**돼 있어서 매번 소스를 고쳐야 했다.
       기본값은 그대로이므로 인자 없이 실행하면 동작이 바뀌지 않는다.
     """
@@ -357,13 +357,13 @@ def _apply_cli() -> None:
     ap = argparse.ArgumentParser(
         description="Artec MMS 실물 파이프라인 (단계별 실행 인자)")
     ap.add_argument("--phase", type=int, choices=(1, 2, 3), default=None,
-                    help="1=Phase1(5면) · 2=+NBV · 3=+바닥면 flip "
-                         + (f"(기본 {m.phase_mode})" if m is not None else ""))
+                    help="1=lookaround(5면) · 2=+NBV · 3=+바닥면 flip "
+                         + (f"(기본 {m.stage_until})" if m is not None else ""))
     ap.add_argument("--max-passes", type=int, default=None,
                     help="pass 상한. **1 로 주면 한 자세만** 돌고 끝난다 — "
                          "회전·캡처 한 사이클만 확인할 때")
     ap.add_argument("--no-planner", action="store_true",
-                    help="Phase 1 자세 플래너를 끈다 (preview 수집·계획 생략, "
+                    help="lookaround 자세 플래너를 끈다 (preview 수집·계획 생략, "
                          "home 고정). 캡처 루프만 떼어 볼 때")
     ap.add_argument("--no-prompt", action="store_true",
                     help="pass 사이 Enter 확인을 생략 (무인 연속 실행)")
@@ -387,7 +387,7 @@ def _apply_cli() -> None:
     if ps is not None:
         if a.sproj:
             ps.export_sproj_path = str(
-                PROJECT_ROOT / f"output/artec_phase1_{RUN_TS}.sproj")
+                PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}.sproj")
             print(f"[main] sproj 저장 ON → {ps.export_sproj_path}")
         if a.test:
             ps.do_texturize = False
@@ -399,11 +399,11 @@ def _apply_cli() -> None:
             print("[main] ⚠ 스캔 설정을 못 불러왔다(바인딩 미빌드?) — 인자 무시")
         return
     if a.phase is not None:
-        m.phase_mode = int(a.phase)
+        m.stage_until = int(a.phase)
     if a.max_passes is not None:
         m.max_passes = int(a.max_passes)
     if a.no_planner:
-        m.phase1_planner_enabled = False
+        m.lookaround_planner_enabled = False
     if a.no_prompt:
         m.prompt_before_first_pass = False
         m.prompt_between_passes = False
@@ -426,8 +426,8 @@ def _apply_cli() -> None:
                     setattr(m, name, old * k)
                     print(f"[main] {name}: {old:.1f} → {old*k:.1f} deg/s")
 
-    print(f"[main] phase_mode={m.phase_mode}  max_passes={m.max_passes}  "
-          f"planner={m.phase1_planner_enabled}  recovery={m.auto_recovery_enabled}  "
+    print(f"[main] stage_until={m.stage_until}  max_passes={m.max_passes}  "
+          f"planner={m.lookaround_planner_enabled}  recovery={m.auto_recovery_enabled}  "
           f"prompt={m.prompt_between_passes}  viewer={m.enable_live_viewer}")
 
 

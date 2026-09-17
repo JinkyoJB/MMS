@@ -1,11 +1,11 @@
 #!/bin/bash
-# run_e2e_gui.sh — Phase1 플래너 E2E 를 GUI 로 직접 관찰 (+베이스 높이 조건부).
+# run_e2e_gui.sh — lookaround 플래너 E2E 를 GUI 로 직접 관찰 (+베이스 높이 조건부).
 #
-# 사용:  ./scripts/sim/run_e2e_gui.sh [물체] [phase_mode] [planner|legacy] [ΔH cm]
-#   ./scripts/sim/run_e2e_gui.sh                       # 기본 씬(v3_scene.usd), Phase1
+# 사용:  ./scripts/sim/run_e2e_gui.sh [물체] [stage_until] [planner|legacy] [ΔH cm]
+#   ./scripts/sim/run_e2e_gui.sh                       # 기본 씬(v3_scene.usd), lookaround
 #   ./scripts/sim/run_e2e_gui.sh spray_can             # 물체별 v3 씬 (부분이름 OK)
 #   ./scripts/sim/run_e2e_gui.sh detergent 1 planner   # 밴드 분할이 걸리는 사례
-#   ./scripts/sim/run_e2e_gui.sh mug 2 planner 10      # ★ 베이스 +10cm 로 Phase1→2
+#   ./scripts/sim/run_e2e_gui.sh mug 2 planner 10      # ★ 베이스 +10cm 로 lookaround→2
 #   ./scripts/sim/run_e2e_gui.sh mug 1 legacy          # 기존 방식 A/B
 #
 # 씬은 **v3 만** 쓴다. 구 v2.usd / testset/composed/*_on_turntable.usd 는 카메라·
@@ -40,10 +40,10 @@ if [ "$DH" != "0" ]; then
   scene="$hb"
 fi
 
-ENVV=(MMS_SIM_PHASE_MODE=$PM MMS_SIM_P1_MODE=$MODE
+ENVV=(MMS_SIM_STAGE_UNTIL=$PM MMS_SIM_P1_MODE=$MODE
       MMS_SIM_NTHETA=24 MMS_SIM_DRIVE_STEPS=20
       MMS_SIM_USD="$scene")
 [ -n "$objprim" ] && ENVV+=(MMS_SIM_OBJECT_PRIM=$objprim)
 
-echo "[run] scene=$(basename $scene)  phase_mode=$PM  mode=$MODE  ΔH=+${DH}cm"
+echo "[run] scene=$(basename $scene)  stage_until=$PM  mode=$MODE  ΔH=+${DH}cm"
 env "${ENVV[@]}" "$(mms_python)" -u main_artec.py

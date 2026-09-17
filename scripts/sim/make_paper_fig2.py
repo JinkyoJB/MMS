@@ -13,7 +13,7 @@ import os, sys, json, math, argparse
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from utils.nbv.phase1_viewpoint import (                       # noqa: E402
+from utils.nbv.lookaround import (                       # noqa: E402
     SensorModel, ViewPose, crop_object_points, voxel_downsample,
     estimate_outward_normals, make_view_pose, visible_masks, _rot_z)
 from utils.robot import xarm7_kinematics as kin                # noqa: E402

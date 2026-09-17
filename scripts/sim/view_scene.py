@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """view_scene.py — sim 씬 USD 를 Isaac Sim GUI 로 열어 **눈으로 본다**.
 
-용도: CAD 기반 씬(v2/v3/v4)이 실물 셀과 얼마나 다른지 확인 (docs/4_collision.md §6).
+용도: CAD 기반 씬(v2/v3/v4)이 실물 셀과 얼마나 다른지 확인 (docs/collision.md §6).
 로봇을 구동하지도, 물리를 돌리지도 않는다 — stage 를 열고 대기만 한다.
 
     python scripts/sim/view_scene.py            # v3 (기본)

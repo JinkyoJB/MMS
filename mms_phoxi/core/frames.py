@@ -99,7 +99,7 @@ class Frame:
         return pcd
 
     # NOTE: 전처리 메서드(roi_crop, voxel_downsample, denoise, estimate_normals,
-    #       reconstruct_mesh)는 Phase 1 파이프라인에서 사용하지 않으므로 제거됨.
-    #       Phase 1 은 sensor._last_organized_pts 를 직접 사용하고,
+    #       reconstruct_mesh)는 lookaround 파이프라인에서 사용하지 않으므로 제거됨.
+    #       lookaround 은 sensor._last_organized_pts 를 직접 사용하고,
     #       모든 cleanup 은 PcdAccumulateVolume 내부에서 처리한다.
     #       필요해지면 Open3D API 를 직접 호출하자 (pcd.voxel_down_sample 등).

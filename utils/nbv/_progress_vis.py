@@ -1,6 +1,6 @@
 # mms/nbv/_progress_vis.py
 #
-# Non-blocking Open3D 프로그레스 뷰어 — Phase 1 (턴테이블 회전 스캔) 중
+# Non-blocking Open3D 프로그레스 뷰어 — lookaround (턴테이블 회전 스캔) 중
 # 각 프레임 누적 결과를 실시간으로 갱신한다.
 
 from __future__ import annotations

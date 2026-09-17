@@ -152,7 +152,7 @@ $env:PYTHONIOENCODING="utf-8"
 | 0 | 3종 전체 | `python scripts/check_devices.py` | ❌ 읽기 전용 |
 | 1 | robot | `python scripts/robot/status.py` | ❌ 읽기 전용 |
 | 2 | robot | `python scripts/robot/home.py` | ⚠ **움직인다** |
-| 3 | turntable | `python scripts/turntable/phase1_speed_rotation.py` | ⚠ **회전한다** |
+| 3 | turntable | `python scripts/turntable/lookaround_speed_rotation.py` | ⚠ **회전한다** |
 | 4 | scanner | `python mms_artec/sensor/binding_test.py` | ❌ 캡처만 |
 
 **0 → 1 → 2 → 3 → 4 순서를 지킨다.** 0·1 이 통과하지 못하면 2 이후는 의미가 없다.
@@ -210,18 +210,18 @@ wrist singularity 를 피한 중립 자세로 간다. **관절 목표를 직접 
 여기까지 됐으면 조그·절대이동도 된다 — `docs/robot_control.md` §2 (`jog.py`, `move_pose.py`).
 처음 쓰는 좌표는 반드시 `--dry-run` 먼저.
 
-### 3) turntable — Phase 1 과 동일 조건 360° 회전 ⚠ 실제로 돈다
+### 3) turntable — lookaround 과 동일 조건 360° 회전 ⚠ 실제로 돈다
 
 ```powershell
-python scripts/turntable/phase1_speed_rotation.py
+python scripts/turntable/lookaround_speed_rotation.py
 ```
 
 connect → servo ON → 30초에 한 바퀴(+5° overshoot) → stop → 0° 복귀 → servo OFF → disconnect
-까지 혼자 다 한다. 인자는 없다. 회전 속도·가속도가 Phase 1 실제 스캔과 **같은 값**이라,
-이게 매끄럽게 돌면 Phase 1 의 회전 조건은 검증된 것이다.
+까지 혼자 다 한다. 인자는 없다. 회전 속도·가속도가 lookaround 실제 스캔과 **같은 값**이라,
+이게 매끄럽게 돌면 lookaround 의 회전 조건은 검증된 것이다.
 
 같이 해볼 것 — Artec Studio 의 Recording 을 띄운 채로 실행하고, 회전 중 손으로 대상물을
-가리거나 빼서 Studio 가 `tracking lost` 를 잡는지 본다. Phase 1 watchdog 이 보는 것과 같은 상황이다.
+가리거나 빼서 Studio 가 `tracking lost` 를 잡는지 본다. lookaround watchdog 이 보는 것과 같은 상황이다.
 
 **멈추는 법** — `Ctrl+C` 를 누르면 즉시 `stop()` + servo OFF + disconnect 한다.
 스크립트가 죽어서 테이블이 계속 돈다면:
@@ -258,7 +258,7 @@ python -c "from mms_artec.sensor import artec_base; artec_base._load(); import a
 ```
 
 라이브 점군을 눈으로 보고 싶으면 `main_artec.py` 를 띄운 뒤 다른 터미널에서
-`python scripts/artec/live_scan_view.py` (`docs/2_phase1.md`).
+`python scripts/artec/live_scan_view.py` (`docs/3_lookaround.md`).
 
 ---
 
@@ -289,7 +289,7 @@ python main_artec.py
 
 > **필요할 때만.** 실물 스캔(`BACKEND="real"`)에는 Isaac 이 전혀 필요 없다.
 > CAD 기반 씬(v2/v3/v4)이 실물 셀과 얼마나 다른지 **눈으로 대조**하거나,
-> 충돌 캐시(`cell_env.npz`)를 다시 구울 때 필요하다 (`docs/4_collision.md` §6).
+> 충돌 캐시(`cell_env.npz`)를 다시 구울 때 필요하다 (`docs/collision.md` §6).
 
 2026-09-15 Windows 11 / RTX 3080 Laptop 에서 **전 과정 검증**한 절차다.
 

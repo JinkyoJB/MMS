@@ -1,5 +1,5 @@
 """
-validate_phase1_viewpoint.py — Phase1 viewpoint selection 오프라인 검증 (Isaac 불필요).
+validate_lookaround.py — lookaround viewpoint selection 오프라인 검증 (Isaac 불필요).
 
 입력: extract_testset_points.py 가 캐시한 10종 점군 + 씬 상수.
 실험1: baseline(기존 sphere sampling: el=30, s=0.25+r_max, tz=중심, 첫 IK az)
@@ -8,7 +8,7 @@ validate_phase1_viewpoint.py — Phase1 viewpoint selection 오프라인 검증 
 실험2: 전회전 프레임 시뮬에 tracking-lost 프록시(연속 N프레임 fill 미달) 주입
        → baseline(동일자세 재시도) vs 제안(recovery_replan + overlap) 비교.
 
-실행:  (env_isaacsim) python scripts/sim/validate_phase1_viewpoint.py
+실행:  (env_isaacsim) python scripts/sim/validate_lookaround.py
 출력:  표(stdout) + scripts/sim/log/testset_points/validate_results.json
 """
 import os
@@ -21,9 +21,9 @@ import numpy as np
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, _REPO)
 
-from utils.nbv.phase1_viewpoint import (            # noqa: E402
+from utils.nbv.lookaround import (            # noqa: E402
     SensorModel, crop_object_points, voxel_downsample, estimate_outward_normals,
-    make_view_pose, evaluate_viewpoint, plan_phase1_viewpoints, recovery_replan,
+    make_view_pose, evaluate_viewpoint, plan_lookaround_viewpoints, recovery_replan,
     visible_masks, _rot_z, _score, FILL_MIN_CM2)
 from utils.robot import xarm7_kinematics as kin     # noqa: E402
 
@@ -59,7 +59,7 @@ def ik_feasible_az(scene, el, standoff, tz, axis_xy):
 # ── 계획용 preview 캡처 모사 (real: 거리스텝 + 조준높이 가변, 엄격 DOF) ──────
 # (이전 2-shot 은 DOF 0.15~0.7 낙관 가정이었음 → 실기 DOF(0.2~0.3) 그대로의
 #  거리스텝 전략(simulate_planning_captures)으로 교체, 2026-07-03)
-from utils.nbv.phase1_viewpoint import simulate_planning_captures  # noqa: E402
+from utils.nbv.lookaround import simulate_planning_captures  # noqa: E402
 
 
 def synth_two_shot(pts, nrm, axis_xy, sensor, disc_top_z):
@@ -68,7 +68,7 @@ def synth_two_shot(pts, nrm, axis_xy, sensor, disc_top_z):
 
 def candidate_grid_scores(pts, nrm, axis_xy, sensor, n_theta=36):
     """플래너와 동일 격자(el×s×tz)의 점수 벡터 — 2-shot 랭킹 충실도용."""
-    from utils.nbv.phase1_viewpoint import _standoff_candidates, DEFAULT_ELS
+    from utils.nbv.lookaround import _standoff_candidates, DEFAULT_ELS
     sos, _ = _standoff_candidates(pts, axis_xy, sensor)
     z = pts[:, 2]
     tzs = [float(np.quantile(z, q)) for q in (0.35, 0.5, 0.65)]
@@ -169,7 +169,7 @@ def main():
         h_mm = (z.max() - z.min()) * 1000
         r_max = float(np.max(np.linalg.norm(pts[:, :2] - axis_xy, axis=1)))
 
-        # baseline = 현 sim pick_phase1_pose 등가
+        # baseline = 현 sim pick_lookaround_pose 등가
         b_pose = make_view_pose(axis_xy, float((z.min() + z.max()) / 2), 30.0,
                                 0.0, 0.25 + r_max)
         b_ev = evaluate_viewpoint(pts, nrm, axis_xy, b_pose, sensor,
@@ -178,7 +178,7 @@ def main():
                               float((z.min() + z.max()) / 2), axis_xy)
 
         # 제안
-        plan = plan_phase1_viewpoints(pts, nrm, axis_xy, sensor)
+        plan = plan_lookaround_viewpoints(pts, nrm, axis_xy, sensor)
         p_evs = [evaluate_viewpoint(pts, nrm, axis_xy, p, sensor,
                                     n_theta=N_THETA_FINAL) for p in plan.poses]
         union = np.zeros(len(pts), dtype=bool)

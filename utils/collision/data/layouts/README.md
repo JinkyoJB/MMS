@@ -1,7 +1,7 @@
 # 충돌 환경 캐시 — 레이아웃 변형
 
 `cell_env.npz` 는 코드가 읽는 **활성본** 하나뿐이라, 변형은 여기 쌓아두고
-`scripts/collision/use_layout.py` 로 갈아끼운다. 배경은 `docs/4_collision.md` §6.
+`scripts/collision/use_layout.py` 로 갈아끼운다. 배경은 `docs/collision.md` §6.
 
 | 별칭 | 출처 USD | 루트 prim | 로봇 base(world) | 점 수 | 턴테이블 |
 |---|---|---|---|---|---|
@@ -26,7 +26,7 @@
 > `v3_layout_sim` 102,776 → `v2_layout_real` **2,885**.
 >
 > 메시 게이트가 턴테이블을 **못 본다**(미탐). 캡슐 world 가 `T_B_F0` 로 따로 넣지만
-> 그건 Phase 2 후보 사전 필터일 뿐 최종 게이트가 아니다 (`docs/4_collision.md` §6.6).
+> 그건 nbv 후보 사전 필터일 뿐 최종 게이트가 아니다 (`docs/collision.md` §6.6).
 >
 > **고치는 법** — GUI 에서 `turntable_demo` 를 `frame_structure` 아래로 옮기고 재추출:
 > ```powershell

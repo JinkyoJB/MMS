@@ -1,7 +1,7 @@
 # mms_artec/system.py
 #
 # Artec 전용 MMS — Artec Spider/3D 스캐너 + xArm7 + 턴테이블 통합.
-# IScanningProcedure 기반 Phase 1 + 후처리 알고리즘 파이프라인.
+# IScanningProcedure 기반 lookaround + 후처리 알고리즘 파이프라인.
 #
 # Notation: T_AB : A → B  (x_B = T_AB @ x_A) — README.md / CLAUDE.md 준수.
 
@@ -152,7 +152,7 @@ class ArtecMMS:
         # ★ isaac 백엔드는 **USD ground truth** 로 덮어쓴다.
         #   sim 에는 캘리브가 필요 없고 USD 가 진실이다. config/sensor_frames.yaml 은
         #   실물 캘리브(구 장착) 값이라, 툴체인저가 들어간 v3_scene 과 118mm 어긋난다.
-        #   그대로 두면 캡처 점군이 엉뚱한 위치로 변환돼 Phase1 preview 가 0 이 된다.
+        #   그대로 두면 캡처 점군이 엉뚱한 위치로 변환돼 lookaround preview 가 0 이 된다.
         if cfg.backend == "isaac":
             gt = self._sim_T_EC_gt()
             if gt is not None:
@@ -359,7 +359,7 @@ class ArtecMMS:
         move_robot: bool = True,
         confirm: bool = True,
     ) -> dict:
-        """θ 최적화 + 실행. Phase 2 NBV 가 사용."""
+        """θ 최적화 + 실행. nbv NBV 가 사용."""
         if self.turntable_transform is None or self._T_EC is None:
             raise RuntimeError("turntable_transform / T_EC 필요.")
         if robot is None:
@@ -415,7 +415,7 @@ class ArtecMMS:
         #   2026-09-16 삭제했다 — 오래 안 쓰였고, 세 갈래 분기가 "어느 코드가 도는지"
         #   를 헷갈리게 만들었다. 남은 선택은 **multipass 여부** 하나다.
         if s.use_multipass_scan:
-            # Phase 1 재진행(tracking lost recovery) + phase_mode 분기.
+            # lookaround 재진행(tracking lost recovery) + stage_until 분기.
             # 모든 IScan 이 master IModel 에 누적되고 아래 GlobalReg 에서 정합된다.
             from mms_artec.nbv.artec_multipass_scan_session import ArtecMultiPassScanSession
             r = ArtecMultiPassScanSession(self, robot, turntable, s.multipass_settings).run()
@@ -577,7 +577,7 @@ class ArtecProcessSettings:
     # __post_init__ 에서 do_* 플래그를 강제 override 함 (dev_mode 가 우선).
     dev_mode: bool = False
 
-    # Multi-pass: tracking-lost 재진행 + Phase 2(NBV) / Phase 3(flip 바닥면). True 가
+    # Multi-pass: tracking-lost 재진행 + nbv(NBV) / flip(flip 바닥면). True 가
     # 새 default — 한 번에 끝내고 싶으면 multipass_settings.prompt_*_=False 로
     # 끄거나 use_multipass_scan=False 로 단일 streaming session 사용.
     #

@@ -1,7 +1,7 @@
-"""Phase 2 Step 1 검증 — plan_min_motion_theta_analytic (해석 IK + 충돌검사).
+"""nbv Step 1 검증 — plan_min_motion_theta_analytic (해석 IK + 충돌검사).
 
 하드웨어 무관. scipy/numpy 만 필요 (open3d 불요).
-실행:  python scripts/phase2/verify_theta_analytic.py
+실행:  python scripts/nbv/verify_theta_analytic.py
 라운드트립 일관성(solve_T_EB↔ik↔fk) + min-motion θ 선택 + 충돌필터 동작 검증.
 """
 import os

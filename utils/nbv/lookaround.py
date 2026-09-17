@@ -1,8 +1,8 @@
 """
-utils/nbv/phase1_viewpoint.py — Phase 1 viewpoint selection (sim/real 공용 코어).
+utils/nbv/lookaround.py — lookaround viewpoint selection (sim/real 공용 코어).
 
 컨셉 (2026-07-03 논의):
-  Phase 1 = 고정 스캐너 + 턴테이블 전회전. 회전하는 물체는 스캐너 입장에서
+  lookaround = 고정 스캐너 + 턴테이블 전회전. 회전하는 물체는 스캐너 입장에서
   "회전 포락면"으로 환원되고, **트래킹 생존은 평균 프레임이 아니라 최악
   프레임(maximin)** 이 결정한다 (납작한 물체의 edge-on 순간).
 
@@ -93,7 +93,7 @@ class PoseEval:
 
 
 @dataclass
-class Phase1Plan:
+class LookaroundPlan:
     poses: List[ViewPose]
     evals: List[PoseEval]
     banded: bool
@@ -129,7 +129,7 @@ def crop_object_points(pts_w: np.ndarray, axis_xy, disc_top_z: float,
     r = np.linalg.norm(p[:, :2] - np.asarray(axis_xy, float)[None, :], axis=1)
     # ★ '디스크 위' 를 `up_sign` 으로 정한다. +1 이면 z 증가 = 위(sim world).
     #   real 의 base 는 **천장 마운트라 +Z 가 아래**여서 −1 이어야 한다
-    #   (`docs/4_collision.md` §6.1). +1 로 두면 물체가 있는 쪽을 전부 버리고
+    #   (`docs/collision.md` §6.1). +1 로 두면 물체가 있는 쪽을 전부 버리고
     #   테이블 속만 남겨 **0점**이 된다 — 2026-09-16 실물에서 정점 30,074개를
     #   캡처했는데 "계획용 preview 0pt" 가 나온 원인이다.
     s = float(np.sign(up_sign)) or 1.0
@@ -338,7 +338,7 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
     `up_sign` — 작업 프레임에서 **어느 z 방향이 '위'인가** (+1 = +Z 가 위).
       sim 은 world 프레임이라 +1 이 맞다. real 은 base 프레임을 쓰는데 이 셀의
       base 는 **천장 마운트라 +Z 가 아래**여서 **−1** 이어야 한다
-      (`docs/4_collision.md` §6.1).
+      (`docs/collision.md` §6.1).
       +1 로 두면 시작 조준높이가 `axis_pt.z + 0.05` = 원판 표면보다 50mm **아래**
       (테이블 속)가 되고, 높이를 올릴수록 더 파고든다. 그래서 물체가 아니라
       **턴테이블을 겨눈다** — 2026-09-16 실물에서 관측된 증상이다.
@@ -399,8 +399,8 @@ def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,
       **밴드 4 에서 즉시 tracking lost**(40프레임), 이어서 recovery 3회가 전부
       실패하며 pass 5~8 을 태웠다. 계획 단계에서 이미 알던 정보다.
 
-      단, **전부 걸러지면 최선 하나는 남긴다** — 아무 자세도 없으면 Phase 1 이
-      통째로 사라지고, 부족한 면은 Phase 2 NBV 가 메우는 것이 설계 의도다.
+      단, **전부 걸러지면 최선 하나는 남긴다** — 아무 자세도 없으면 lookaround 이
+      통째로 사라지고, 부족한 면은 nbv NBV 가 메우는 것이 설계 의도다.
     """
     # 상수가 이 함수보다 아래에 정의돼 있어 기본인자로 못 쓴다 (def 시점 평가).
     #
@@ -425,7 +425,7 @@ def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,
         usable = [best]
         if log:
             log(f"  ⚠ 모든 밴드가 fill≤{fill_hard:.1f}cm² — 최선 1개만 남긴다 "
-                f"(minfill={best[1].min_fill_cm2:.1f}cm²). 부족분은 Phase 2 NBV 몫")
+                f"(minfill={best[1].min_fill_cm2:.1f}cm²). 부족분은 nbv NBV 몫")
     elif log and len(usable) < len(plan.poses):
         dropped = [f"{ev.min_fill_cm2:.1f}" for vp, ev in
                    zip(plan.poses, plan.evals)
@@ -511,7 +511,7 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
 
     `up_sign` — 작업 프레임에서 어느 z 방향이 '위'인가 (+1 = +Z 가 위).
       sim 은 world 프레임이라 +1, real 은 천장 마운트 base 라 −1
-      (`docs/4_collision.md` §6.1). 부호를 모르면 어느 끝이 뚜껑인지 알 수 없다.
+      (`docs/collision.md` §6.1). 부호를 모르면 어느 끝이 뚜껑인지 알 수 없다.
     """
     s_up = float(np.sign(up_sign)) or 1.0
     n_up = nrm_obj[:, 2] * s_up                 # +1 = 위를 향함
@@ -528,7 +528,7 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
         return False
     cap_els = [float(e) for e in els if float(e) >= CAP_EL_MIN_DEG]
     if not cap_els:
-        print(f"[phase1] ⚠ 윗면 커버 {cap_frac*100:.0f}% 인데 "
+        print(f"[lookaround] ⚠ 윗면 커버 {cap_frac*100:.0f}% 인데 "
               f"el≥{CAP_EL_MIN_DEG:.0f}° 후보가 없어 보강 못 함")
         return False
     tz_cap = s_up * (top_up - CAP_ZONE_M)
@@ -545,7 +545,7 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
         return False
     poses.append(best[0])
     evals.append(best[1])
-    print(f"[phase1] 윗면 보강 자세 추가 — el={best[0].el_deg:.0f}° "
+    print(f"[lookaround] 윗면 보강 자세 추가 — el={best[0].el_deg:.0f}° "
           f"tz={best[0].target_z*1000:.0f}mm: 뚜껑 커버 "
           f"{cap_frac*100:.0f}% → {best[2]*100:.0f}%")
     return True
@@ -565,11 +565,11 @@ def _standoff_candidates(pts_obj, axis_xy, sensor: SensorModel):
     return [sensor.dof[0] + 0.02 + r_max, mid + r_max, mid + r_max + 0.03], r_max
 
 
-def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None,
+def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None,
                            els=DEFAULT_ELS, n_theta: int = 36,
                            fill_target: float = 12.0,
                            fill_min: float = FILL_MIN_CM2,
-                           up_sign: float = +1.0) -> Phase1Plan:
+                           up_sign: float = +1.0) -> LookaroundPlan:
     """maximin 채점으로 단일 최적 자세 선택; z-커버 미달이면 겹침 밴드 분할.
     pts_obj = crop_object_points + voxel_downsample(sensor.voxel_m) 된 점군.
     fill_target/fill_min 은 SLAM 트래킹 요구치에 정렬해 넘길 것 (real 캘리브)."""
@@ -612,7 +612,7 @@ def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None
     # "위아래만 조금 걸치고 가운데가 빈" 경우를 높게 봐주지 않는다.
     seen_span = float(np.ptp(seen_z)) if len(seen_z) > 30 else 0.0
     span_frac = seen_span / max(h, 1e-6)
-    print(f"[phase1] z_cover={ev.z_cover_frac:.2f} (기준 {ZCOVER_MIN:.2f}) "
+    print(f"[lookaround] z_cover={ev.z_cover_frac:.2f} (기준 {ZCOVER_MIN:.2f}) "
           f"zspan={seen_span*1000:.0f}mm={span_frac:.2f} (기준 {ZSPAN_MIN_FRAC:.2f}) "
           f"standoff={pose.standoff*1000:.0f}mm h={h*1000:.0f}mm "
           f"minfill={ev.min_fill_cm2:.0f}cm²")
@@ -622,7 +622,7 @@ def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None
         poses, evals = [pose], [ev]
         added = _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z,
                                   sensor, els, sos, n_theta, up_sign)
-        return Phase1Plan(poses=poses, evals=evals, banded=added,
+        return LookaroundPlan(poses=poses, evals=evals, banded=added,
                           tracking_risk=any(e.min_fill_cm2 < fill_min
                                             for e in evals),
                           note="single+윗면" if added else "single")
@@ -652,7 +652,7 @@ def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None
         1.0 + span / (band_h * (1.0 - BAND_OVERLAP)))))
     centers = np.linspace(lo_c, hi_c, m_bands)
     _step = span / max(m_bands - 1, 1)
-    print(f"[phase1] 밴드 {m_bands}개  band_h={band_h*1000:.0f}mm "
+    print(f"[lookaround] 밴드 {m_bands}개  band_h={band_h*1000:.0f}mm "
           f"센터간격={_step*1000:.0f}mm "
           f"overlap={(1.0 - _step / band_h)*100:.0f}% "
           f"센터span={span*1000:.0f}mm (물체 h={h*1000:.0f}mm)")
@@ -683,7 +683,7 @@ def plan_phase1_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None
         ov.append(float(inter / max(e.seen_mask.sum(), 1)))
         acc |= e.seen_mask
     risk = any(e.min_fill_cm2 < fill_min for e in evals)
-    return Phase1Plan(poses=poses, evals=evals, banded=True,
+    return LookaroundPlan(poses=poses, evals=evals, banded=True,
                       band_overlap_frac=ov, tracking_risk=risk,
                       note=(f"{m_bands} bands (band_h={band_h*1000:.0f}mm, "
                             f"safe-first)"

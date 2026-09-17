@@ -1,8 +1,8 @@
 """render_scan_results.py — 스캔 결과 OBJ 를 물체명으로 정리하고 4방향 이미지로 렌더.
 
-파이프라인이 저장하는 OBJ 는 `artec_phase1_<타임스탬프>.obj` 라 물체를 알 수 없다.
+파이프라인이 저장하는 OBJ 는 `artec_lookaround_<타임스탬프>.obj` 라 물체를 알 수 없다.
 스윕 로그에서 경로를 뽑아 `<물체명>.obj` 로 복사하고, 정면/측면/윗면/**아랫면**을
-렌더한다(아랫면 = Phase 3 flip 이 바닥을 실제로 취득했는지 보는 뷰).
+렌더한다(아랫면 = flip flip 이 바닥을 실제로 취득했는지 보는 뷰).
 
     python scripts/sim/render_scan_results.py --logs scripts/sim/log/testset_sweep
 """

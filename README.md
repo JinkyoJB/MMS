@@ -13,7 +13,7 @@
 | 로봇을 손으로 움직이기 (웹 UI · 제어 스크립트) | **`docs/robot_control.md`** |
 | **캘리브레이션을 직접 돌리기** (절차·합격기준·검산) | **`docs/calibration_runbook.md`** |
 | **알고리즘이 왜 이런가** | **이 문서** §1~8 |
-| 단계별 상세 | `docs/*.md` (calibration / phase1 / phase2 / collision / hw_layout) |
+| 단계별 상세 | `docs/*.md` (calibration / lookaround / nbv / collision / hw_layout) |
 
 ---
 
@@ -70,12 +70,12 @@ mms_artec/
   backends/                      real / isaac 백엔드 팩토리
     isaac/{isaac_world,isaac_xarm,isaac_turntable,isaac_scanner}.py
   sensor/artec_client.py         real 스캐너 (+ capture_points_base)
-  nbv/artec_streaming_scan_session.py   Phase 1 streaming SLAM + 4 watchdog
-  nbv/artec_multipass_scan_session.py   Phase 1+2+3 통합, view-score, recovery
+  nbv/artec_streaming_scan_session.py   lookaround streaming SLAM + 4 watchdog
+  nbv/artec_multipass_scan_session.py   lookaround+2+3 통합, view-score, recovery
 utils/                           ★ sensor-agnostic 공유 코어 (real·sim 공용)
   calibration/{turntable_frame,rim_picker,hand_eye_calibrator,artec_charuco_detector}.py
   collision/{geometry,robot_collision}.py    자세별 충돌 쿼리 (real/sim 공용)
-  nbv/{frontier,icp_strategy,manual_picker,phase2_nbv,flip_policy}.py
+  nbv/{frontier,icp_strategy,manual_picker,nbv_core,flip_policy}.py
   robot/{xarm_interface,xarm7_kinematics}.py     ★ 해석 FK/IK (real·sim 공유)
   turntable/turntable_interface.py    transforms.py    control/theta_planner.py
 main_artec.py                    진입점 (BACKEND, RUN_CALIBRATION 토글)
@@ -233,7 +233,7 @@ sim엔 SLAM이 없으므로 θ·카메라 포즈 ground-truth로 점군을 누�
 
 → **`docs/1_calibration.md`** (원리·코드 지도·규약·함정·남은 일)
 
-### 2. Phase 1 — 5면 스캐닝 (streaming SLAM + view planning)  ✅🔬
+### 2. lookaround — 5면 스캐닝 (streaming SLAM + view planning)  ✅🔬
 
 로봇을 한 자세에 고정하고 턴테이블을 360° 돌려 측면·윗면을 얻는다.
 Artec 은 frame-to-frame 상대 정합이라 **overlap 유지**가 전부다 — 연속 회전 + max FPS.
@@ -243,27 +243,27 @@ Artec 은 frame-to-frame 상대 정합이라 **overlap 유지**가 전부다 —
 - 추적 감시 4종 watchdog + 3회 자동 recovery
 - ★ 정합 알고리즘은 **`HYBRID`** — `ICP` 는 빈 턴테이블에도 정합 성공해 lost 를 놓친다
 
-→ **`docs/2_phase1.md`** (아키텍처·watchdog·recovery·라이브 뷰어·view-score·sim 검증)
+→ **`docs/3_lookaround.md`** (아키텍처·watchdog·recovery·라이브 뷰어·view-score·sim 검증)
 
-### 3. Phase 2 — 부족면 NBV 보강  ♻️🔬
+### 3. nbv — 부족면 NBV 보강  ♻️🔬
 
 누적 점군에서 구멍을 찾아 그 지점만 겨냥해 부분 스윕(±45°). 최대 8회.
 종료는 **신규 점유 복셀 비율**로 판정한다(경계 길이는 방향이 반대라 쓰면 안 된다).
 
-→ **`docs/3_phase2.md`** (NBV 루프·수렴 지표·성능 병목·정합 게이트)
+→ **`docs/4_nbv.md`** (NBV 루프·수렴 지표·성능 병목·정합 게이트)
 
-### 4. Phase 3 — 바닥면 flip & 병합  ♻️🔬
+### 4. flip — 바닥면 flip & 병합  ♻️🔬
 
 물체를 뒤집어 바닥면을 얻고 앞 결과와 합친다. 각 IScan 은 자기 첫 프레임을 원점으로
 잡으므로 `T_pre` 로 master 좌표에 끌어와야 한다.
 
-→ **`docs/5_phase3_merge.md`** (flip 판정·`T_pre` 3가지 경우·face-merging 문제)
+→ **`docs/5_flip.md`** (flip 판정·`T_pre` 3가지 경우·face-merging 문제)
 
 ### 5. 충돌 · 특이점  ✅
 
 자세를 실행 **전에** 걸러낸다. 캡슐 근사, real/sim 공용.
 
-→ **`docs/4_collision.md`** · 레이아웃 실측은 **`docs/hw_layout.md`**
+→ **`docs/collision.md`** · 레이아웃 실측은 **`docs/hw_layout.md`**
 
 ### 6. 후처리 & 라이브 시각화  ♻️🔬 / ✅
 
@@ -280,7 +280,7 @@ SDK General Pipeline 으로 최종 메시 생성. **Cleaning 은 반드시 Fusio
    카메라 광학 프레임은 개체마다 다르다 — 같은 모델이라도 재사용 불가.
    (`scripts/artec/calibrate.py`, §1 · `docs/1_calibration.md`)
 1. **turntable_frame.yaml 미검증** — T_BF0 2026-04-23(Artec pivot 이전), rim 3점·residual 0.0.
-   Phase 2 hint·NBV·recovery raycast 가 같은 T_BF0 의존 → 정밀도 의심 시 1순위 재캘리브
+   nbv hint·NBV·recovery raycast 가 같은 T_BF0 의존 → 정밀도 의심 시 1순위 재캘리브
    (`scripts/artec/turntable_calib.py`). 라이브 뷰어는 SDK 정합행렬 사용해 이 의존 없음.
 2. **tracking-lost ≠ object-presence**: 물체 제거해도 빈 디스크에 정합 성공해 lost 안 뜰 수 있음 → HYBRID + 별도 휴리스틱.
 3. **last-good θ 없으면 recovery skip** (시작 직후 lost).

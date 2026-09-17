@@ -1,7 +1,7 @@
 # main_phoxi.py
 #
 # Photoneo PhoXi 3D 센서용 MMS entry point.
-# (현재 PhoXi 하드웨어 반납 상태 — `scripts/phoxi/phase1_from_dataset.py` 로 dataset
+# (현재 PhoXi 하드웨어 반납 상태 — `scripts/phoxi/lookaround_from_dataset.py` 로 dataset
 # replay 가 주 사용 경로. 이 파일은 라이브 PhoXi 가 다시 연결됐을 때 사용.)
 
 import msvcrt
@@ -49,15 +49,15 @@ SCAN_SETTINGS = ScanSessionSettings(
     tsdf_voxel_length=0.002,
     tsdf_sdf_trunc=0.006,
     mesh_backend="pcd_accumulate",
-    phase1_enabled=True,
-    phase1_theta_step_deg=15.0,
-    phase1_dwell_s=0.40,
-    phase1_show_progress=True,
-    phase1_wait_window_close=True,
-    phase1_export_pcd_path=str(PROJECT_ROOT / "output/phase1_merged.ply"),
-    phase1_export_mesh_path=str(PROJECT_ROOT / "output/phase1_mesh.ply"),
-    phase1_poisson_backend="open3d",
-    phase2_enabled=False,
+    lookaround_enabled=True,
+    lookaround_theta_step_deg=15.0,
+    lookaround_dwell_s=0.40,
+    lookaround_show_progress=True,
+    lookaround_wait_window_close=True,
+    lookaround_export_pcd_path=str(PROJECT_ROOT / "output/lookaround_merged.ply"),
+    lookaround_export_mesh_path=str(PROJECT_ROOT / "output/lookaround_mesh.ply"),
+    lookaround_poisson_backend="open3d",
+    nbv_enabled=False,
     K_max=5,
     confirm_each_move=True,
     robot_speed_deg_s=ROBOT_SPEED_DEG_S,

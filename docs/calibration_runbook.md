@@ -313,7 +313,7 @@ python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 --write   # ③ �
 저장 시 자세를 **이동거리 최소 순서로 재배열**하고 자세↔자세 경로를 충돌 검사한다
 — 그래서 `--no-via-home` 을 안전하게 쓸 수 있다.
 
-**충돌 셀 모델**(`4_collision.md` §6)에서 턴테이블 원판을 찾아 그 위 반구에 자세를
+**충돌 셀 모델**(`collision.md` §6)에서 턴테이블 원판을 찾아 그 위 반구에 자세를
 깔고, 해석 IK + 충돌 게이트로 거른다. sim 이 쓰는 생성기와 **같은 코드**다.
 
 - 로봇도 스캐너도 필요 없다 — **오프라인**에서 만든다
@@ -325,7 +325,7 @@ python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 --write   # ③ �
 `hand_eye_calib` 이 그걸 컨트롤러 IK 로 다시 풀어서 가는데, 7축이라 같은 TCP 에
 해가 무한히 많아 **검증한 자세와 실제로 가는 자세가 달라진다**(실측 Δq 140~251°).
 2026-09-15 에 이것 때문에 첫 자세 이동 중 턴테이블과 충돌 직전까지 갔다
-— `4_collision.md` T7.
+— `collision.md` T7.
 
 걸러지는 조건 넷: IK 실패 · **관절 한계 여유 5° 미만** · 자세 충돌 ·
 **home→자세 경로 충돌**. 마지막 둘이 없으면 위 사고가 재현된다.
@@ -469,7 +469,7 @@ python scripts\artec\turntable_overlay.py       # 눈으로 검사 (T_B_F0 를 �
 ↑ **2026-09-16 현재 저장된 값이 내는 결과다.** 턴테이블 축이 셀 모델과 다른 곳을
 가리킨다(`T_B_F0` 원점 `[-0.626, -0.177, -0.810]`, base 기준 1.04m).
 
-> 셀 모델 쪽이 의심되면 `docs/4_collision.md` §6 을 본다. 두 값이 독립이라
+> 셀 모델 쪽이 의심되면 `docs/collision.md` §6 을 본다. 두 값이 독립이라
 > **둘이 맞으면 서로를 보증**하고, 안 맞으면 둘 중 하나가 틀린 것이다.
 
 통과하면 실제 스캔으로 확인한다:
@@ -511,7 +511,7 @@ python main_artec.py          # BACKEND = "real" 확인
 | 스캐너 교체 | **T_EC** (개체마다 광학 프레임이 다르다) · 그 다음 T_B_F0 |
 | 스캐너 탈착 후 재장착 | T_EC |
 | 턴테이블 이설·재조립 | T_B_F0 |
-| 프레임·로봇 마운트 이동 | T_B_F0 + **충돌 캐시** (`4_collision.md` §6) |
+| 프레임·로봇 마운트 이동 | T_B_F0 + **충돌 캐시** (`collision.md` §6) |
 | 렌즈·센서 교체 | intrinsic 부터 전부 |
 | 로봇 교체 | 위 전부 + **`xarm7_dh.yaml` 재교정** (개체 종속) |
 
@@ -522,5 +522,5 @@ python main_artec.py          # BACKEND = "real" 확인
 - 원리·근거·함정 — `1_calibration.md`
 - 좌표 규약 · 단위 — `README.md` §규약
 - 로봇 수동 조작 — `robot_control.md`
-- 셀 모델이 실물과 다를 때 — `4_collision.md` §6
+- 셀 모델이 실물과 다를 때 — `collision.md` §6
 - 설치 — `install.md`

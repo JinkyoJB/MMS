@@ -1,12 +1,12 @@
 """
-MMS Phase 1 Recovery 시뮬레이션 [버전2: 윗면 미포착] - Isaac Sim 5.1.0 (Extension)
+MMS lookaround Recovery 시뮬레이션 [버전2: 윗면 미포착] - Isaac Sim 5.1.0 (Extension)
 
-(버전1 빗나감은 MMS_ext_phase1_recovery1.py)
+(버전1 빗나감은 MMS_ext_lookaround_recovery1.py)
 
 목적
 ----
 tracking-lost → **자동 recovery**(safe-back + 자세 재탐색 + 재개) 메커니즘을 sim 에서 검증.
-(cf. docs/2_phase1.md §6, docs/main_flow.md §6)
+(cf. docs/3_lookaround.md §6, docs/main_flow.md §6)
 
 ★ trigger 설계 (왜 이렇게?)
    실물 recovery 는 SLAM tracking-lost(overlap/feature/framing 불량)로 발동. sim 엔 SLAM 이
@@ -22,7 +22,7 @@ tracking-lost → **자동 recovery**(safe-back + 자세 재탐색 + 재개) 메
 2. RECOVERY: θ safe-back → elevation 후보(25/40/55°) preview → 윗면비율 최대 자세 선택 → 재이동.
 3. 재개 → 윗면 포함 5면 재구성. recovery 발생/성공 보고.
 
-실행: VSCode Isaac 확장/Script Editor. 결과 → captures_phase1_recovery2/.
+실행: VSCode Isaac 확장/Script Editor. 결과 → captures_lookaround_recovery2/.
 """
 
 import os
@@ -106,7 +106,7 @@ JOINTS_SCOPE = "/World/xarm7/joints"
 CAMERA_PRIM  = "/World/xarm7/link7/tool/spider/Camera"
 MARBLE_PRIM_PATH = os.environ.get("MMS_SIM_OBJECT_PRIM", "/World/ScanTarget/TestObject")
 TURNTABLE_MESH = "/World/frame/turntable_disc"
-OBJ_PATH     = "/World/Phase1Object"
+OBJ_PATH     = "/World/lookaroundObject"
 
 INITIAL_JOINT_POS = {f"joint{i}": 0.0 for i in range(1, 8)}
 SPIDER_HFOV_DEG, SPIDER_CLIP = 30.0, (0.15, 0.45)
@@ -143,7 +143,7 @@ PHYSICS_CB_NAME = "mms_recov2_step"
 
 _BASE_DIR = os.environ.get("MMS_HARNESS_OUT",
     os.path.expanduser("~/isaacsim/standalone_examples/play/MMS"))
-OUT_DIR = os.path.join(_BASE_DIR, "captures_phase1_recovery2")
+OUT_DIR = os.path.join(_BASE_DIR, "captures_lookaround_recovery2")
 os.makedirs(OUT_DIR, exist_ok=True)
 LOG_PATH = os.path.join(OUT_DIR, "calib_log.txt")
 try:

@@ -59,7 +59,7 @@ def show_textured_obj(obj_path: str, title: str) -> bool:
     return True
 
 
-def show_composite_mesh(result, title: str = "Artec Phase 1",
+def show_composite_mesh(result, title: str = "Artec lookaround",
                         obj_path: Optional[str] = None) -> None:
     """
     스캔 결과(`result.model`)를 표시. 우선순위:

@@ -1,7 +1,7 @@
 # Calibration — Hand-Eye(`T_EC`) & Turntable(`T_B_F0`)
 
 > MMS 의 두 가지 캘리브를 한 문서에. *무엇을·왜·어떻게* + *어느 함수가 무슨 일을 하는지*.
-> 다음 단계는 `2_phase1.md`.
+> 다음 단계는 `3_lookaround.md`.
 > - **Part 1 — Hand-Eye `T_EC`**: 카메라가 로봇 손목(EE)에 어떻게 붙어있나.
 > - **Part 2 — Turntable `T_B_F0`**: 턴테이블이 로봇 base 기준 어디서·어느 축으로 도나.
 > - **Part 3 — 전체 캘리브레이션**: 위 둘을 어떤 **순서**로 돌리나 (`calibrate.py`).
@@ -246,7 +246,7 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 2 -- \
 > **규약**: `T_B_F0` 는 **B→F** 방향이다(`x_F = T_B_F0 · x_B`).
 > F 프레임의 z축은 회전축(위쪽), 원점은 축이 disc 표면과 만나는 점이다.
 
-Phase 2 의 조준, NBV 계획, tracking-lost recovery, 충돌 회피가 모두 이 값에 의존한다.
+nbv 의 조준, NBV 계획, tracking-lost recovery, 충돌 회피가 모두 이 값에 의존한다.
 하드웨어를 옮기면 전부 무효가 되므로, 다시 잡는 절차를 간단하게 유지하는 것이 중요하다.
 
 ## 6. Rim 방법
@@ -551,7 +551,7 @@ T_EC_usd = R_FLIP @ T_EC_ocv      ← T_EC 는 카메라가 출력측이라 왼�
 
 > `start(...)` 사유는 **출발 자세가 이미 여유 밖**이라는 뜻이다. 하니스는 이때 경고만
 > 남기고 이동한다 — 거부하면 이후 전부가 같은 이유로 막히는 연쇄가 생긴다
-> (`4_collision.md` T5).
+> (`collision.md` T5).
 
 ## T5. 결과 해석 (sim)
 
@@ -581,7 +581,7 @@ point-consistency(고정점을 여러 자세서 base 로 변환 후 산포)로 �
 
 ## T7. 알려진 문제
 
-- ⚠ **`turntable_frame.yaml` stale 의심** — 2026-04-23(Artec 장착 이전). Phase 2 조준·
+- ⚠ **`turntable_frame.yaml` stale 의심** — 2026-04-23(Artec 장착 이전). nbv 조준·
   recovery·충돌회피가 전부 여기 의존한다. **정밀도 의심 시 재캘리브 1순위.**
 - ⚠ **드라이브 계통 오차** — 완전 정지(속도 0) 후에도 목표 대비 joint1 +1.4° /
   joint2~7 +0.45~0.8° 가 남는다. 게인을 100배 올려도 joint1 은 불변이라 제어 문제가

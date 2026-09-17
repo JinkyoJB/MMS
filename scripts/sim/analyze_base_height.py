@@ -1,7 +1,7 @@
 """
 analyze_base_height.py — 로봇 베이스 높이(ΔH) vs NBV 후보 feasibility 스윕.
 
-목적: Phase2 고도각(윗면 보강) 자세에서 링크꼬임/스캐너-손목 근접이 문제 →
+목적: nbv 고도각(윗면 보강) 자세에서 링크꼬임/스캐너-손목 근접이 문제 →
 베이스를 얼마나 올리면 해결되는지 정량화해 하드웨어팀에 ΔH 전달.
 (real 도 동일하게 올릴 예정 — sim 선행 검증, 2026-07-08)
 
@@ -27,7 +27,7 @@ from utils.robot import xarm7_kinematics as kin                    # noqa: E402
 from utils.collision.robot_collision import (                      # noqa: E402
     CollisionWorld, pose_collision, capsules_from_joints,
     DEFAULT_LINK_RADII, seg_seg_distance)
-from utils.nbv.phase1_viewpoint import look_at_R                   # noqa: E402
+from utils.nbv.lookaround import look_at_R                   # noqa: E402
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "log", "testset_points")

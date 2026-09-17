@@ -159,7 +159,7 @@ def _cross_check_cell(t_bf0: np.ndarray) -> None:
         say(WARN, f"점이 {near}개뿐 — 위치가 조금 어긋났거나 원판이 캐시에 없다")
     else:
         say(FAIL, "그 자리에 아무것도 없다",
-            "T_B_F0 와 셀 모델 중 하나가 틀렸다. docs/4_collision.md §6 · "
+            "T_B_F0 와 셀 모델 중 하나가 틀렸다. docs/collision.md §6 · "
             "docs/calibration_runbook.md §5 참고")
 
 

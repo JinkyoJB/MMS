@@ -1,23 +1,23 @@
-# Phase 3 — 바닥면 flip & 병합 (`T_pre`)
+# flip — 바닥면 flip & 병합 (`T_pre`)
 
 > 대상물을 손으로 뒤집어 원판에 닿아 있던 바닥면을 얻고, 앞서 얻은 스캔과 하나로 합친다.
 > **결과 메시가 어긋나거나 둥둥 떠 있으면 거의 항상 `T_pre` 문제다.**
 >
-> 앞 단계 `2_phase1.md` · `3_phase2.md` · 후처리 `6_postprocess.md`
+> 앞 단계 `3_lookaround.md` · `4_nbv.md` · 후처리 `6_postprocess.md`
 
 ---
 
 ## 1. 실행과 설정
 
-`phase_mode = 3` 으로 두면 Phase 1 → 2 → 3 이 이어서 돈다. Phase 3 은 **사람이 물체를
+`stage_until = 3` 으로 두면 lookaround → 2 → 3 이 이어서 돈다. flip 은 **사람이 물체를
 뒤집는 단계**라 자동으로 넘어가지 않고, 회전 안내를 출력한 뒤 `[Enter]` 를 기다린다.
 
 ```bash
 ./scripts/sim/run_e2e_gui.sh spray_can 3 planner    # sim
-env -u PYTHONPATH $MMS_PYTHON main_artec.py         # real (BACKEND="real", phase_mode=3)
+env -u PYTHONPATH $MMS_PYTHON main_artec.py         # real (BACKEND="real", stage_until=3)
 ```
 
-로봇은 Phase 2 에서 움직인 자세를 `go_home` 으로 되돌린 뒤 **home 에 고정**된다. 회전은
+로봇은 nbv 에서 움직인 자세를 `go_home` 으로 되돌린 뒤 **home 에 고정**된다. 회전은
 사람이 하고 로봇은 그 자리에서 턴테이블 한 바퀴를 찍는다.
 
 ### 어떤 자세로 뒤집나
@@ -28,7 +28,7 @@ env -u PYTHONPATH $MMS_PYTHON main_artec.py         # real (BACKEND="real", phas
 POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
 ```
 
-base 프레임 Y 축 기준 회전이고 순서대로 pose 0 = canonical(Phase 1·2 가 쓴 자세),
+base 프레임 Y 축 기준 회전이고 순서대로 pose 0 = canonical(lookaround·nbv 가 쓴 자세),
 pose 1 = 옆으로 눕힘, pose 2 = 바닥면이다. 축이나 각을 바꾸려면 이 줄을 고친다.
 
 | 설정 | 뜻 | 기본 |
@@ -76,7 +76,7 @@ for i in range(scan.frame_count()):
 
 ### ① 아무것도 없으면 — `T_pre = None`
 
-Phase 1 첫 pass 다. 사용자가 물체를 안 돌렸고 recovery 도 안 났다. IScan_1 의 좌표가 곧
+lookaround 첫 pass 다. 사용자가 물체를 안 돌렸고 recovery 도 안 났다. IScan_1 의 좌표가 곧
 master 좌표가 되고 `master_center` 는 그 vertex 평균으로 고정(lock)된다.
 
 ### ② 사용자가 물체를 돌렸으면 — R_phys hint
@@ -166,8 +166,8 @@ Artec Studio 는 사용자가 manual alignment 로 시작 transform 을 주어 �
 ### T3. 〔미검증〕 flip 후 두 SLAM 스캔의 정합 병합
 
 sim 에서는 GT 로 검증했지만 **실물에서 flip 뒤 병합이 확인된 적이 없다.** hint 를 적용했을
-때 GlobalRegistration 을 정말 건너뛰어도 되는지(§3 ②)도 실기에서 봐야 한다. Phase 3 은
-`phase_mode = 3` 으로만 켜지므로, 첫 실물은 1 → 2 → 3 순서로 단계적으로 올린다.
+때 GlobalRegistration 을 정말 건너뛰어도 되는지(§3 ②)도 실기에서 봐야 한다. flip 은
+`stage_until = 3` 으로만 켜지므로, 첫 실물은 1 → 2 → 3 순서로 단계적으로 올린다.
 
 ### T4. 규약
 

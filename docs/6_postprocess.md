@@ -26,7 +26,7 @@
 | `export_obj_path` / `export_sproj_path` | 결과 저장 경로 | 타임스탬프로 자동 |
 
 캡처는 **streaming(`IScanningProcedure`) 하나**다. `use_multipass_scan` 으로
-멀티패스(Phase 1→2→3 · tracking-lost 복구) 여부만 고르고,
+멀티패스(lookaround→2→3 · tracking-lost 복구) 여부만 고르고,
 `streaming_scan_settings` / `multipass_settings` 에 각 설정을 넣는다.
 
 > 옛 discrete 경로(`artec_scan_session.py`)와 그걸 고르던 `use_streaming_scan`·
@@ -42,7 +42,7 @@
 | 순서 | 알고리즘 | 단위 | 비고 |
 |---|---|---|---|
 | 1 | SerialRegistration | frame-to-frame | streaming 이 이미 정합했으면 불필요 |
-| 2 | GlobalRegistration | IModel 전체 | `hints_applied=True` 면 **자동 skip**(`5_phase3_merge.md` §3②) |
+| 2 | GlobalRegistration | IModel 전체 | `hints_applied=True` 면 **자동 skip**(`5_flip.md` §3②) |
 | 3a | OutliersRemoval | per-frame | **★ Fusion 전.** `dev_mode` 면 skip |
 | 3b | SmallObjectsFilter | per-frame | **★ Fusion 전** |
 | 4 | Poisson / FastFusion | clean frames → composite | watertight mesh |
@@ -58,7 +58,7 @@ IFrame → IFrameMesh → IScan → IModel → ICompositeMesh
 streaming 모드에서는 `result.ctx = None` 이고, θ 와 EE pose 같은 외부 메타는 별도
 timeline CSV 로 남는다.
 
-Phase 2 가 frontier 검출용으로 만드는 임시 메시는 이 파이프라인이 아니라 `fast_fusion`
+nbv 가 frontier 검출용으로 만드는 임시 메시는 이 파이프라인이 아니라 `fast_fusion`
 (정확히는 `pcd_to_mesh_poisson` depth 6)이다. 판단용이라 가볍게 만든다.
 
 ---
@@ -106,6 +106,6 @@ Texturize 까지 가기 때문이다. **OutliersRemoval 과 SmallObjectsFilter �
 PointCloud 를 못 그린다. 이 조합이 유일하게 검증된 구성이다.
 
 ### T3. hint 를 줬는데 GlobalRegistration 이 다시 흩뜨린다
-`hints_applied` 가 안 켜진 것이다. Phase 3 의 centroid-pivot hint 가 적용되면 이 플래그가
+`hints_applied` 가 안 켜진 것이다. flip 의 centroid-pivot hint 가 적용되면 이 플래그가
 켜지고 2단계를 건너뛴다. 켜졌는데도 어긋나면 hint 자체를 의심한다
-(`5_phase3_merge.md` T1).
+(`5_flip.md` T1).

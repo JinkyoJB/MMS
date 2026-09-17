@@ -1,17 +1,17 @@
 # sim_harness — Isaac Sim 검증 하니스
 
 알고리즘을 실물에 올리기 전에 **ground-truth 를 아는 가상환경에서 먼저 확인**하는
-스크립트들. `docs/1_calibration.md` · `2_phase1.md` · `3_phase2.md` 가 이 파일들을 참조한다.
+스크립트들. `docs/1_calibration.md` · `3_lookaround.md` · `4_nbv.md` 가 이 파일들을 참조한다.
 
 | 파일 | 검증 대상 | 관련 문서 |
 |---|---|---|
 | `MMS_ext.py` | 기본 환경·카메라·드라이브 게인 (나머지의 베이스) | — |
 | `MMS_ext_calibration.py` | **hand-eye** — ChArUco 렌더 → solvePnP → `AX=ZB` → GT 대조 | `1_calibration.md` |
 | `MMS_ext_calibration2.py` | **턴테이블 축** — rim 자동추출 → 원 피팅 → GT 대조 | `1_calibration.md` |
-| `MMS_ext_phase1.py` | Phase 1 — GT 누적으로 view-planning 검증 (SLAM 없음) | `2_phase1.md` |
-| `MMS_ext_phase1_recovery1.py` | recovery — **빗나감**(대상물을 측면으로 조준) | `2_phase1.md` §6 |
-| `MMS_ext_phase1_recovery2.py` | recovery — **윗면 미포착**(너무 낮은 el) | `2_phase1.md` §6 |
-| `MMS_ext_phase2_nbv.py` | Phase 2 NBV 루프 | `3_phase2.md` §6.4 |
+| `MMS_ext_lookaround.py` | lookaround — GT 누적으로 view-planning 검증 (SLAM 없음) | `3_lookaround.md` |
+| `MMS_ext_lookaround_recovery1.py` | recovery — **빗나감**(대상물을 측면으로 조준) | `3_lookaround.md` §6 |
+| `MMS_ext_lookaround_recovery2.py` | recovery — **윗면 미포착**(너무 낮은 el) | `3_lookaround.md` §6 |
+| `MMS_ext_nbv.py` | nbv NBV 루프 | `4_nbv.md` §6.4 |
 
 ## 터미널에서 돌리려면 → `scripts/sim/calib_handeye_sim.py`
 

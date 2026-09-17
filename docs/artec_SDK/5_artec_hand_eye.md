@@ -311,7 +311,7 @@ T_EC_artec:
 
 PhoXi 의 SDK 마커 검출 ↔ Artec 의 텍스처 카메라 + cv2.aruco 의 차이를 메우는 데
 시행착오가 있었지만, 최종 파이프라인은 **표준 (camera + ChArUco + solvePnP)** 와
-거의 동일. 결과 잔차 3.55mm 는 Phase 1 rule-based 360° + ICP 에 충분.
+거의 동일. 결과 잔차 3.55mm 는 lookaround rule-based 360° + ICP 에 충분.
 
 다음 작업: `main.py` 의 `CFG` 를 `ArtecConfig + T_EC_key="T_EC_artec"` 로 갈아끼우고
 실제 turntable 스캔 1회 시도.

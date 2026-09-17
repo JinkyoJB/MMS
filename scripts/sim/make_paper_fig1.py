@@ -28,11 +28,11 @@ def arrow(y0, y1, label):
     ax.text(BX + 15, (y0 + y1) / 2, label, ha="left", va="center",
             fontsize=6.3, color="0.35")
 
-box(TOPS[0], "Phase 1  first sweep",
+box(TOPS[0], "lookaround  first sweep",
     ["target: the whole object", "split into overlapping height bands"])
-box(TOPS[1], "Phase 2  gap-driven sweeps",
+box(TOPS[1], "nbv  gap-driven sweeps",
     ["target: boundary of the current model", "repeat until no upward gap remains"])
-box(TOPS[2], "Phase 3  bottom face",
+box(TOPS[2], "flip  bottom face",
     ["flip the object, sweep, and merge", "with the model from Phases 1-2"])
 arrow(TOPS[0] - 0.5, TOPS[1] + BH + 0.5, "gaps remain")
 arrow(TOPS[1] - 0.5, TOPS[2] + BH + 0.5, "downward gaps only")

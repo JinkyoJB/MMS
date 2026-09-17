@@ -3,7 +3,7 @@
 > 웹판: https://claude.ai/code/artifact/ec1c4f39-e223-4e0e-a595-636e8fe4b06c
 > 재생성: `scripts/sim/testset_sweep.sh` → `eval_vs_gt.py` → `build_results_page.py`
 
-120프레임/rev, Phase 1(측면 전회전) → 2(부족면 NBV) → 3(flip 바닥면) 전체 실행.
+120프레임/rev, lookaround(측면 전회전) → 2(부족면 NBV) → 3(flip 바닥면) 전체 실행.
 스윕이 코드 결함 **7건**을 드러냈고, 모두 수정한 상태로 9종을 한 번에 돌린 결과다.
 
 **평균 F@1mm 81.7% · 최저 64.4% · 평균 Chamfer 0.77mm**
@@ -31,7 +31,7 @@
 
 | # | 결함 | 수정 | 근거 |
 |---|---|---|---|
-| 1 | 밴드 1개 실패 시 Phase 2·3 전체 중단 | 실패 밴드만 건너뛰고 계속 | hand drill·spray can 중단 → 완주 |
+| 1 | 밴드 1개 실패 시 nbv·flip 전체 중단 | 실패 밴드만 건너뛰고 계속 | hand drill·spray can 중단 → 완주 |
 | 2 | 충돌 게이트가 밴드 경로에 누락 | legacy 와 동일 게이트 (충돌 시 다음 az) | az0 은 4mm 차 자가충돌, az30 통과 |
 | 3 | 경계 지표를 "낮을수록 좋다"로 역해석 | GT 대조층 신설 + 수렴을 신규 점유복셀로 교체, gap 단위 dry 회계 | drill compl 37.9→52.7% 인데 경계는 519→800 |
 | 4 | 정합 게이트가 평행이동 오류를 통과 | 합집합 bbox 팽창 검사 (sim·real 양쪽) | laundry 45.1→58.5%, protein 56.5→68.9%, 오탐 0건 |
@@ -46,7 +46,7 @@
 
 ## 실행 지표 (경계/gap 은 실행 중 관측치 — 판단은 위 GT 표로)
 
-| 물체 | 크기(H×D) | 밴드 | Phase 1 | 패치 | 수렴 | Phase 2 | flip |
+| 물체 | 크기(H×D) | 밴드 | lookaround | 패치 | 수렴 | nbv | flip |
 |---|---|---|---|---|---|---|---|
 | mustard | 192×96mm | 1 | 428mm/8 | 4 | 후보소진 | 273mm/5 | 180° |
 | hand drill | 187×162mm | 2 | 547mm/11 | 8 | 상한 | 717mm/15 | 180° |
@@ -124,4 +124,4 @@ F@1mm **72.9%** · 완전성 70.7% · Chamfer 0.74mm · 182,721면 · bbox 143×
 | ![정면](figures/testset/0263_protein_drink__정면.jpg) | ![측면](figures/testset/0263_protein_drink__측면.jpg) | ![윗면](figures/testset/0263_protein_drink__윗면.jpg) | ![아랫면](figures/testset/0263_protein_drink__아랫면.jpg) |
 
 ---
-렌더: Poisson depth 8, 정점색 제거 + 균일 재질. 아랫면 뷰가 Phase 3 flip 성패를 보여준다. 원본 OBJ `scripts/sim/log/testset_sweep/render/`, GT `scripts/sim/log/gt/`.
+렌더: Poisson depth 8, 정점색 제거 + 균일 재질. 아랫면 뷰가 flip flip 성패를 보여준다. 원본 OBJ `scripts/sim/log/testset_sweep/render/`, GT `scripts/sim/log/gt/`.

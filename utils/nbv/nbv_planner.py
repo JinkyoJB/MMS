@@ -1,8 +1,8 @@
-"""nbv_planner.py — Phase 2 관측자세 선택 래퍼. **sim·real 공용**.
+"""nbv_planner.py — nbv 관측자세 선택 래퍼. **sim·real 공용**.
 
 왜 공용인가
 ----------
-`phase2_nbv.plan_nbv_elevation_pose` 는 이미 공용이었지만, **그것을 감싸는 판단들**이
+`nbv_core.plan_nbv_elevation_pose` 는 이미 공용이었지만, **그것을 감싸는 판단들**이
 sim 쪽에만 쌓였다. 2026-08 시점의 실측 격차:
 
     항목                        sim   real
@@ -15,10 +15,10 @@ sim 쪽에만 쌓였다. 2026-08 시점의 실측 격차:
 전부 **순수 기하·기록 로직**이라 sim 의존성이 없다. 여기로 모아 양쪽이 같은 판단을
 쓰게 한다. 백엔드가 주입하는 것은 (1) 충돌 판정, (2) 좌표계·hand-eye 뿐이다.
 
-핵심 판단 세 가지 (근거: docs/hw_layout.md, docs/4_collision.md)
+핵심 판단 세 가지 (근거: docs/hw_layout.md, docs/collision.md)
 --------------------------------------------------------------
 1. **아랫면 gap 은 NBV 대상이 아니다** — 턴테이블에 가려 어떤 관측 elevation 으로도
-   못 본다(Phase 3 flip 의 몫). 넘기면 el_need 중앙값만 끌어내려 **측면 보강까지
+   못 본다(flip flip 의 몫). 넘기면 el_need 중앙값만 끌어내려 **측면 보강까지
    방해**한다(실측: 중앙값이 -3° 까지 내려갔다).
 2. **visited 를 반드시 넘긴다** — az 를 '관절이동 최소'로 고르므로, 직전 자세의
    이동비용이 0 이라 같은 자세를 무한 반복한다(실측: el=65 az=-30 을 4회 연속,
@@ -34,7 +34,7 @@ import time as _time
 
 import numpy as np
 
-from utils.nbv import phase2_nbv as p2
+from utils.nbv import nbv_core as p2
 
 DOWN_NZ = -0.6      # 바깥법선 z 가 이보다 작으면 '아랫면'
 UP_NZ = 0.6
@@ -89,7 +89,7 @@ def split_inward(gaps, axis_xy):
 
 
 class NbvPlanner:
-    """Phase 2 자세 선택기. **visited 를 세션 동안 유지**한다.
+    """nbv 자세 선택기. **visited 를 세션 동안 유지**한다.
 
     solve_pose_fn(el, az, rolls) -> (q | None, roll_used | None)
     swept_free_fn(q0, q1)        -> (ok: bool, why: str)
@@ -151,7 +151,7 @@ class NbvPlanner:
         #   해서 후보 조합(방위×기울임)이 **전부** IK 불능인데, 도달상한 사전필터는
         #   위치만 보므로 못 거른다 → 조합마다 수치 IK 를 끝까지 소진한다.
         #   실측 2026-09-16: 후보 25개 중 아랫면 14개, 후보당 ~20s = 5분 낭비.
-        #   아랫면은 Phase 3 flip 의 몫이다.
+        #   아랫면은 flip flip 의 몫이다.
         _, _, _, nz = classify_gaps(gaps, self.up_sign)
         n_dn = sum(1 for z in nz if z < DOWN_NZ)
         if n_dn:
@@ -253,7 +253,7 @@ class NbvPlanner:
 
         usable = [c for c, z in zip(gaps, nz) if z >= DOWN_NZ]
         if n_dn:
-            self.log(f"{self.tag}  ↳ 아랫면 {n_dn}개는 NBV 대상 제외 (Phase 3 flip 필요)")
+            self.log(f"{self.tag}  ↳ 아랫면 {n_dn}개는 NBV 대상 제외 (flip flip 필요)")
         if not usable:
             self.log(f"{self.tag}NBV: 남은 gap 이 전부 아랫면 — flip 으로만 해결 가능")
             return None

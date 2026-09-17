@@ -76,7 +76,7 @@ class IsaacTurntable:
         p2w = xc.GetLocalToWorldTransform(prim.GetParent())
         op = xf.MakeMatrixXform()
         op.Set(base)
-        # base0 = **원래** local transform (Phase 3 flip 이 절대각으로 합성될 기준).
+        # base0 = **원래** local transform (flip flip 이 절대각으로 합성될 기준).
         #   path 도 보관 — flip 대상 rider 를 찾아야 한다.
         self._riders.append([op, base, p2w, p2w.GetInverse(),
                              str(prim.GetPath()), base])
@@ -106,7 +106,7 @@ class IsaacTurntable:
     def set_rider_flip(self, prim_path: str, M_world) -> bool:
         """rider 를 world 프레임 변환 `M_world`(4x4, column 규약) 자세로 둔다.
 
-        ★ Phase 3(바닥면 flip) 전용. 물체 prim 의 transform 을 **직접 쓰면 안 된다** —
+        ★ flip(바닥면 flip) 전용. 물체 prim 의 transform 을 **직접 쓰면 안 된다** —
           `_co_rotate` 가 캐시된 `base` 로 매 회전마다 덮어써서 flip 이 지워지고,
           누적 좌표 보정(`_unflip`)만 남아 점군이 망가진다(실측: boundary 887→1606mm,
           물체 Z 가 74→90mm 로 부풀었다).

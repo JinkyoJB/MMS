@@ -1,6 +1,6 @@
-# utils/nbv/phase2_nbv.py
+# utils/nbv/nbv_core.py
 #
-# Phase 2 (부족면 NBV 보강) 의 **하드웨어 무관 코어** (docs/3_phase2.md §3).
+# nbv (부족면 NBV 보강) 의 **하드웨어 무관 코어** (docs/4_nbv.md §3).
 #
 # master B-프레임 colored pcd  →  Poisson mesh  →  frontier(구멍) 검출  →
 # NBV 목표 카메라 포즈 생성  +  커버리지 수렴 지표.
@@ -242,7 +242,7 @@ def gap_normal_elevations_deg(gaps, top_k: int = 8,
 
     `up_sign` — 작업 프레임에서 어느 z 방향이 '위'인가 (+1 = +Z 가 위).
       sim 은 world 프레임이라 +1. real 은 천장 마운트 base 라 **−1**
-      (`docs/4_collision.md` §6.1) — 부호 없이 n_z 를 그대로 쓰면 윗면 gap 이
+      (`docs/collision.md` §6.1) — 부호 없이 n_z 를 그대로 쓰면 윗면 gap 이
       elevation **−90°** 로 나와 윗면/아랫면 판정이 통째로 뒤집힌다.
     """
     s = float(np.sign(up_sign)) or 1.0
