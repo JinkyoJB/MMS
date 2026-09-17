@@ -11,7 +11,8 @@ import numpy as np
 from utils import PROJECT_ROOT
 from utils.viz import show_composite_mesh   # open3d 는 함수 안에서 lazy import
 # stage_until 해석은 sim·real·main 공용 (기본값 불일치 방지)
-from utils.nbv.scan_stage_controller import resolve_stage_until, stage_desc
+from utils.nbv.scan_stage_controller import (
+    resolve_stage_until, stage_desc, runs_stage, STAGES as _STAGES)
 
 # excure command:
 # env -u PYTHONPATH $MMS_PYTHON main_artec.py   # 기본: ~/miniconda3/envs/env_isaacsim/bin/python
@@ -82,6 +83,25 @@ if os.environ.get("MMS_NO_LOGFILE") != "1":
         def isatty(self):
             return getattr(self._s, "isatty", lambda: False)()
 
+        # ★ 아래 셋은 **Isaac 을 띄우기 위해** 필요하다. `SimulationApp.__init__` 이
+        #   `faulthandler.enable()` 을 부르는데, 그건 sys.stderr 의 **진짜 fd** 를
+        #   요구한다. 없으면 `AttributeError: '_Tee' object has no attribute
+        #   'fileno'` 로 Isaac 이 뜨기도 전에 죽는다(2026-09-17).
+        #   → tee 를 걸면 sim 이 아예 실행되지 않았다. `MMS_NO_LOGFILE=1` 로
+        #     돌리면 통과하는 바람에 한동안 안 드러났다.
+        #   원본 스트림의 fd 를 그대로 넘긴다 — faulthandler 는 콘솔로 쓰고,
+        #   로그 파일에는 파이썬 레벨 write 만 남는다(네이티브 크래시 추적은
+        #   콘솔 쪽에만 남는 것이 정상).
+        def fileno(self):
+            return self._s.fileno()
+
+        def writable(self):
+            return True
+
+        @property
+        def encoding(self):
+            return getattr(self._s, "encoding", "utf-8")
+
     try:
         import sys as _sys
         _LOG_DIR = PROJECT_ROOT / "output"
@@ -99,7 +119,11 @@ from mms_artec.sensor.artec_config import ArtecConfig   # 바인딩 비의존(�
 # ── 백엔드 선택 ───────────────────────────────────────────────────────
 #   "real"  → 실물 xArm + 턴테이블 + Artec 스캐너 (Windows)
 #   "isaac" → Isaac Sim 시뮬레이션 (옆에 실물 없이 개발)
-BACKEND = "real"
+#   환경변수 `MMS_BACKEND` 로 덮어쓸 수 있다 — 소스를 고치지 않고 복붙 한 줄로
+#   sim/real 을 바꾸기 위해서다(`docs/sim_commands.md` §0).
+BACKEND = os.environ.get("MMS_BACKEND", "isaac").strip().lower()
+if BACKEND not in ("real", "isaac"):
+    raise SystemExit(f"[main] MMS_BACKEND={BACKEND!r} — 'real' 또는 'isaac' 이어야 한다")
 # ★ 여기(BACKEND)는 **사람이 바꾸는 스위치**일 뿐이다. CFG 를 만든 뒤부터는
 #   진실의 출처가 `CFG.backend` 하나다 — 코드에서 백엔드를 분기할 때는
 #   반드시 CFG.backend 를 쓸 것(둘을 섞으면 나중에 갈라진다).
@@ -132,6 +156,13 @@ CFG = ArtecMMSConfig(
         serial_number=None,                 # None → 첫 번째 스캐너 (Spider SP.10.79103441)
         capture_texture=True,
         target_interval_s=0.0,
+        # ── 작동거리 창 (mm) — **실험 중 여기만 바꾼다** ──────────────────
+        #   None = SDK 기본값. 값을 주면 ① 단일캡처(FrameProcessor)
+        #   ② 스트리밍 스캔(ScanSession) ③ 계획기 `SensorModel.dof` 가 **모두**
+        #   이 값을 따른다. 자세한 건 README '작동거리 창을 바꾸려면'.
+        #   실측 로그: `[ArtecClient] 작동거리 창 = ???~???mm`
+        scan_range_near_mm=None,
+        scan_range_far_mm=None,
     ),
     turntable_frame_yaml=str(PROJECT_ROOT / "config/calibration/turntable_frame.yaml"),
     sensor_frames_yaml=str(PROJECT_ROOT / "config/sensor_frames.yaml"),
@@ -164,13 +195,13 @@ if _SCAN_SETTINGS_AVAILABLE:
         timeline_csv_path=str(PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}_timeline.csv"),
     )
 
-    # ── Multi-pass: stage_until = lookaround 부터 **순차 누적** 실행 ────────────
-    #   1 = lookaround(5면) / 2 = lookaround→2(NBV) / 3 = lookaround→2→3(바닥면 flip)
-    # ★ 첫 Spider 테스트는 stage_until=1 로 5면 확인 후 2→3 으로 올릴 것(2·3 미검증).
+    # ── Multi-pass: stage_until = **여기까지** 순차 실행 ──────────────────
+    #   preview → lookaround → nbv → flip  (앞 단계는 항상 포함된다)
+    # ★ 첫 Spider 테스트는 "lookaround" 로 5면 확인 후 nbv→flip 으로 올릴 것.
     # pose_physical_rotations = flip(바닥면 flip) 손회전 설정.
     POSE_ROTATIONS = make_axis_physical_rotations("y", [0.0, 90.0, 180.0])
     MULTIPASS_SETTINGS = ArtecMultiPassScanSessionSettings(
-        stage_until=3,                 # 순차 누적: 1=5면 / 2=+NBV / 3=+바닥면 flip
+        stage_until="flip",            # preview→lookaround→nbv→flip 전부
         streaming_settings=STREAM_SETTINGS,
         pose_physical_rotations=POSE_ROTATIONS,
         max_passes=8,
@@ -288,9 +319,35 @@ def main() -> None:
 
             _go_home(robot, confirm_home, "종료")    # flip 후 home 복귀
 
-            if result is not None and os.environ.get("MMS_SIM_NO_VIZ") != "1":
+            # ★ 결과 창은 **캡처를 실제로 한 경우에만** 띄운다.
+            #   `stage_until="preview"` 는 계획만 내고 끝나므로 모델이 비어 있다.
+            #   그때 창이 뜨면 (a) 빈 화면을 보여주고 (b) 제목의 단계 이름 때문에
+            #   "lookaround 까지 돌았나?" 로 오해하게 된다 — 실제로 그랬다.
+            _n_scan = 0
+            if result is not None:
+                try:
+                    _n_scan = int(result.model.scan_count())
+                except Exception:                             # noqa: BLE001
+                    _n_scan = 0
+            if result is None or os.environ.get("MMS_SIM_NO_VIZ") == "1":
+                pass
+            elif not runs_stage(_pm, "lookaround"):
+                print(f"[main] 캡처 단계를 안 돌았다 (stage_until={_pm!r}) "
+                      f"— 결과 창 생략")
+            elif _n_scan == 0:
+                print("[main] 스캔 결과가 비었다 (scans=0) — 결과 창 생략")
+            elif os.environ.get("MMS_ISAAC_HEADLESS", "0") == "1":
+                # ★ 헤드리스면 결과 창을 띄우지 않는다. `show_composite_mesh` 는
+                #   Open3D 창을 열고 **Q/ESC 를 누를 때까지 블록**한다 — 배치·CI·
+                #   nohup 실행은 눌러 줄 사람이 없어 거기서 영원히 멎는다
+                #   (2026-09-17 실측: 전체 파이프라인이 정상 종료해놓고 22분 대기).
+                #   헤드리스는 "창 없이" 라는 뜻이므로 여기서도 지켜야 한다.
+                print(f"[main] 헤드리스 — 결과 창 생략 "
+                      f"(메시: {PROCESS_SETTINGS.export_obj_path})")
+            else:
                 show_composite_mesh(
-                    result, obj_path=PROCESS_SETTINGS.export_obj_path)
+                    result, obj_path=PROCESS_SETTINGS.export_obj_path,
+                    title=f"Artec 스캔 결과 — {_pm} 까지")
 
     finally:
         # ── 정리 (CRITICAL) ───────────────────────────────────────────
@@ -356,8 +413,8 @@ def _apply_cli() -> None:
 
     ap = argparse.ArgumentParser(
         description="Artec MMS 실물 파이프라인 (단계별 실행 인자)")
-    ap.add_argument("--phase", type=int, choices=(1, 2, 3), default=None,
-                    help="1=lookaround(5면) · 2=+NBV · 3=+바닥면 flip "
+    ap.add_argument("--until", dest="until", choices=_STAGES, default=None,
+                    help="여기까지 실행 (preview → lookaround → nbv → flip) "
                          + (f"(기본 {m.stage_until})" if m is not None else ""))
     ap.add_argument("--max-passes", type=int, default=None,
                     help="pass 상한. **1 로 주면 한 자세만** 돌고 끝난다 — "
@@ -394,12 +451,12 @@ def _apply_cli() -> None:
             print("[main] --test: texturize 생략 (형상만 확인)")
 
     if m is None:
-        if any([a.phase, a.max_passes, a.no_planner, a.no_prompt,
+        if any([a.until, a.max_passes, a.no_planner, a.no_prompt,
                 a.no_viewer, a.no_recovery]):
             print("[main] ⚠ 스캔 설정을 못 불러왔다(바인딩 미빌드?) — 인자 무시")
         return
-    if a.phase is not None:
-        m.stage_until = int(a.phase)
+    if a.until is not None:
+        m.stage_until = str(a.until)
     if a.max_passes is not None:
         m.max_passes = int(a.max_passes)
     if a.no_planner:

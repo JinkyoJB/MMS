@@ -5,7 +5,7 @@
 2026-08 시점 실측: nbv 만 충돌을 검사하고 **lookaround·flip 은 무검사**였다.
 게다가 장애물이 3개(턴테이블 캡슐·프레임 AABB·keepout)뿐이라 벽·상판·저울·툴스탠드가
 빠져 있었다 — 이건 오탐이 아니라 **미탐**(칠 수 있는데 안전하다고 함)이라 실물 파손으로
-직결된다. 그래서 모든 Phase 가 부르는 게이트를 하나로 둔다.
+직결된다. 그래서 모든 단계가 부르는 게이트를 하나로 둔다.
 
 구성 (docs/collision.md §6 의 권장 조합)
 ----------------------------------------
@@ -28,7 +28,10 @@ import numpy as np
 
 _HERE = os.path.dirname(__file__)
 LINKS_NPZ = os.path.join(_HERE, "data", "xarm7_spider_links.npz")
-ENV_NPZ = os.path.join(_HERE, "data", "cell_env.npz")
+#: 셀 레이아웃은 **백엔드가 고른다** (`utils/collision/layout.py`). 전역 활성본
+#  하나를 쓰면 sim 이 실측 셀로 검사돼 home 자세부터 '충돌'이 된다 — 그 사고의
+#  경위는 layout.py 주석에 있다. `env_npz=None` = 그때그때 해석.
+ENV_NPZ = None
 
 # 툴이 스칠 수 있는 링크. link6/7 은 툴이 붙은 인접 링크 → 항상 붙어 있으므로 제외.
 SELF_PAIRS = (("tool", (1, 2, 3, 4, 5)),
@@ -89,11 +92,22 @@ class _Sdf:
         return out
 
 
+#: 스캔 대상물을 동적 장애물로 등록할 때의 여유 (m).
+#
+#  왜 환경 여유(25mm)와 따로 두나 — 대상물은 **캘리브 오차가 실린 실측 점군**이고
+#  셀 CAD 처럼 정확하지 않다. 게다가 카메라가 225mm 까지 접근해야 하는 대상이라
+#  너무 크게 잡으면 정작 스캔 자세가 전부 기각된다. 30mm 는 그 사이 값이다.
+#
+#  ★ **한 곳에만 둔다.** 예전엔 real 의 두 호출부에 `margin_m=0.030` 이 각각
+#    박혀 있었고 sim 은 등록 자체를 안 했다 — 세 갈래로 갈라질 자리였다.
+SCAN_OBSTACLE_MARGIN_M: float = 0.030
+
+
 class CollisionModel:
     """단일 게이트. `clearance` → `is_pose_safe` → `is_path_safe` 순으로 쓴다."""
 
     def __init__(self, links_npz=LINKS_NPZ, env_npz=ENV_NPZ, *,
-                 self_margin_m=0.020, env_margin_m=0.025,
+                 self_margin_m=0.020, env_margin_m=0.025, layout=None,
                  sdf_voxel_m=0.008, link_voxel_m=0.006,
                  sdf_pad_m=0.15, link_pad_m=0.12,
                  max_query_pts=2500, min_sigma=0.05, log=print):
@@ -120,6 +134,10 @@ class CollisionModel:
             for j in targets:
                 if j not in self._link_sdf and len(self.links[j]):
                     self._link_sdf[j] = _Sdf(self.links[j], link_voxel_m, link_pad_m)
+        if env_npz is None:
+            from utils.collision.layout import resolve_env_npz
+            env_npz = resolve_env_npz(layout, log=log)
+        self.env_npz = env_npz
         env = np.asarray(np.load(env_npz)["env"], float)
         self.env_sdf = _Sdf(env, sdf_voxel_m, sdf_pad_m)
         # ── 동적 장애물 (스캔 대상 등) ──────────────────────────────────────
@@ -149,9 +167,23 @@ class CollisionModel:
         if pts_B is None or len(pts_B) == 0:
             self.dyn_sdf = None
             return
+        if margin_m is None:
+            margin_m = SCAN_OBSTACLE_MARGIN_M
         P = np.asarray(pts_B, float)
         if len(P) > 20000:
-            P = P[:: len(P) // 20000]
+            # ★ **균일 stride 가 아니라 복셀 다운샘플**이다. stride 는 점 밀도가
+            #   불균일한 입력(Poisson 메시 정점 등)에서 **성긴 쪽을 더 굶긴다** —
+            #   2026-09-17 `export_env_mesh.py` 에서 같은 패턴 때문에 원판 상면이
+            #   2,532→163점으로 줄어 충돌 게이트가 그 면을 못 봤다. 여기도 같은
+            #   위험이라 같은 방식으로 고친다(장애물은 성긴 면이 곧 구멍이다).
+            from utils.nbv.lookaround import voxel_downsample as _vd
+            _v = float(self._dyn_voxel)
+            for _ in range(6):                       # 20k 이하가 될 때까지 키운다
+                Q = _vd(P, _v)
+                if len(Q) <= 20000:
+                    break
+                _v *= 1.5
+            P = Q
         self.dyn_sdf = _Sdf(P, self._dyn_voxel, self._dyn_pad)
         if margin_m is not None:
             self.dyn_margin = float(margin_m)

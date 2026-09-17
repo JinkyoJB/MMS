@@ -67,7 +67,9 @@ from mms_artec.nbv.recovery_pose_selector import (
     SPIDER_FAR_MM,
 )
 from utils.transforms import pose_mat_to_6d
-from utils.nbv.scan_stage_controller import run_scan_stages, AT_CURRENT
+from utils.nbv import lookaround as _p1_const
+from utils.nbv.scan_stage_controller import (run_scan_stages, AT_CURRENT,
+                                             runs_stage as _runs_stage)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,6 +125,11 @@ if TYPE_CHECKING:
 # ─────────────────────────────────────────────────────────────────────────────
 # Settings / Result
 # ─────────────────────────────────────────────────────────────────────────────
+
+from utils.nbv.standoff import (WORK_STANDOFF_M as _WORK_STANDOFF_M,
+                               axis_standoff as _axis_standoff)
+_WORK_STANDOFF_MM = _WORK_STANDOFF_M * 1000.0
+
 
 @dataclass
 class ArtecMultiPassScanSessionSettings:
@@ -189,8 +196,12 @@ class ArtecMultiPassScanSessionSettings:
     # _adaptive_prescan_position(recovery=True) 를 호출 → fresh probe +
     # elevation search → 새 robot 자세. 상세: docs/artec_scanning_pipeline.md §6.
     # 아래 키들은 그 알고리즘의 공통 파라미터.
-    adaptive_target_standoff_mm: float = 225.0   # 최적대역 중앙 목표 거리
-    adaptive_min_preview_verts: int = 1500       # preview 유효 최소 정점
+    #: 카메라↔**표면** 목표 거리 (mm). 기본값은 **공용 상수**에서 온다
+    #  (`utils/nbv/standoff.py::WORK_STANDOFF_M`) — sim 과 갈라지지 않게.
+    adaptive_target_standoff_mm: float = _WORK_STANDOFF_MM
+    #: preview 원시 정점 문턱(크롭 전). 공용 기본값 = `lookaround.RAW_MIN_VERTS`.
+    #  세 문턱(raw / 크롭후 / 최종)의 관계는 그 상수 옆에 적혀 있다.
+    adaptive_min_preview_verts: int = _p1_const.RAW_MIN_VERTS
     #: preview 캡처용 **재구성 민감도**(0~1). None 이면 SDK 기본(0.5) 유지.
     #
     #  ★ 스트리밍 세션엔 `sensitivity` 설정이 있었지만 **preview 경로엔 없었다.**
@@ -220,9 +231,14 @@ class ArtecMultiPassScanSessionSettings:
     #    d=0.30 은 정점 13k~30k 가 나오는데 d=0.38 은 매번 300~1700개로
     #    `adaptive_min_preview_verts`(1500)를 못 넘겨 전부 버려졌다.
     #    Spider v1 최적 구간은 ~200~250mm 이므로 그 안에서 두 스텝을 잡는다.
-    preview_dists_m: tuple = (0.24, 0.30)
+    #: preview 고정 거리격자 (축거리 m). **None = 작동거리 창에서 유도**
+    #  (`standoff.preview_grid`) — sim 과 같은 값이 나온다. 예전엔 여기에
+    #  (0.24, 0.30) 이 박혀 있어 sim (0.30, 0.38) 과 갈라졌고, 반경 40mm 만
+    #  넘으면 첫 스텝이 근접한계 안쪽이라 반환이 아예 없었다.
+    #  특정 물체에만 다른 격자를 쓰고 싶을 때만 값을 준다.
+    preview_dists_m: tuple = None
     preview_turntable_vel_rad_s: float = float(np.radians(30.0))
-    lookaround_min_plan_points: int = 100                       # 미만이면 플래너 포기
+    lookaround_min_plan_points: int = _p1_const.MIN_PLAN_PTS    # 미만이면 플래너 포기
 
     # ── 고도각(elevation) 탐색 공통 파라미터 ───────────────────────────
     # recovery 호출 시의 elevation search 범위·기본 offsets. 재조준은
@@ -296,12 +312,15 @@ class ArtecMultiPassScanSessionSettings:
     # ── nbv — 부족면 NBV 보강 (docs/4_nbv.md) ────────────────────
     # stage_until: lookaround 부터 **순차 누적**으로 어디까지 실행할지 (docs/4_nbv.md §8).
     # stage_until=N → lookaround..N 을 순서대로:
-    #   1 = lookaround (5면 streaming)
-    #   2 = lookaround → **nbv** (부족면 NBV 보강, 로봇 이동, _nbv_loop)
-    #   3 = lookaround → nbv → **flip** (바닥면 180° flip, 사용자 손회전 + centroid hint)
-    # 기본 3 = 전 파이프라인. ★ 첫 real 테스트는 1 부터 단계적으로 올릴 것(2·3 미검증).
-    stage_until: int = 3
-    nbv_distance_mm: float = 225.0          # NBV 카메라-표면 거리 (Artec 최적대역)
+    #   "preview"    거리탐색·실루엣만 (계획까지, 캡처 없음)
+    #   "lookaround" preview → lookaround (5면 streaming)
+    #   "nbv"        → **nbv** (부족면 NBV 보강, 로봇 이동, _nbv_loop)
+    #   "flip"       → **flip** (바닥면 180° flip, 사용자 손회전 + centroid hint)
+    # 기본 "flip" = 전 파이프라인. ★ 첫 real 테스트는 "lookaround" 부터 올릴 것.
+    stage_until: str = "flip"
+    #: NBV 카메라↔**표면** 거리 (mm). 축 기준이 필요한 곳은 `axis_standoff(r)` 로
+    #  변환해서 쓴다 — 예전엔 같은 값이 축/표면 두 뜻으로 섞여 쓰였다.
+    nbv_distance_mm: float = _WORK_STANDOFF_MM
     nbv_min_seg_vertices: int = 8           # frontier 세그먼트 최소 정점
     nbv_min_seg_length_mm: float = 6.0      # frontier 최소 길이
     nbv_max_seg_length_mm: float = 60.0     # frontier 재분할 한계
@@ -337,7 +356,7 @@ class ArtecMultiPassScanSessionSettings:
     # camera-motion T_pre fallback(R3)로 자동 대체. 실기 검증 후 R1/R2 배선(§6.5).
     nbv_use_relocalization: bool = True
     # gap 직접 겨냥(plan_frontier) — 로봇이 편한 방위. 턴테이블이 gap 을 여기로 가져온다.
-    # 넓히면 겨냥 성공률은 오르지만 팔이 물체를 감싸 충돌 위험이 커진다(docs/4_collision §5).
+    # 넓히면 겨냥 성공률은 오르지만 팔이 물체를 감싸 충돌 위험이 커진다(docs/collision §5).
     nbv_frontier_az_pref_deg: tuple = (0.0, 30.0, -30.0)
     # ★ gap 겨냥 캡처의 부분 스윕 폭 (deg) — sim `NBV_PATCH_SPAN_DEG` 와 동일.
     #   gap 하나 채우려고 360° 를 돌면 이미 가진 면만 다시 본다(낭비). 목표 θ 를
@@ -539,6 +558,10 @@ class ArtecMultiPassScanSession:
                             best_uv = fmh.uv()
                             img = fmh.image()
                             best_wh = (img.shape[1], img.shape[0])
+                            # ★ 디버그 스냅샷용으로 보관 — "스캐너가 그 순간 뭘
+                            #   봤나" 는 실물에서 가장 빠른 단서다. sim 은 예전부터
+                            #   남기는데 real 만 없었다(2026-09-17까지).
+                            self._last_preview_img = img
                         except Exception:                       # noqa: BLE001
                             best_uv = best_wh = None
             if v_mm is not None and v_mm.shape[0] >= min_verts:
@@ -1140,6 +1163,26 @@ class ArtecMultiPassScanSession:
         T_pre[:3, 3] *= 1000.0                              # m → mm (SDK 단위)
         return T_pre
 
+    def _cam_pos_B(self):
+        """카메라 원점의 **base(B) 좌표** (m). 없으면 None.
+
+        `_T_CB` 는 C→B 라 그 translation 이 곧 B 에서 본 카메라 위치다. 이동할
+        때마다 `_recapture_T_BC` 가 갱신하므로 캡처 시점과 일치한다. 생성자에서
+        hand-eye 를 못 잡은 경우만 현재 FK 로 직접 만든다.
+        """
+        T = self._T_CB
+        if T is None:
+            try:
+                T_BC = self._T_EC @ np.linalg.inv(self.robot.get_ee_pose_mat())
+                T = np.linalg.inv(T_BC)
+            except Exception as e:                              # noqa: BLE001
+                if not getattr(self, "_cam_pos_warned", False):
+                    self._cam_pos_warned = True
+                    print(f"  [p1plan] ⚠ 카메라 위치를 못 구했다"
+                          f"({type(e).__name__}: {e}) — 이 프레임 거리보정 건너뜀")
+                return None
+        return np.asarray(T, float)[:3, 3].copy()
+
     def _recapture_T_BC(self, tag: str, return_only: bool = False):
         """이동 후 T_BC/T_CB 재캡처 (recovery hint 일관성).
 
@@ -1562,7 +1605,17 @@ class ArtecMultiPassScanSession:
         return True
 
     def _preview_object_points_B(self, axis_pt, tz: float, d: float):
-        """조준높이 tz·축거리 d 로 구동 후 preview 캡처 → base 프레임 물체 점군.
+        """조준높이 tz·축거리 d 로 구동 후 preview 캡처.
+
+        반환 = **(base 프레임 물체 점군, base 프레임 카메라 위치)**.
+
+        ★ 카메라 위치를 같이 주는 것이 **적응적 preview 의 전제**다. 거리 보정은
+          "표면까지 거리"로 계산되는데, 그건 점군만으로는 못 구한다
+          (`collect_planning_points` 는 콜백이 카메라 위치를 안 주면 적응을 끄고
+          고정 격자로 떨어진다). 2026-09-17 이전에는 이 함수가 점군만 돌려줘서
+          **real 은 적응 preview 가 한 번도 안 돌았다** — sim 에서만 돌고 있었다.
+          게다가 첫 높이에서 이동·캡처를 한 번 해놓고 그 결과를 버린 뒤
+          고정 격자를 다시 돌았다(이동 1회 순손실).
 
         sim `_pick_lookaround_planner.preview_at` 의 real 판. 캡처 수단만 다르고
         (Isaac 카메라 ↔ Artec preview) 크롭·self-filter 는 같은 공용 함수를 쓴다.
@@ -1573,13 +1626,13 @@ class ArtecMultiPassScanSession:
         s = self.s
         sensor = getattr(self.mms, "sensor", None)
         if sensor is None or not hasattr(sensor, "capture_frame"):
-            return np.zeros((0, 3))
+            return np.zeros((0, 3)), self._cam_pos_B()
         axis_xy = np.asarray(axis_pt, float)[:2]
         target = np.array([axis_xy[0], axis_xy[1], float(tz)], float)
         try:
             q_seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
         except Exception:                                       # noqa: BLE001
-            return np.zeros((0, 3))
+            return np.zeros((0, 3)), self._cam_pos_B()
         # ★ 예전엔 이 루프가 **완전히 조용했다.** IK 실패·충돌 거부·정점 부족이
         #   전부 로그 없이 `continue`/빈 배열이라, 로봇이 안 움직이는데 화면엔
         #   아무것도 안 뜨는 상태가 됐다(2026-09-16 실물). 어느 단계에서 막혔는지
@@ -1603,9 +1656,10 @@ class ArtecMultiPassScanSession:
                 print(f"  [p1plan] tz={tz:.3f} d={d:.2f} az={azd:+.0f}° — "
                       f"preview 정점 부족(<{s.adaptive_min_preview_verts}). "
                       f"스캐너 민감도/대상 표면 확인")
-                return np.zeros((0, 3))
+                return np.zeros((0, 3)), self._cam_pos_B()
             print(f"  [p1plan] tz={tz:.3f} d={d:.2f} az={azd:+.0f}° — "
                   f"정점 {len(vC):,}")
+            self._snap_preview(tz, d, azd, len(vC))
             T_CB = np.asarray(self._T_CB, float)
             xB = (vC / 1000.0) @ T_CB[:3, :3].T + T_CB[:3, 3]
             # ★ 로봇 자기점 제거 — 프레임에 걸린 링크/스캐너 점이 크롭 실린더를
@@ -1624,11 +1678,11 @@ class ArtecMultiPassScanSession:
                 up_sign=(-1.0 if float(self._view_up_B()[2]) < 0 else +1.0))
             print(f"  [p1plan]     크롭 {len(xB):,} → {len(xo):,}점 "
                   f"(축 r<0.16m · 디스크 위 0.004~0.45m)")
-            return xo
+            return xo, self._cam_pos_B()
         print(f"  [p1plan] tz={tz:.3f} d={d:.2f} — 도달 가능한 방위 없음 "
               f"(IK 실패 {n_ik} · 이동 실패 {n_move} / "
               f"{len(s.lookaround_view_azis_deg)} 방위)")
-        return np.zeros((0, 3))
+        return np.zeros((0, 3)), self._cam_pos_B()
 
     def _pick_lookaround_planner(self):
         """계획용 preview → 기하 크롭 → plan_lookaround_viewpoints → az 스윕 IK.
@@ -1645,17 +1699,33 @@ class ArtecMultiPassScanSession:
             return None
         axis_pt, axis_dir = frame
         axis_xy = axis_pt[:2]
+        # ★ `dof`(작동거리 창)는 **스캐너에게 물어본다.** 여태 하드코딩 추측이었고,
+        #   그 값이 밴드 수·커버리지 판정을 직접 좌우한다. SDK 가 알려주는 값을 쓰면
+        #   플래너의 가정 = 스캐너의 설정이 된다.
         sensor_model = p1.SensorModel()
+        #  real·sim 둘 다 `scanning_range()` 를 같은 계약으로 제공한다 —
+        #  백엔드를 가리지 않는다(예전엔 `sensor._processor` 를 직접 뒤졌다).
+        try:
+            _near, _far = self.mms.sensor.scanning_range()
+            sensor_model = p1.sensor_from_scanning_range(
+                _near, _far, sensor_model, log=lambda m: print(f"  [p1plan]{m}"))
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [p1plan] ⚠ 스캔 범위 조회 실패({type(e).__name__}: {e}) — dof 기본값")
 
         # ★ `up_sign` 을 **명시**한다. base 가 천장 마운트라 +Z 가 아래여서,
         #   기본값 +1 이면 시작 조준높이가 원판 표면 **아래**(테이블 속)가 되고
         #   높이를 올릴수록 더 파고든다 → 물체가 아니라 턴테이블을 겨눈다
         #   (2026-09-16 실물 관측). sim 은 world 프레임이라 +1 이 맞다.
         up_sign = -1.0 if float(self._view_up_B()[2]) < 0 else +1.0
+        # ★ (a) preview 자체를 보호한다 — 물체를 등록하려면 먼저 봐야 하는데
+        #   preview 가 그 '보는' 단계다. 그동안 충돌 모델에 대상이 없다.
+        #   아직 형상을 모르니 **있을 수 있는 최대 반경**으로 원기둥을 건다.
+        self._guard_preview_volume(axis_pt, up_sign, float(s.preview_el_deg))
         pts = p1.collect_planning_points(
             lambda tz, d: self._preview_object_points_B(axis_pt, tz, d),
             self._move_turntable_abs, axis_pt, axis_dir,
-            d_steps=tuple(s.preview_dists_m), up_sign=up_sign,
+            d_steps=(tuple(s.preview_dists_m) if s.preview_dists_m else None),
+            up_sign=up_sign,
             log=lambda m: print(f"  [p1plan] {m}"))
         pts = p1.voxel_downsample(pts, sensor_model.voxel_m)
         if len(pts) < s.lookaround_min_plan_points:
@@ -1667,12 +1737,7 @@ class ArtecMultiPassScanSession:
         #   (2026-09-16 실물: NBV 이동 중 대상을 치고 지나감). 지금부터의 모든
         #   이동(밴드·NBV·recovery)이 이 장애물을 회피한다. nbv 부터는
         #   `build_coverage_mesh` 가 더 정확한 메시 정점으로 갱신한다.
-        try:
-            cm = self._collision_gate()
-            if cm is not None:
-                cm.set_dynamic_obstacle(pts, margin_m=0.030)
-        except Exception as e:                              # noqa: BLE001
-            print(f"  [p1plan] ⚠ 대상물 장애물 등록 실패({e}) — 계속")
+        self._register_object_obstacle(pts, "preview")
         nrm = p1.estimate_outward_normals(pts, axis_xy)
         # `up_sign` — 위에서 구한 것과 같은 값. 플래너가 '윗면(뚜껑)' 보강 자세를
         # 넣을 때 **어느 끝이 위인지** 알아야 한다. base 가 천장 마운트라 −1.
@@ -1686,11 +1751,152 @@ class ArtecMultiPassScanSession:
         except Exception:                                       # noqa: BLE001
             return None
         cm = self._collision_gate()
-        return p1.solve_plan_poses(
+        qs, vps = p1.solve_plan_poses(
             plan, axis_xy, tuple(s.lookaround_view_azis_deg),
             solve_q=lambda tgt, el, az, so: self._axis_view_q(tgt, el, az, so, q_seed),
             is_safe=(cm.is_pose_safe if cm is not None else None),
-            log=lambda m: print(f"  [p1plan] {m}"))
+            log=lambda m: print(f"  [p1plan] {m}"), return_poses=True)
+        # ★ 캡처 중 거리추종용 맥락 — sim(`isaac_scan_session`)과 같은 구조다.
+        #   q 만으로는 "이 밴드가 원래 el/az/tz 몇이었나" 를 되찾을 수 없고,
+        #   그게 없으면 축거리만 고쳐 다시 푸는 것이 불가능하다.
+        self._band_pairs = list(zip(qs or [], vps))
+        self._band_seed = np.asarray(q_seed, float).copy()
+        self._band_axis_xy = np.asarray(axis_xy, float).copy()
+        self._band_sensor = sensor_model
+        return qs
+
+    def _snap_preview(self, tz: float, d: float, azd: float, n_raw: int) -> None:
+        """preview 스냅샷 저장 (sim `_snap(stage="preview")` 와 **같은 규칙**).
+
+        파일명·폴더·캡션을 sim 과 맞춘다 — 두 쪽 그림을 나란히 놓고 비교하는 것이
+        목적이므로 규칙이 갈라지면 의미가 없다. 저장 위치 `output/debug/preview/`.
+        """
+        img = getattr(self, "_last_preview_img", None)
+        if img is None:
+            return
+        dbg = getattr(self, "_dbg", None)
+        if dbg is None:
+            try:
+                from utils.debug_view import DebugViewSaver
+                dbg = self._dbg = DebugViewSaver(log=lambda m: print(f"  [p1plan] {m}"))
+            except Exception:                                   # noqa: BLE001
+                self._dbg = False
+                return
+        if dbg is False:
+            return
+        try:
+            dbg.save(img,
+                     f"preview_tz{tz*1000:.0f}_d{d*1000:.0f}_az{azd:+.0f}",
+                     f"preview tz={tz*1000:.0f}mm d={d*1000:.0f}mm "
+                     f"az={azd:+.0f}deg raw={n_raw}", stage="preview")
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [p1plan] [dbgview] ⚠ 스냅 실패({type(e).__name__}: {e})")
+
+    def _guard_preview_volume(self, axis_pt, up_sign: float,
+                              el_deg: float) -> None:
+        """preview 동안 축 둘레에 보수적 원기둥을 장애물로 걸어 둔다(sim 과 동일).
+
+        근거·함정은 공용 `lookaround.guard_cylinder_points` 주석에 있다. 반경은
+        **원판 반경**(물체가 그보다 넓으면 넘어진다), 마진은 **0**(원기둥 자체가
+        이미 최대 가정이라 위에 또 얹으면 이중보정) 이다.
+        """
+        cm = self._collision_gate()
+        if cm is None:
+            return
+        try:
+            _R = min(_p1_const.PREVIEW_RADIUS_MAX_M,
+                     float(self.s.nbv_turntable_radius_mm) / 1000.0)
+            lo = _p1_const.probe_bounds(self._scanning_range_m())[0]
+            blocks, d_min = _p1_const.guard_blocks_probe(_R, 0.0, el_deg, lo)
+            if blocks:
+                print(f"  [p1plan] ⚠ 보호 원기둥(r={_R*1000:.0f}mm)이 탐침을 막는다 "
+                      f"— el={el_deg:.0f}° 에서 축거리 {d_min*1000:.0f}mm 아래로 못 간다")
+            pts = _p1_const.guard_cylinder_points(axis_pt, up_sign, _R)
+            cm.set_dynamic_obstacle(pts, margin_m=0.0)
+            print(f"  [p1plan] preview 보호 원기둥 — r={_R*1000:.0f}mm 마진 0 "
+                  f"({len(pts):,}pt, 최소 축거리 {d_min*1000:.0f}mm)")
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [p1plan] ⚠ preview 보호 원기둥 실패({type(e).__name__}: {e})")
+
+    def _register_object_obstacle(self, pts_B, tag: str) -> None:
+        """**base** 점군을 스캔 대상 장애물로 등록한다 (sim `_register_object_obstacle`).
+
+        ★ swept 적용을 **여기 한 곳**에서만 한다. 예전엔 호출부 두 곳이 각각
+          `swept_about_axis(...)` 를 불렀고, 한쪽엔 축을 못 구하면 swept 없이 그냥
+          등록하는 폴백까지 있었다 — 그 경로로 가면 θ=0 점군이 그대로 걸려
+          비대칭 물체에서 장애물이 엉뚱한 방향을 향한다.
+        """
+        cm = self._collision_gate()
+        if cm is None or pts_B is None or len(pts_B) == 0:
+            return
+        fr = self._turntable_frame()
+        if fr is None:
+            print(f"  [p1plan] ⚠ 대상물 장애물({tag}) — 턴테이블 축 없음, "
+                  f"회전체 적용 불가. 비대칭 물체면 방향이 틀릴 수 있다")
+            cm.set_dynamic_obstacle(np.asarray(pts_B, float))
+            return
+        try:
+            swept = _p1_const.swept_about_axis(np.asarray(pts_B, float),
+                                               fr[0], fr[1])
+            cm.set_dynamic_obstacle(swept)
+            lo, hi = np.asarray(pts_B, float).min(0), np.asarray(pts_B, float).max(0)
+            print(f"  [p1plan] 대상물 장애물({tag}) base bbox "
+                  f"x[{lo[0]:.3f},{hi[0]:.3f}] y[{lo[1]:.3f},{hi[1]:.3f}] "
+                  f"z[{lo[2]:.3f},{hi[2]:.3f}]")
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [p1plan] ⚠ 대상물 장애물 등록 실패({type(e).__name__}: {e})")
+
+    def _scanning_range_m(self):
+        """작동거리 창 (near_m, far_m). 스캐너가 못 알려주면 플래너 기본값.
+
+        거리추종의 **목표**가 이 창의 중앙이므로, 계획에 쓴 창과 캡처 중 쓰는 창이
+        같아야 한다 — 그래서 여기서도 `scanning_range()` 한 곳에서만 가져온다.
+        """
+        from utils.nbv import lookaround as p1
+        try:
+            near_mm, far_mm = self.mms.sensor.scanning_range()
+            near, far = float(near_mm) / 1000.0, float(far_mm) / 1000.0
+            if 0.0 < near < far:
+                return (near, far)
+        except Exception:                                       # noqa: BLE001
+            pass
+        return tuple(p1.SensorModel().dof)
+
+    # ── 거리추종 재겨냥 (el·az·tz 고정, 축거리만) ─────────────────────────
+    def _band_retarget(self, q_cur, d_new):
+        """밴드 자세 `q_cur` 를 **같은 el/az/tz, 새 축거리**로 다시 푼다.
+
+        반환 = 새 q (IK·충돌 통과) 또는 None. 이동은 호출자(streaming session)가
+        `move_robot_fn` 으로 한다 — 녹화 중 이동 속도를 그쪽이 쥐고 있어서다.
+        """
+        vp = None
+        for _q, _vp in getattr(self, "_band_pairs", ()):
+            if _q is q_cur:
+                vp = _vp
+                break
+        if vp is None:
+            return None
+        axis_xy = getattr(self, "_band_axis_xy", None)
+        seed = getattr(self, "_band_seed", None)
+        if axis_xy is None or seed is None:
+            return None
+        tgt = np.array([axis_xy[0], axis_xy[1], vp.target_z], float)
+        qn = self._axis_view_q(tgt, vp.el_deg, vp.az_deg, float(d_new), seed)
+        if qn is None:
+            return None
+        cm = self._collision_gate()
+        if cm is not None:
+            ok, _why = cm.is_pose_safe(qn)
+            if not ok:
+                return None
+        return qn
+
+    def _band_standoff_of(self, q_cur):
+        """이 밴드의 계획 축거리 (m). 맥락이 없으면 None."""
+        for _q, _vp in getattr(self, "_band_pairs", ()):
+            if _q is q_cur:
+                return float(_vp.standoff)
+        return None
 
     def pick_lookaround_pose(self):
         """lookaround 시작 자세. 플래너가 성공하면 그 자세(밴드면 리스트),
@@ -1715,7 +1921,7 @@ class ArtecMultiPassScanSession:
         except Exception as e:
             print(f"  [stage] ⚠ go_home 실패({e}) — 자세 확인 필요")
 
-    def capture_bands(self, poses, phase: int = 1) -> bool:
+    def capture_bands(self, poses, stage: str = "lookaround") -> bool:
         """lookaround 밴드 전체를 **한 IScan** 으로 캡처한다.
 
         ★ 예전엔 컨트롤러가 밴드마다 `capture_rotation` 을 불러 **밴드 = pass =
@@ -1761,7 +1967,7 @@ class ArtecMultiPassScanSession:
                 n_band = int(getattr(res, "n_bands", len(qs)) or len(qs))
                 if n_done > 0:
                     nxt = ("nbv 로 넘긴다 (남은 결손은 NBV 가 메운다)"
-                           if self.stage_until >= 2 else
+                           if _runs_stage(self.stage_until, "nbv") else
                            "여기서 lookaround 을 끝낸다 "
                            f"(stage_until={self.stage_until} — NBV 보강 없음)")
                     print(f"  [p1plan] 밴드 부분 성공 {n_done}/{n_band} "
@@ -1777,19 +1983,19 @@ class ArtecMultiPassScanSession:
         finally:
             st.band_poses = None
 
-    def capture_rotation(self, pose, label: str, phase: int) -> bool:
+    def capture_rotation(self, pose, label: str, stage: str) -> bool:
         """real 캡처 (턴테이블 전회전). 세 경로:
-          - phase=1 + pose=q: lookaround 플래너가 고른 자세로 **구동한 뒤**
+          - stage="lookaround" + pose=q: lookaround 플래너가 고른 자세로 **구동한 뒤**
             아래 AT_CURRENT 경로와 동일하게 진행 (밴드면 대역마다 1회).
             이동이 거부되면 False — 컨트롤러가 그 밴드만 건너뛴다.
           - pose=AT_CURRENT (lookaround fallback / flip): 현재 고정 포즈에서
             streaming + cleanup/hint/master 병합 + tracking-lost recovery
             (_do_one_rotation 재시도 루프). 반환 False=중단.
-          - phase=2 + pose=q (NBV): 로봇을 q 로 구동 후 streaming +
+          - stage="nbv" + pose=q: 로봇을 q 로 구동 후 streaming +
             camera-motion T_pre 병합 (_capture_nbv_pose). False=캡처 실패.
         """
         st = self._st
-        if phase == 1 and pose is not AT_CURRENT:
+        if stage == "lookaround" and pose is not AT_CURRENT:
             # lookaround 플래너가 고른 자세(밴드면 대역마다 1회). 로봇을 그 자세로
             # 옮긴 뒤부터는 AT_CURRENT 와 완전히 같은 경로 — streaming + cleanup +
             # hint + master 병합 + tracking-lost recovery.
@@ -1838,11 +2044,11 @@ class ArtecMultiPassScanSession:
     def finalize(self) -> ArtecMultiPassScanResult:
         st = self._st
         s = self.s
-        # stage_until<3 → flip 미실행 완료 사유. 단 lookaround 이 정상 완료한 경우만
-        # (사용자 종료 / max_passes 소진 시엔 아래 max_passes 블록·기존 사유가 우선).
-        if (s.stage_until < 3 and not st.aborted_reason
+        # flip 까지 안 가는 설정 → flip 미실행 완료 사유. 단 lookaround 이 정상
+        # 완료한 경우만 (사용자 종료 / max_passes 소진 시엔 기존 사유가 우선).
+        if (not _runs_stage(s.stage_until, "flip") and not st.aborted_reason
                 and not st.user_quit and st.n_pass < s.max_passes):
-            st.aborted_reason = f"stage_until={s.stage_until} 완료 (lookaround..{s.stage_until})"
+            st.aborted_reason = f"stage_until={s.stage_until!r} 완료"
 
         if st.live_viewer is not None:
             try:
@@ -1976,6 +2182,12 @@ class ArtecMultiPassScanSession:
                     (lambda q: self._move_robot_to_q(
                         q, s.band_move_speed_deg_s))
                     if st.band_poses else None),
+                # ★ 거리추종 — 밴드 시작에서 표면거리를 재고 축거리만 고친다.
+                #   sim 과 **같은 컨트롤러**(`utils/nbv/standoff.StandoffTracker`)를
+                #   쓰고, 여기서는 "그 밴드를 새 거리로 다시 푸는 법" 만 준다.
+                retarget_fn=(self._band_retarget if st.band_poses else None),
+                standoff_of=(self._band_standoff_of if st.band_poses else None),
+                scan_range=self._scanning_range_m(),
             )
             # ★ 스캔 시작 시점의 turntable 논리각 — clearpos 를 건너뛰는 경우
             #   (recovery safe-back) 물체가 이 각만큼 돌아간 채 찍히므로, 병합
@@ -2431,7 +2643,7 @@ class ArtecMultiPassScanSession:
         return merged
 
     # ─────────────────────────────────────────────────────────────────────
-    # nbv — 부족면 NBV 보강 루프 (docs/4_nbv.md §3). stage_until=2.
+    # nbv — 부족면 NBV 보강 루프 (docs/4_nbv.md §3). stage_until="nbv".
     # 하드웨어 무관 코어는 utils/nbv/nbv_core.py + theta_planner(해석 IK).
     # ⚠ 캡처는 v1 에서 기존 streaming(풀 회전) + camera-motion T_pre(R3) 병합.
     #   relocalization R1/R2(§3.4.1)·짧은 스윕은 실기 검증 후 배선(§6.5).
@@ -2617,7 +2829,15 @@ class ArtecMultiPassScanSession:
         axis_xy_B = tt.axis_xy_B
         verts = np.asarray(mesh.vertices)                  # 메쉬(B, m) mid z = 객체 중간높이
         look_target = np.array([axis_xy_B[0], axis_xy_B[1], float(verts[:, 2].mean())])
-        standoff = self.s.nbv_distance_mm / 1000.0
+        # ★ `_axis_view_q` 는 **축까지의 거리**를 받는다. `nbv_distance_mm` 은
+        #   카메라↔**표면** 거리이므로 물체 반경을 더해야 한다.
+        #   예전엔 표면 거리를 축 거리로 그냥 넘겼다 — r=97mm 물체면 표면까지
+        #   225−97 = 128mm 로 Spider 근접한계(170mm) 안쪽이라 데이터가 안 나온다.
+        #   (같은 상수가 `plan_frontier`/`nbv_pose_from_candidate` 에는 표면 거리로
+        #    넘어가고 있었다 — 한 값이 두 뜻으로 쓰이던 것을 갈랐다.)
+        _r_obj = float(np.max(np.linalg.norm(
+            verts[:, :2] - np.asarray(axis_xy_B, float)[None, :], axis=1))) if len(verts) else 0.0
+        standoff = _axis_standoff(_r_obj, self.s.nbv_distance_mm / 1000.0)
         # ★ 조준점을 **찍는다**. 이 한 줄이 없어서 단위/프레임 오류(mm 를 m 로,
         #   현재 T_CB 를 마스터 T_CB 로)가 "허공을 스캔" 으로만 드러났다.
         #   디스크 상단 z 와 나란히 보이면 바로 이상을 알 수 있다.
@@ -2908,12 +3128,7 @@ class ArtecMultiPassScanSession:
             return None
         # 동적 장애물 갱신 — 계획 점군보다 정확한 실측 메시로 (경로가 대상물을
         # 관통하지 않도록; 등록 자체의 근거는 _pick_lookaround_planner 쪽 주석 참조).
-        try:
-            cm = self._collision_gate()
-            if cm is not None:
-                cm.set_dynamic_obstacle(np.asarray(mesh.vertices), margin_m=0.030)
-        except Exception as e:                              # noqa: BLE001
-            print(f"  [nbv] ⚠ 대상물 장애물 갱신 실패({e}) — 계속")
+        self._register_object_obstacle(np.asarray(mesh.vertices), "mesh")
         return mesh
 
     def is_converged(self, mesh) -> bool:
@@ -3240,7 +3455,7 @@ class ArtecMultiPassScanSession:
     def _wait_user_quit() -> bool:
         """Return True if user typed 'q' or 'n' (case-insensitive), else False.
 
-        'n' = "이 phase 는 여기까지" — flip 프롬프트에서 q 와 같은 효과지만
+        'n' = "이 단계는 여기까지" — flip 프롬프트에서 q 와 같은 효과지만
         (남은 flip 건너뛰고 finalize 로), 의도를 분명히 하려고 따로 받는다."""
         try:
             inp = input("  >> ").strip().lower()

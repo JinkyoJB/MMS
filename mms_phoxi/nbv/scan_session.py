@@ -89,7 +89,7 @@ class ScanSessionSettings:
     plateau_growth_thresh: float = 0.01
     boundary_length_stop: float = 0.01
 
-    # Phase 제어
+    # 단계 제어
     lookaround_enabled: bool = True                 # rule-based 15° × 360° 회전 스캔
     lookaround_theta_step_deg: float = 15.0
     lookaround_dwell_s: float = 0.40                # 턴테이블 정지 후 캡처 전 대기 (기계 settling)

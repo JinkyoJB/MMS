@@ -33,7 +33,20 @@ def get_isaac_world(cfg: "ArtecMMSConfig"):
     """공유 IsaacWorld 싱글톤 반환 (없으면 생성). isaac 백엔드에서만 호출."""
     global _ISAAC_WORLD
     if _ISAAC_WORLD is None:
-        from mms_artec.backends.isaac.isaac_world import IsaacWorld
+        # ★ 충돌 셀 레이아웃을 **씬에서 유도한다.** 씬과 충돌 점군이 어긋나면
+        #   로봇이 셀 안에 박힌 것으로 판정돼 **모든 자세가 거부**된다
+        #   (2026-09-17 실측: sim home env 여유 0.0mm → lookaround 이 0점).
+        #   백엔드가 아니라 **씬**이 기준이다 — sim 씬이 여럿이라 백엔드로 고르면
+        #   v3 씬을 띄우면서 v2 셀로 검사하는 조합이 다시 생긴다.
+        #   setdefault 라 사용자가 명시한 값은 존중한다.
+        import os as _os
+        from mms_artec.backends.isaac.isaac_world import (
+            IsaacWorld, DEFAULT_USD_PATH, SCENE_COLLISION_LAYOUT)
+        _usd = str(getattr(cfg, "isaac_usd_path", None) or DEFAULT_USD_PATH)
+        for _key, _layout in SCENE_COLLISION_LAYOUT.items():
+            if _key in _usd:
+                _os.environ.setdefault("MMS_COLLISION_LAYOUT", _layout)
+                break
         _ISAAC_WORLD = IsaacWorld(
             usd_path=getattr(cfg, "isaac_usd_path", None),
             headless=getattr(cfg, "isaac_headless", False),

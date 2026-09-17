@@ -25,7 +25,9 @@ import os
 
 import numpy as np
 
-DEFAULT_NPZ = os.path.join(os.path.dirname(__file__), "data", "cell_env.npz")
+#: `None` = `utils/collision/layout.py` 가 백엔드에 맞는 레이아웃을 고른다.
+#  (전역 활성본 하나를 쓰면 sim 이 실측 셀로 검사된다 — layout.py 주석 참고)
+DEFAULT_NPZ = None
 
 # 검사할 링크. link1/2 는 천장 마운트에 붙어 있어 프레임과 상시 근접 → 제외.
 ENV_VS_LINKS = (3, 4, 5, 6, 7)
@@ -39,6 +41,10 @@ class EnvCollision:
         from scipy.spatial import cKDTree
         from utils.collision.mesh_self_collision import DEFAULT_NPZ as LINKS_NPZ
 
+        if npz_path is None:                       # 백엔드별 레이아웃 해석
+            from utils.collision.layout import resolve_env_npz
+            npz_path = resolve_env_npz()
+        self.npz_path = npz_path
         d = np.load(npz_path)
         self.margin = float(margin_m)
         self.env = np.asarray(d["env"], float)          # base 프레임 점군
@@ -80,6 +86,9 @@ _cached = {}
 
 def get_default(npz_path: str = DEFAULT_NPZ, margin_m: float = 0.02):
     """캐시가 있으면 판정기를, 없으면 None(호출부는 기존 캡슐 world 로 폴백)."""
+    if npz_path is None:
+        from utils.collision.layout import resolve_env_npz
+        npz_path = resolve_env_npz()
     key = (npz_path, margin_m)
     if key not in _cached:
         try:

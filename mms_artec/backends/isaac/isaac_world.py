@@ -27,7 +27,18 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 from mms_paths import asset  # noqa: E402
 
-DEFAULT_USD_PATH = asset("frame_xarm7_spider_turntable_v2/v3_scene.usd")
+#: 기본 sim 씬 = **실물 셀 배치**(2026-09-17). `MMS_SIM_USD` 로 덮어쓴다.
+#  ★ 예전 기본값은 `frame_xarm7_spider_turntable_v2/v3_scene.usd` 였는데, 그건
+#    **짓기로 했다가 안 지은 레이아웃**이다(2026-09-16 현장 확인). 실물은 v2 배치이고
+#    v3 는 턴테이블이 로봇 base 바로 아래(수평 0mm)라 실물(799mm)과 기하가 달라
+#    자세 선정·도달성·이동량을 전혀 예측하지 못했다.
+#    생성: `scripts/sim/build_scene_v2_real.py` (근거·검증 수치는 그 docstring)
+DEFAULT_USD_PATH = asset("frame_xarm7_spider_turntable/v2_real_260917.usd")
+#: 씬별로 맞는 충돌 셀 레이아웃 별칭. 씬과 충돌 점군이 어긋나면 **모든 자세가
+#  '충돌'로 거부**된다(2026-09-17: sim home 이 셀 안에 박혀 lookaround 이 0점).
+#  경로에 아래 키가 들어 있으면 그 레이아웃을 쓴다. 없으면 활성본을 그대로 쓴다.
+SCENE_COLLISION_LAYOUT = {"v3_scene": "v3_layout_sim", "v3_ts_": "v3_layout_sim",
+                          "v2_real_260917": "v2_real_260917"}
 ROBOT_PRIM       = "/World/xarm7"
 JOINTS_SCOPE     = "/World/xarm7/joints"
 EE_LINK_NAME     = "link7"
@@ -46,8 +57,26 @@ OBJECT_PRIM      = os.environ.get(   # 스캔 대상(rider). build_scene_v3.py -
     "/World/ScanTarget/TestObject")
 
 # Artec Space Spider 광학 (MMS_ext.py 와 동일)
-SPIDER_HFOV_DEG         = 30.0
-SPIDER_WORKING_DISTANCE = (0.2, 0.3)
+#: 스캐너 FOV — **플래너와 같은 출처**(`SensorModel`)에서 가져온다.
+#  ★ 2026-09-17 — 예전엔 여기 30.0° 가 따로 박혀 있었다. 플래너는 실측 K 로 고친
+#    21.58°/28.58° 를 쓰는데 **sim 렌더러만 옛 값**이라, 세로 FOV 가 22.73° vs
+#    28.58° 로 갈라져 있었다. 세로는 한 자세가 덮는 **높이**를 정하는 축이고 그게
+#    곧 밴드 수의 입력이라, sim 으로 밴드 로직을 검증하는 의미가 없어진다.
+from utils.nbv.lookaround import SensorModel as _SensorModel
+_SPIDER_SENSOR          = _SensorModel()
+SPIDER_HFOV_DEG         = _SPIDER_SENSOR.hfov_deg
+SPIDER_VFOV_DEG         = _SPIDER_SENSOR.vfov_deg
+#: Artec Spider 의 **작동거리 창** — 이 밖의 표면은 실물에서 데이터가 안 나온다.
+#  캡처 후 **점 필터**로 적용한다(`isaac_scanner.capture_points_base`).
+SPIDER_WORKING_DISTANCE = tuple(
+    float(v) for v in os.environ.get("MMS_SIM_WD", "0.2,0.3").split(","))
+#: 카메라 near/far 클리핑. **작동거리와 같게 두면 안 된다.**
+#  ★ 2026-09-17 — 예전엔 클리핑을 작동거리(0.2~0.3m)로 그대로 박아서, 거리가 조금만
+#    벗어나도 depth 가 **통째로 비고 캡처가 0점**이 됐다. 오늘 sim 이 v3·v2 씬 양쪽에서
+#    한 점도 못 얻은 원인이 이것이다(클리핑만 넓히자 0 → 4,668점).
+#    클리핑은 렌더 한계일 뿐이고 센서 특성은 위 작동거리 필터로 재현한다.
+SPIDER_CLIP_RANGE = tuple(
+    float(v) for v in os.environ.get("MMS_SIM_CLIP", "0.02,3.0").split(","))
 SPIDER_FOCUS_DISTANCE   = 0.25
 # ★ 스캐너 해상도 — **점군 밀도만 결정**하지 최종 품질을 좌우하지 않는다.
 #   누적은 VOXEL_M(2mm) 로 다운샘플되므로, 0.25m 에서 FOV 134×100mm 를 채우는 데
@@ -56,12 +85,19 @@ SPIDER_FOCUS_DISTANCE   = 0.25
 #   annotator 자원이 고갈돼 `get_data` 에서 크래시까지 났다.
 #   → 필요량의 여유배수만 남긴다. 더 촘촘히 보려면 VOXEL_M 을 먼저 줄일 것.
 # GUI 초기 뷰포트 시점 — 턴테이블을 −X/+Y/+Z 쪽에서 가깝게 내려다본다(사용자 요청).
-START_VIEW_TARGET = (0.365, 0.0, 0.70)      # 턴테이블 상면 부근
+# ⚠ 씬마다 턴테이블 위치가 다르다 — **DISC_PRIM 에서 실측**하고, 못 읽을 때만 이 값을
+#   쓴다. v3 씬 기준 상수를 그대로 쓰면 실물 배치 씬(턴테이블 world x≈-0.39)에서
+#   GUI 가 빈 공간을 비춘다(2026-09-17).
+START_VIEW_TARGET = (0.365, 0.0, 0.70)      # 폴백 — v3 씬의 턴테이블 상면 부근
 START_VIEW_DIR    = (-1.0, 1.0, 0.8)        # 카메라가 놓일 방향(타깃 기준)
 START_VIEW_DIST   = float(os.environ.get("MMS_SIM_VIEW_DIST", "1.1"))
 
+#: 렌더 해상도 (w, h). **세로형** — 실물 Spider 가 960x1280 세로형이다.
+#  FOV 는 아래에서 hfov·vfov 로 직접 지정하므로 해상도는 **표본 밀도만** 정한다.
+#  다만 화소 종횡비가 FOV 종횡비와 어긋나면 화소가 비정방형이 되므로 맞춰 둔다
+#  (288x384 → 28.51° ≈ 실측 28.58°). 화소 수는 옛 값과 같아 성능 영향 없음.
 SCANNER_RESOLUTION      = tuple(int(v) for v in
-                                os.environ.get("MMS_SIM_SCAN_RES", "384,288").split(","))
+                                os.environ.get("MMS_SIM_SCAN_RES", "288,384").split(","))
 
 # 드라이브 게인 (트램블링 방지) / joint1 한계 정상화
 DRIVE_STIFFNESS        = 2000.0
@@ -166,7 +202,11 @@ class IsaacWorld:
             from omni.kit.viewport.utility import get_active_viewport
             from pxr import UsdGeom, Gf
             import numpy as _np
-            tgt = _np.array(START_VIEW_TARGET, float)
+            try:                                  # 실제 원판 위치를 우선
+                c, _ = self.prim_world_pose(DISC_PRIM)
+                tgt = _np.array(c, float)
+            except Exception:                     # noqa: BLE001
+                tgt = _np.array(START_VIEW_TARGET, float)
             d = _np.array(START_VIEW_DIR, float)
             d = d / (_np.linalg.norm(d) + 1e-12)
             eye = tgt + d * float(START_VIEW_DIST)
@@ -204,14 +244,18 @@ class IsaacWorld:
         h_ap_attr = cam.GetAttribute("horizontalAperture")
         h_aperture = float(h_ap_attr.Get()) if h_ap_attr.IsValid() and h_ap_attr.Get() else 20.5
         focal = h_aperture / (2.0 * math.tan(math.radians(SPIDER_HFOV_DEG) / 2.0))
-        w, h = SCANNER_RESOLUTION
-        v_aperture = h_aperture * (h / w)
+        # ★ 세로 조리개를 **vfov 로 직접** 잡는다 — 예전처럼 해상도 종횡비에서
+        #   유도하면 해상도를 바꿀 때 FOV 가 같이 바뀌어 버린다(표본 밀도와 광학이
+        #   엉킨다). 이제 해상도는 밀도만, FOV 는 SensorModel 만 정한다.
+        v_aperture = 2.0 * focal * math.tan(math.radians(SPIDER_VFOV_DEG) / 2.0)
 
         _attr("focalLength",        Sdf.ValueTypeNames.Float, float(focal))
         _attr("horizontalAperture", Sdf.ValueTypeNames.Float, float(h_aperture))
         _attr("verticalAperture",   Sdf.ValueTypeNames.Float, float(v_aperture))
+        print(f"[IsaacWorld] 스캐너 FOV {SPIDER_HFOV_DEG:.2f}deg(가로) x "
+              f"{SPIDER_VFOV_DEG:.2f}deg(세로)  해상도 {SCANNER_RESOLUTION}")
         _attr("clippingRange",      Sdf.ValueTypeNames.Float2,
-              Gf.Vec2f(float(SPIDER_WORKING_DISTANCE[0]), float(SPIDER_WORKING_DISTANCE[1])))
+              Gf.Vec2f(float(SPIDER_CLIP_RANGE[0]), float(SPIDER_CLIP_RANGE[1])))
         _attr("focusDistance",      Sdf.ValueTypeNames.Float, float(SPIDER_FOCUS_DISTANCE))
 
     def _prepare_turntable(self):

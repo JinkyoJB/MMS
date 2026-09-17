@@ -1,18 +1,20 @@
 """
-utils/nbv/scan_stage_controller.py — sim/real 공용 Phase 오케스트레이터.
+utils/nbv/scan_stage_controller.py — sim/real 공용 **단계 오케스트레이터**.
 
 시뮬레이션(Isaac)에서 연습한 스캔 흐름을 그대로 실물(Artec)에 적용하기 위해,
-lookaround→2→3 의 **순서·게이팅·NBV 수렴 루프**를 한 곳에서 소유한다. 캡처 하드웨어
+preview→lookaround→nbv→flip 의 **순서·게이팅·NBV 수렴 루프**를 한 곳에서 소유한다. 캡처 하드웨어
 (sim Isaac 카메라+GT / real Artec streaming+relocalization)만 backend 가 구현.
 
-단계 정의 (사용자 컨셉, 2026-07-01):
+단계 정의 (사용자 컨셉, 2026-07-01 / 이름 정리 2026-09-17):
+  - preview : 물체를 훑어 높이·반경·적정 작업거리를 잰다 (docs/2_preview.md).
+              스캔이 아니라 **측량**이다 — 뒤 단계 전부의 입력이 여기서 나온다.
   - lookaround : 데이터가 잘 수집되는 포즈로 로봇팔을 이동·**고정** → 턴테이블만 전회전.
   - nbv : 로봇팔은 **최소로** 움직이며(관측 elevation 자세) 턴테이블은 자유 회전 →
               부족면(hole) 메꾸기 (NBV 수렴 루프).
   - flip : 물체를 **외부에서 flip**(뒤집기) → 턴테이블만 전회전 → 윗면
               (lookaround·nbv 에서는 바닥이라 못 본 면) 수집.
 
-세 phase 모두 공통 패턴 = "로봇 고정 + 턴테이블 전회전 캡처"(= capture_rotation).
+캡처 세 단계 모두 공통 패턴 = "로봇 고정 + 턴테이블 전회전 캡처"(= capture_rotation).
 nbv 만 관측자세를 옮겨가며 반복하고, flip 는 외부 flip 을 매개로 반복한다.
 
 backend 는 아래 ScanBackend 프리미티브를 구현(덕타이핑). 캡처/구동/mesh 는 backend,
@@ -38,7 +40,7 @@ class ScanBackend(Protocol):
     """공용 단계 컨트롤러가 호출하는 backend 프리미티브 (sim/real 구현)."""
 
     # 순차 누적: 1=lookaround, 2=lookaround→2, 3=lookaround→2→3.
-    stage_until: int
+    stage_until: str
     # nbv NBV 최대 반복 횟수.
     nbv_k_max: int
 
@@ -51,9 +53,10 @@ class ScanBackend(Protocol):
         """로봇을 known-good home 자세로 복귀 (nbv→3 전환 등)."""
         ...
 
-    def capture_rotation(self, pose: Any, label: str, phase: int) -> bool:
+    def capture_rotation(self, pose: Any, label: str, stage: str) -> bool:
         """로봇을 pose 로 고정(AT_CURRENT 면 구동 없음)하고 턴테이블 전회전하며
-        캡처·누적. phase=1|2|3 (캡처 밀도 등 backend 조정용). False=중단."""
+        캡처·누적. stage="lookaround"|"nbv"|"flip" (캡처 밀도 등 backend 조정용).
+        False=중단."""
         ...
 
     def finalize(self) -> Any:
@@ -98,16 +101,73 @@ class ScanBackend(Protocol):
 #   지금은 MULTIPASS_SETTINGS.stage_until 가 항상 있어 드러나지 않지만, 없어지는 순간
 #   **화면에 찍히는 단계와 실제 도는 단계가 갈린다.** 해석은 여기 한 곳에서만 한다.
 STAGE_UNTIL_ENV = "MMS_SIM_STAGE_UNTIL"
-PHASE_DESC = {
-    1: "lookaround (5면)",
-    2: "lookaround → 2 (NBV)",
-    3: "lookaround → 2 → 3 (바닥면 flip)",
+
+#: 파이프라인 단계 — **이 순서가 곧 실행 순서**다.
+#
+#    preview     물체를 훑어 실루엣·크기를 얻는다 (docs/2_preview.md)
+#    lookaround  그 실루엣으로 좋은 자세를 골라 전회전 캡처 (docs/3_lookaround.md)
+#    nbv         부족한 면을 겨냥해 보강 (docs/4_nbv.md)
+#    flip        물체를 뒤집어 바닥면 수집 (docs/5_flip.md)
+#
+#  ⚠ 2026-09-17 이전에는 `phase_mode` 라는 **정수**(1/2/3)였다. 숫자가 단계
+#    이름과 어긋나기 시작해서(preview 를 따로 떼면 lookaround 가 2번인지 1번인지
+#    모호하다) 이름으로 바꿨다. `stage_until="nbv"` = "preview 부터 nbv 까지".
+STAGES = ("preview", "lookaround", "nbv", "flip")
+
+#: 옛 정수 → 이름. 남아 있는 스크립트·env 가 조용히 다르게 동작하지 않도록
+#  받아주되 **경고를 찍는다.** 조용히 무시하면 "왜 nbv 가 안 도나" 로 하루 간다.
+_LEGACY_INT = {1: "lookaround", 2: "nbv", 3: "flip"}
+
+STAGE_DESC = {
+    "preview": "preview 만 (자세 계획까지, 캡처 안 함)",
+    "lookaround": "preview → lookaround (5면)",
+    "nbv": "preview → lookaround → nbv (부족면 보강)",
+    "flip": "preview → lookaround → nbv → flip (바닥면)",
 }
 
 
+def stage_index(stage) -> int:
+    """단계 이름 → 순서 번호. 모르는 이름이면 ValueError."""
+    s = str(stage).strip().lower()
+    if s not in STAGES:
+        raise ValueError(f"모르는 단계 {stage!r} — {', '.join(STAGES)} 중 하나")
+    return STAGES.index(s)
+
+
+def runs_stage(stage_until, stage) -> bool:
+    """`stage` 가 `stage_until` 까지의 범위에 드는가 (= 실행하는가)."""
+    try:
+        return stage_index(stage) <= stage_index(stage_until)
+    except ValueError:
+        return False
+
+
+def _coerce_stage(v, where: str):
+    """이름/옛 정수 → 단계 이름. 못 읽으면 None."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) or (isinstance(v, str) and v.strip().isdigit()):
+        n = int(v)
+        name = _LEGACY_INT.get(n)
+        if name is None:
+            print(f"[stage] ⚠ {where}={v!r} 는 모르는 옛 번호 — 무시")
+            return None
+        print(f"[stage] ⚠ {where}={v!r} 는 옛 정수 표기다 — "
+              f"{name!r} 로 읽는다. 이름으로 바꿀 것({', '.join(STAGES)})")
+        return name
+    s = str(v).strip().lower()
+    if s in STAGES:
+        return s
+    print(f"[stage] ⚠ {where}={v!r} 를 못 읽음 — 무시 "
+          f"(가능한 값: {', '.join(STAGES)})")
+    return None
+
+
 def resolve_stage_until(multipass_settings, *, allow_env: bool = True,
-                       default: int = 2):
-    """(mode, source) — 우선순위: env(sim 전용) → multipass_settings → default.
+                        default: str = "nbv"):
+    """(stage_until, source) — 우선순위: env(sim 전용) → multipass_settings → default.
 
     allow_env : 환경변수 override 를 허용할지. **real 은 False** 로 부를 것
                 (실물 동작이 셸 환경에 좌우되면 안 된다). sim 스윕 스크립트용.
@@ -117,19 +177,19 @@ def resolve_stage_until(multipass_settings, *, allow_env: bool = True,
     if allow_env:
         env = os.environ.get(STAGE_UNTIL_ENV)
         if env is not None:
-            try:
-                return int(env), f"env {STAGE_UNTIL_ENV}"
-            except ValueError:
-                print(f"[stage] ⚠ {STAGE_UNTIL_ENV}={env!r} 를 정수로 못 읽음 — 무시")
+            name = _coerce_stage(env, f"env {STAGE_UNTIL_ENV}")
+            if name is not None:
+                return name, f"env {STAGE_UNTIL_ENV}"
     if multipass_settings is not None:
-        v = getattr(multipass_settings, "stage_until", None)
-        if v is not None:
-            return int(v), "multipass_settings.stage_until"
-    return int(default), f"기본값({default})"
+        name = _coerce_stage(getattr(multipass_settings, "stage_until", None),
+                             "multipass_settings.stage_until")
+        if name is not None:
+            return name, "multipass_settings.stage_until"
+    return str(default), f"기본값({default})"
 
 
-def stage_desc(mode) -> str:
-    return PHASE_DESC.get(int(mode), f"stage_until={mode}")
+def stage_desc(stage_until) -> str:
+    return STAGE_DESC.get(str(stage_until), f"stage_until={stage_until}")
 
 
 _T0 = _time.perf_counter()
@@ -160,22 +220,28 @@ def run_scan_stages(backend: ScanBackend) -> Any:
     # ★ 각 단계를 콘솔에 표시한다. 실물 스캔은 한 번에 수 분이고 중간에 멈추면
     #   "지금 어느 단계인가" 를 알 수 없었다 — 단계 전환이 로그에 안 남아서
     #   프롬프트와 캡처 로그 사이가 통째로 침묵이었다(2026-09-16).
-    _step(1, "lookaround", "좋은 자세 고정 + 턴테이블 전회전")
-
-    # ── lookaround — 좋은 포즈 고정 + 턴테이블 전회전 ──────────────────────
-    # pick_lookaround_pose 는 단일 pose 또는 **pose 리스트(밴드 계획)** 반환 가능.
-    # 밴드(키큰 물체: 겹침 z-대역 자세들, safe-first 순서)면 대역마다 전회전.
-    _step("1.1", "시작 확인", "사용자 확인 대기 (prompt_before_first_pass)")
+    _step("시작", "시작 확인", "사용자 확인 대기 (prompt_before_first_pass)")
     if not backend.confirm_start():
         return backend.finalize()
 
-    _step("1.2", "자세 계획", "preview 수집 → 실루엣 → 관측 자세 산출")
+    # ── preview — 형상 탐색(높이·반경·적정 거리) ───────────────────────────
+    _step(1, "preview", "거리 탐색 → 실루엣 수집 → 관측 자세 산출")
     pose1 = backend.pick_lookaround_pose()
     poses1 = list(pose1) if isinstance(pose1, (list, tuple)) else [pose1]
     print(f"[stage]   → 자세 {len(poses1)}개 "
           f"({'단일' if len(poses1) == 1 else '밴드 계획'})")
 
-    _step("1.3", "전회전 캡처", f"자세 {len(poses1)}개 × 턴테이블 360°")
+    # ★ preview 에서 멈출 수 있다. 거리탐색·실루엣·밴드 산정만 보고 싶을 때
+    #   전회전(실물 밴드당 ~30s)을 통째로 안 돌려도 된다 — preview 를 고치는
+    #   중에는 이 왕복이 대부분의 시간이었다.
+    if not runs_stage(backend.stage_until, "lookaround"):
+        print('[stage] lookaround 건너뜀 (stage_until="preview") — 계획만 내고 종료')
+        return backend.finalize()
+
+    # ── lookaround — 좋은 포즈 고정 + 턴테이블 전회전 ──────────────────────
+    # pick_lookaround_pose 는 단일 pose 또는 **pose 리스트(밴드 계획)** 반환 가능.
+    # 밴드(키큰 물체: 겹침 z-대역 자세들, safe-first 순서)면 대역마다 전회전.
+    _step(2, "lookaround", f"자세 {len(poses1)}개 × 턴테이블 360°")
 
     # ★ backend 가 `capture_bands` 를 제공하면 **밴드 전체를 한 scan** 으로 넘긴다.
     #   밴드마다 capture_rotation 을 부르면 밴드 = 별도 IScan 이 되어 SLAM 이 끊기고
@@ -184,25 +250,25 @@ def run_scan_stages(backend: ScanBackend) -> Any:
     if len(poses1) > 1 and hasattr(backend, "capture_bands"):
         print(f"[stage]   → 밴드 {len(poses1)}개를 한 scan 으로 연속 캡처")
         _t = _time.perf_counter()
-        ok = backend.capture_bands(poses1, phase=1)
+        ok = backend.capture_bands(poses1, stage="lookaround")
         globals()["_T_LAST"] = _time.perf_counter()
         print(f"[stage]   {'✓' if ok else '✘'} 밴드 연속 캡처 "
               f"{'완료' if ok else '실패'}  ({_time.perf_counter() - _t:.1f}s)")
         if not ok:
             print("[stage] ✘ lookaround 실패 — 종료")
             return backend.finalize()
-        if backend.stage_until >= 2:
-            _step(2, "nbv", "부족면 NBV 보강 (로봇 최소이동)")
+        if runs_stage(backend.stage_until, "nbv"):
+            _step(3, "nbv", "부족면 NBV 보강 (로봇 최소이동)")
             _run_nbv(backend)
-        if backend.stage_until >= 3 and backend.supports_flip():
-            _step(3, "flip", "외부 flip → 바닥면 수집")
+        if runs_stage(backend.stage_until, "flip") and backend.supports_flip():
+            _step(4, "flip", "외부 flip → 바닥면 수집")
             backend.go_home()
             n_flip = 0
             while backend.next_flip():
                 n_flip += 1
                 print(f"[stage]   → flip #{n_flip} 캡처")
                 if not backend.capture_rotation(AT_CURRENT,
-                                                "flip (flip 윗면)", phase=3):
+                                                "flip (바닥면)", stage="flip"):
                     break
             print(f"[stage]   → flip {n_flip}회 완료")
         _step("F", "마무리", "모델 확정 (finalize)")
@@ -224,7 +290,7 @@ def run_scan_stages(backend: ScanBackend) -> Any:
         print(f"[stage]   → {label} 시작"
               + (f"   [직전 밴드 이후 간격 {t_gap:.1f}s]" if i > 1 else ""))
         _t_cap = _time.perf_counter()
-        _ok = backend.capture_rotation(p, label, phase=1)
+        _ok = backend.capture_rotation(p, label, stage="lookaround")
         _dt = _time.perf_counter() - _t_cap
         globals()["_T_LAST"] = _time.perf_counter()
         if _ok:
@@ -240,24 +306,24 @@ def run_scan_stages(backend: ScanBackend) -> Any:
         print(f"[stage] lookaround 부분 성공 {n_ok}/{len(poses1)} 밴드 — nbv 로 진행")
 
     # ── nbv — 로봇 최소이동 NBV hole-fill ───────────────────────────
-    if backend.stage_until >= 2:
-        _step(2, "nbv", "부족면 NBV 보강 (로봇 최소이동)")
+    if runs_stage(backend.stage_until, "nbv"):
+        _step(3, "nbv", "부족면 NBV 보강 (로봇 최소이동)")
         _run_nbv(backend)
     else:
         print(f"[stage] nbv 건너뜀 (stage_until={backend.stage_until})")
 
     # ── flip — 외부 flip 후 윗면(바닥면) 수집 ────────────────────────
-    if backend.stage_until >= 3 and backend.supports_flip():
-        _step(3, "flip", "외부 flip → 바닥면 수집")
+    if runs_stage(backend.stage_until, "flip") and backend.supports_flip():
+        _step(4, "flip", "외부 flip → 바닥면 수집")
         backend.go_home()                       # flip 은 로봇 고정 전제
         n_flip = 0
         while backend.next_flip():               # 외부에서 물체 뒤집기 안내
             n_flip += 1
             print(f"[stage]   → flip #{n_flip} 캡처")
-            if not backend.capture_rotation(AT_CURRENT, "flip (flip 윗면)", phase=3):
+            if not backend.capture_rotation(AT_CURRENT, "flip (바닥면)", stage="flip"):
                 break
         print(f"[stage]   → flip {n_flip}회 완료")
-    elif backend.stage_until >= 3:
+    elif runs_stage(backend.stage_until, "flip"):
         print("[stage] flip 건너뜀 (backend 미지원)")
     else:
         print(f"[stage] flip 건너뜀 (stage_until={backend.stage_until})")
@@ -282,9 +348,20 @@ def _skip_key_pressed() -> bool:
     except ImportError:
         try:
             import select, sys
+            # ★ 비대화형이면 키가 올 수 없다. **여기서 바로 빠진다.**
+            #   ⚠ 2026-09-17 발견: stdin 이 EOF(리다이렉트·/dev/null·파이프)면
+            #     `select` 는 계속 "읽을 수 있음" 으로 답하고 `readline()` 은
+            #     빈 문자열을 준다. 그래서 아래 while 이 **무한루프**였다 —
+            #     nbv 첫 반복에 진입도 못 하고 CPU 를 태우며 멎었다.
+            #     헤드리스 sim, `nohup`, `tee`, CI 등 **터미널이 아닌 모든 실행**이
+            #     여기 걸린다. 실물에서 로그를 파일로 남기면 그대로 멈춘다.
+            if not sys.stdin or not sys.stdin.isatty():
+                return False
             hit = False
             while select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
+                if line == "":            # EOF — 더 읽을 게 없다(Ctrl-D 포함)
+                    break
                 if line.strip().lower().startswith("n"):
                     hit = True
             return hit
@@ -299,9 +376,9 @@ def _run_nbv(backend: ScanBackend) -> None:
 
     반복: 누적 mesh 생성 → 수렴이면 종료 → 부족면 관측자세(q) 계획 → 그 자세로
     전회전 캡처. feasible 자세 없거나 캡처 실패면 종료.
-    [n] 키로 언제든 남은 반복을 건너뛰고 다음 phase 로 넘어간다.
+    [n] 키로 언제든 남은 반복을 건너뛰고 다음 단계로 넘어간다.
     """
-    print("[stage]   (nbv 진행 중 [n] 키 = 남은 보강 건너뛰고 다음 phase)")
+    print("[stage]   (nbv 진행 중 [n] 키 = 남은 보강 건너뛰고 다음 단계)")
     for k in range(backend.nbv_k_max):
         if _skip_key_pressed():
             print(f"[stage]   ⏭ 사용자 [n] — nbv 를 {k}회 보강에서 마친다")
@@ -318,6 +395,6 @@ def _run_nbv(backend: ScanBackend) -> None:
         if pose is None:
             print("[stage]   ✘ 도달 가능한 NBV 자세 없음 — nbv 종료")
             break
-        if not backend.capture_rotation(pose, f"nbv NBV #{k + 1}", phase=2):
+        if not backend.capture_rotation(pose, f"nbv #{k + 1}", stage="nbv"):
             print(f"[stage]   ✘ NBV #{k + 1} 캡처 실패 — nbv 종료")
             break

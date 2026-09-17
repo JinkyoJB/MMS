@@ -16,6 +16,7 @@ IsaacXArm — xArm7 robot 백엔드 (Isaac Sim).
 
 from __future__ import annotations
 
+import os
 import numpy as np
 
 from utils.robot import xarm7_kinematics as kin
@@ -35,10 +36,52 @@ from utils.robot import xarm7_kinematics as kin
 #     0 이 된다. 신규값은 대상 상단을 고도각 65°·작동거리 250mm 로 내려다보며
 #     최저 링크 z=0.912 (상판 0.510 보다 한참 위) 라 충돌이 없다.
 #     산출: scripts/sim/find_home_pose.py (USD 실측 base·link7→Camera 기반 IK 탐색)
+#   ★ 2026-09-17 — **실물과 같은 값으로 통일.**
+#     실물 셀은 v2 배치인데 sim 만 v3 씬을 띄우고 있었다(짓기로 했다가 안 지은
+#     레이아웃). 실물 배치를 그대로 재현한 씬을 만들었으므로
+#     (`scripts/sim/build_scene_v2_real.py`), home 도 `XArmInterface.HOME_JOINTS_DEG`
+#     와 같아야 sim 이 실물을 미러링한다.
+#     실측 셀(`v2_real_260917`)에서: 충돌여유 +51.5mm · sigma_min 0.147 ·
+#     계획 격자 **12/12** 에 충돌-free 경로 (v3 용으로 뽑았던 값은 11/12).
+#
+#     ⚠ 구 v3 씬(`v3_scene.usd`)을 돌릴 때는 이 값이 맞지 않는다. 그 씬은
+#       턴테이블이 로봇 base 바로 아래라 기하가 전혀 다르다.
+#       `MMS_SIM_HOME_DEG="0.8,-14.65,-7.64,21.0,122.43,107.37,-88.46"` 로 덮어쓸 것
+#       (그 값도 오늘 충돌 게이트를 제약으로 재산출한 것이다 — 원래 값
+#        [-7.65,-75.61,...] 은 손목이 디스크 27mm 위를 스쳐 **모든 이동이 거부**됐다).
+_HOME_ENV = os.environ.get("MMS_SIM_HOME_DEG", "").strip()
 HOME_JOINTS_DEG = {
     "phoxi": [0.0, -30.0, 0.0, 60.0, 0.0, 90.0, 0.0],
-    "artec": [-7.65, -75.61, -8.95, 78.64, 2.81, 126.71, -69.63],
+    "artec": ([float(v) for v in _HOME_ENV.split(",")] if _HOME_ENV
+              else [0.0, -18.4, 0.0, 70.6, 0.0, 60.0, -45.0]),
 }
+
+
+#: **USD 아티큘레이션 ↔ 해석 FK 영점 오프셋** (deg, 관절 1~7).
+#
+#  ★ 2026-09-17 — 이게 없으면 **sim 로봇이 명령과 다른 자세로 간다.**
+#    2026-09-15 에 `xarm7_kinematics` 를 **실물 컨트롤러 기준**으로 재교정했는데
+#    (J2 영점 29.4° · J7 영점 9.77°), v2.usd 아티큘레이션은 그 꺾인 자세가 관절
+#    프레임에 녹아든 채 그대로다. 그래서 같은 q 를 줘도
+#        Isaac link7  vs  kin.fk_T(q)  →  128.7mm / 29.0° 차이
+#    가 난다. `IsaacXArm` 은 제어 로직에 **해석 FK 를 보여주고**(get_pose 가
+#    kin.fk_pose6d) Isaac 은 시각화로만 쓰는데, **카메라는 Isaac 아티큘레이션에
+#    붙어 있다.** 결국 플래너는 카메라를 정확히 조준했다고 믿지만 실제 카메라는
+#    29° 딴 데를 본다 — 실측: 대상물이 세로 화각 28.3°(한계 14.3°)로 밀려나
+#    `raw=110592 crop=0`, 즉 **캡처 0점**.
+#
+#  구동할 때 `q + Δ` 를 Isaac 에 주고, 읽을 때 `−Δ` 한다. 제어 로직이 보는 관절각은
+#  그대로 **컨트롤러/해석 FK 공간**에 남는다(실물과 같은 값).
+#
+#  산출: Isaac 에서 12자세를 찍어 `P_isaac(q) == kin_FK(q − Δ)` 로 최소자승 피팅.
+#    잔차 위치 RMS **260.3mm → 4.6mm** (최대 8.1mm). 지배항은 J2·J7 로 재교정
+#    커밋의 기록(29.4° / 9.77°)과 일치한다. 남은 4.6mm 는 USD CAD 와 보정 DH 의
+#    링크 치수 차이가 관절각으로 흡수된 것 — 카메라 발자국(~108mm)에 비해 작다.
+#  끄려면 `MMS_SIM_JOINT_OFFSET=0` (A/B 대조용).
+JOINT_ZERO_OFFSET_DEG = [0.0931, 29.4555, -0.3383, -0.3181, -1.0364, -0.7730, -9.7748]
+JOINT_ZERO_OFFSET = (
+    np.radians(JOINT_ZERO_OFFSET_DEG)
+    if os.environ.get("MMS_SIM_JOINT_OFFSET", "1") == "1" else np.zeros(7))
 
 
 class _ArmShim:
@@ -123,7 +166,9 @@ class IsaacXArm:
         # sim 아티큘레이션은 충돌/접촉으로 명령값과 수 도 어긋날 수 있어(물리 정착),
         # 제어 로직이 보는 robot 은 '이상적 키네마틱 로봇'으로 두고(get_joint_angles=
         # 명령값), sim 은 시각화로 따라가게 한다. fk/ik/get_pose 가 자기일관됨.
-        self._q = np.asarray(world.get_joint_positions()[:7], dtype=float).copy()
+        # Isaac 관절각 → 컨트롤러 공간 (−Δ)
+        self._q = (np.asarray(world.get_joint_positions()[:7], dtype=float)
+                   - JOINT_ZERO_OFFSET).copy()
 
     # ── 내부 ────────────────────────────────────────────────────────────────
     def _sim_joints(self) -> np.ndarray:
@@ -133,7 +178,9 @@ class IsaacXArm:
     def _move(self, q: np.ndarray) -> None:
         """명령 관절각 갱신 + sim 아티큘레이션 구동(시각화)."""
         self._q = np.asarray(q, dtype=float)[:7].copy()
-        self._world.drive_to_joints(self._q)
+        # 컨트롤러 공간 → Isaac 아티큘레이션 (+Δ). 이래야 **카메라**가 해석 FK 가
+        # 말하는 자리에 온다 (카메라는 Isaac link7 의 자식이다).
+        self._world.drive_to_joints(self._q + JOINT_ZERO_OFFSET)
 
     # ── 상태 조회 ───────────────────────────────────────────────────────────
     def get_joint_angles(self, is_radian: bool = True) -> np.ndarray:

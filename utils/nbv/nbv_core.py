@@ -276,11 +276,32 @@ def plan_nbv_elevation_pose(
     고르므로, 넘기지 않으면 직전 자세의 이동비용이 0 이라 **같은 자세를 무한 반복**한다
     (실측: el=65 az=-30 을 4회 연속 선택, gap 18→18→20→19 로 안 줄었다).
 
+    ★ 단, 재방문 판정은 **el 로만** 한다(az 는 무시). 이 함수의 전제가 "az 는
+      관측 조건을 바꾸지 않는다 — 회전은 턴테이블이 담당한다" 이므로, 같은 el 을
+      az 만 바꿔 다시 도는 것은 **새 정보가 0 인데 로봇만 크게 움직이는** 일이다.
+      (el, az) 로 판정하면 el 하나당 az 후보 수만큼 재방문이 허용돼 정확히 그
+      낭비가 생긴다.
+      실측 2026-09-17 (같은 코드·같은 격자, 실측 T_B_F0 vs sim v3 씬,
+      seed = 직전 자세 = 런타임과 동일):
+        az 를 0°→+30° 로만 바꾸는 데 드는 **최대 관절이동**
+          sim  : el45 23.3° · el55 27.7° · el65 23.9°
+          real : el45 51.3° · el55 55.5° · el65 47.7°     (≈ 2배)
+      real 셀은 턴테이블이 base 에서 수평 799mm·전체 1055mm(도달한계 1090mm)라
+      팔이 거의 다 펴진 자세다. 그 근처에서는 야코비안이 나빠 같은 az 변화가
+      sim 의 약 2배 관절이동을 요구한다 — 사용자가 본 "로봇이 크게 움직인다" 가
+      이것이다. el 로만 판정하면 로봇은 **자기가 편한 az 에 머물고** 고도각만 바꾼다.
+
+      ⚠ 이 수치는 **IK seed 에 민감하다.** 옛 home 값을 seed 로 쓰면 real 이
+        6/12 만 풀리고 el65 가 103° 로 나온다 — 해석 IK 가 국소해라서 그렇지
+        기하의 한계가 아니다. 실물 home(`XArmInterface.HOME_JOINTS_DEG`)으로
+        재면 도달은 12/12 다. 비교할 때 seed 를 반드시 맞출 것.
+
     Returns (q, el_deg, az_deg) or None(도달 가능 관측자세 없음 = 윗면 도달한계 등).
     """
     if not gaps:
         return None
-    seen = {(round(float(e), 1), round(float(a), 1)) for e, a in visited}
+    # ★ el 로만 재방문 판정 (az 는 커버리지 무관 — 위 docstring 참고)
+    seen_el = {round(float(e), 1) for e, _a in visited}
     needs = gap_normal_elevations_deg(gaps, up_sign=up_sign)
     el_need = float(np.clip(np.median(needs), el_floor_deg + 5.0, el_cap_deg))
     # ★ **el_need 에 가까운 순**으로 시도한다. 예전에는 내림차순(=가장 높은 el 우선)이라
@@ -303,10 +324,10 @@ def plan_nbv_elevation_pose(
     for el in el_cands:
         if el < el_floor_deg or el > el_cap_deg:
             continue
+        if round(float(el), 1) in seen_el:
+            continue                           # 이 고도각은 이미 전회전 스캔했다
         best = None
         for az in view_azis_deg:
-            if (round(float(el), 1), round(float(az), 1)) in seen:
-                continue                       # 이미 그 자세로 전회전 스캔했다
             q = pose_q_fn(float(el), float(az))
             if q is None:
                 continue
