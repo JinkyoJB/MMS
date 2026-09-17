@@ -83,6 +83,23 @@ class ArtecClient:
         self._processor = self._scanner.create_frame_processor()
         self._initialized = True
 
+        # ★ 작동거리 창 — 설정이 있으면 적용하고, **결과를 반드시 찍는다.**
+        #   이 값이 `SensorModel.dof` 로 들어가 밴드 수를 정하므로, 실제로 뭐가
+        #   걸렸는지 로그에 남아야 나중에 "왜 밴드가 이렇게 나왔나" 를 추적할 수 있다.
+        near_cfg = getattr(self.cfg, "scan_range_near_mm", None)
+        far_cfg = getattr(self.cfg, "scan_range_far_mm", None)
+        if near_cfg is not None and far_cfg is not None:
+            try:
+                self._processor.set_scanning_range(float(near_cfg), float(far_cfg))
+            except Exception as e:                       # noqa: BLE001
+                print(f"[ArtecClient] ⚠ 스캔 범위 설정 실패({type(e).__name__}: {e})")
+        try:
+            n, f = self._processor.scanning_range()
+            print(f"[ArtecClient] 작동거리 창 = {n:.0f}~{f:.0f}mm"
+                  + ("" if near_cfg is not None else "  (SDK 기본값 — 설정 안 함)"))
+        except Exception as e:                           # noqa: BLE001
+            print(f"[ArtecClient] ⚠ 스캔 범위 조회 실패({type(e).__name__}: {e})")
+
         id_info = self._scanner.id()
         print(f"[ArtecClient] Connected: {id_info.name}  serial={id_info.serial}")
 
@@ -108,6 +125,23 @@ class ArtecClient:
     # ==============================================================
     # Single-frame capture
     # ==============================================================
+
+    # ── 스캔 범위 (작동거리 창) ─────────────────────────────────────
+    #  ★ 계획기(`SensorModel.dof`)가 이 값을 쓴다. 여태 하드코딩 추측이었는데,
+    #    SDK 가 그대로 알려주므로 추정하지 않는다. **sim 스캐너도 같은 이름으로
+    #    같은 의미를 돌려준다**(`IsaacArtecScanner.scanning_range`) — 호출부가
+    #    백엔드를 안 가리게 하려는 것이다.
+    def scanning_range(self):
+        """(near_mm, far_mm) — SDK `IFrameProcessor::getScanningRange`."""
+        if self._processor is None:
+            raise RuntimeError("scanning_range: processor 없음 (initialize 먼저)")
+        return self._processor.scanning_range()
+
+    def set_scanning_range(self, near_mm: float, far_mm: float) -> None:
+        """근/원거리 스캔 범위 설정 (mm)."""
+        if self._processor is None:
+            raise RuntimeError("set_scanning_range: processor 없음 (initialize 먼저)")
+        self._processor.set_scanning_range(float(near_mm), float(far_mm))
 
     def capture(self, frame_id: int = 0, timestamp: Optional[float] = None) -> Optional[ScanResult]:
         """

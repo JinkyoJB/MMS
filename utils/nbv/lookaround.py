@@ -27,7 +27,8 @@ backend 에서 맞춘다.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 import numpy as np
@@ -72,6 +73,60 @@ class SensorModel:
         return float(n_pts) * (self.voxel_m * 100.0) ** 2
 
 
+def sensor_from_scanning_range(near_mm, far_mm, base: "SensorModel" = None,
+                               log=None) -> "SensorModel":
+    """스캐너가 **실제로 쓰는 스캔 범위**로 `SensorModel.dof` 를 채운다.
+
+    ★ `dof` 는 밴드 수·커버리지 판정을 좌우하는 값인데 여태 **하드코딩 추측**
+      (0.20~0.30m)이었다. Artec SDK 는 이 창을 그대로 알려준다
+      (`IScanningProcedure::getScanningRange` / `IFrameProcessor` 쪽도 동일) —
+      추정하지 말고 **물어본 값**을 쓴다. 그래야 플래너의 가정과 스캐너의 설정이
+      정의상 같아진다(예전엔 둘이 따로 놀았고, 맞는지 확인할 방법도 없었다).
+
+    ⚠ SDK 는 **mm**, `SensorModel.dof` 는 **m** 다.
+    반환: 범위를 못 읽으면 `base`(기본 SensorModel) 를 그대로 — 조용히 틀리지 않게 로그를 남긴다.
+    """
+    base = base or SensorModel()
+    try:
+        near, far = float(near_mm) / 1000.0, float(far_mm) / 1000.0
+    except (TypeError, ValueError):
+        if log:
+            log(f"  ⚠ 스캔 범위를 못 읽음({near_mm!r}, {far_mm!r}) — dof={base.dof} 유지")
+        return base
+    if not (0.0 < near < far):
+        if log:
+            log(f"  ⚠ 스캔 범위가 이상하다 ({near*1000:.0f}~{far*1000:.0f}mm) — "
+                f"dof={base.dof} 유지")
+        return base
+    import dataclasses as _dc
+    out = _dc.replace(base, dof=(near, far))
+    if log:
+        log(f"  스캐너 스캔 범위 {near*1000:.0f}~{far*1000:.0f}mm 를 dof 로 사용 "
+            f"(기본 가정 {base.dof[0]*1000:.0f}~{base.dof[1]*1000:.0f}mm)")
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  "점이 충분한가" — 세 단계의 문턱
+# ══════════════════════════════════════════════════════════════════════════
+#  단계가 달라 값이 다르다. 셋의 관계를 여기 한 곳에 적어 둔다(예전엔 세 파일에
+#  흩어져 있고 관계가 어디에도 없었다):
+#
+#    ① RAW_MIN_VERTS  (1500)  스캐너가 준 **원시 정점**. 크롭 전.
+#         못 넘으면 "스캐너가 물체를 못 봤다" — 그 캡처는 통째로 버린다.
+#         real 은 `adaptive_min_preview_verts` 로 이미 하고 있었고 sim 은 없었다.
+#    ② MIN_USEFUL_PTS (200)   **크롭 후** 물체 점. 거리 보정·실루엣 누적의 문턱.
+#         ①을 넘겨도 여기서 걸릴 수 있다 — 스캐너는 뭔가 봤는데 그게 물체가
+#         아닌 경우(자기점·배경·원판)다. 그때도 '반환 없음'으로 보고 탐침한다.
+#    ③ MIN_PLAN_PTS   (100)   preview **전체 누적**. 이보다 적으면 플래너 포기.
+#         ②를 통과한 캡처가 하나도 없거나 voxel 다운샘플 뒤 너무 적을 때다.
+#
+#  즉 ① → ② 는 매 캡처, ③ 은 수집이 다 끝난 뒤 한 번이다.
+RAW_MIN_VERTS: int = 1500
+MIN_USEFUL_PTS: int = 200
+MIN_PLAN_PTS: int = 100
+
+
 @dataclass
 class ViewPose:
     """축 기준 시점 파라미터 + world 카메라 자세 (USD 규약)."""
@@ -80,6 +135,15 @@ class ViewPose:
     target_z: float                        # look 타깃 z (world)
     eye_w: np.ndarray = None               # (3,)
     R_wc: np.ndarray = None                # (3,3) world→cam 회전의 역 (cam축 world표현)
+    #: 이 자세가 밴드가 아니라 **윗면(뚜껑) 보강**으로 추가된 것인가.
+    #  캡처 순서 정렬과 "겹침 미달 → 밴드 추가" 판단이 이 둘을 구분해야 한다 —
+    #  뚜껑 자세의 겹침 부족은 밴드를 더 쪼개도 해결되지 않는다(el 이 달라서다).
+    is_cap: bool = False
+    #: `solve_plan_poses` 가 **실제로 채택한** 방위각. 계획 단계에서는 0 이다
+    #  (방위는 관측 조건이 아니라 도달성 문제라 나중에 정해진다). 캡처 중
+    #  거리추종이 **같은 el·az·tz 로 축거리만** 다시 풀려면 이 값이 필요하다 —
+    #  az 가 바뀌면 도달성·충돌이 달라져 재겨냥이 엉뚱한 자세로 갈 수 있다.
+    az_deg: float = 0.0
 
 
 @dataclass
@@ -97,7 +161,12 @@ class LookaroundPlan:
     poses: List[ViewPose]
     evals: List[PoseEval]
     banded: bool
-    band_overlap_frac: List[float] = field(default_factory=list)   # 인접 밴드 seen 겹침
+    #: **캡처 순서상 인접한** 두 자세의 seen 겹침 (뒤 자세 기준 비율).
+    #  ⚠ 예전엔 "그 전까지 누적된 master 와의 겹침" 을 넣었다. 밴드가 각자
+    #    IScan 이던 시절엔 그게 relocalization 앵커 가용성이라 맞았지만, 밴드가
+    #    한 IScan 으로 이어진 뒤로는(2026-09-16) **직전 자세와의 겹침**이라야
+    #    로봇이 옮겨가는 동안 SLAM 이 붙어 있는지를 잰다.
+    band_overlap_frac: List[float] = field(default_factory=list)
     tracking_risk: bool = False            # 최선이어도 min_fill < 임계 (recovery 대비)
     note: str = ""
 
@@ -203,13 +272,33 @@ def look_at_R(eye, target, up=(0.0, 0.0, 1.0)) -> np.ndarray:
 
 
 def make_view_pose(axis_xy, target_z: float, el_deg: float, az_deg: float,
-                   standoff: float) -> ViewPose:
+                   standoff: float, up_sign: float = +1.0) -> ViewPose:
+    """축 위 `target_z` 를 (el, az, standoff) 에서 보는 **채점용** 자세.
+
+    ★ `up_sign` — 작업 프레임에서 어느 z 방향이 '위'인가. el 의 기준축이다.
+      **실행 경로(`view_pose.eye_from_el_az`)의 `up` 인자와 같은 뜻**이고,
+      둘이 어긋나면 채점과 실행이 다른 자세를 본다.
+
+      ⚠ 2026-09-17 이전에는 이 함수가 `+Z = 위` 를 **못 박고 있었다.** sim 은
+        world 프레임이라 우연히 맞았지만, real 의 base 는 천장 마운트라 +Z 가
+        아래다(`docs/collision.md` §6.1). 그래서 real 은
+          채점  eye = 원판면 기준 **아래**(테이블 속)에서 올려다봄
+          실행  eye = 원판면 기준 **위**에서 내려다봄
+        로 **원판면 대칭인 거울상**이었다(실측: el=30°·standoff 284mm 에서
+        두 eye 가 284mm 떨어짐). 원통형 물체는 옆면이 비슷하게 보여 z-커버 숫자가
+        그럴듯하게 나오는 바람에 오래 안 드러났지만,
+          · 입사각·backface 판정이 뒤집힌 면을 본다
+          · `_augment_top_face` 의 '뚜껑' 자세가 실제로는 **바닥**을 겨눈다
+        는 점에서 real 의 밴드 계획이 틀린 근거로 세워지고 있었다.
+    """
     el, az = math.radians(el_deg), math.radians(az_deg)
+    s_up = float(np.sign(up_sign)) or 1.0
     target = np.array([axis_xy[0], axis_xy[1], target_z])
     eye = target + standoff * np.array(
-        [math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)])
+        [math.cos(el) * math.cos(az), math.cos(el) * math.sin(az),
+         s_up * math.sin(el)])
     return ViewPose(el_deg=el_deg, standoff=standoff, target_z=target_z,
-                    eye_w=eye, R_wc=look_at_R(eye, target))
+                    eye_w=eye, R_wc=look_at_R(eye, target), az_deg=az_deg)
 
 
 def _rot_z(pts, axis_xy, theta):
@@ -266,22 +355,54 @@ def evaluate_viewpoint(pts_obj, nrm_obj, axis_xy, pose: ViewPose,
                     seen_mask=seen)
 
 
+def contiguous_z_span(z, mask, z_bins: int = 48, frac: float = 0.3) -> float:
+    """덮인 **연속** z 구간 길이 (m).
+
+    ⚠ `np.ptp(z[mask])` 로 재면 안 된다 — 최대−최소라서 **위아래만 걸치고
+      가운데가 빈** 자세도 "다 덮었다" 로 나온다. 그 경우를 걸러내려고 도입한
+      지표인데 구현이 같은 함정을 갖고 있었다.
+      실측 2026-09-17: hand_drill ptp 154mm vs 연속 126mm, protein_drink 는
+      이것만으로 단일/밴드 판정이 뒤집힌다.
+
+    bin 판정 기준(`frac`)은 `evaluate_viewpoint` 의 z_cover 와 같다 — 같은
+    "덮였다" 를 두 곳이 다르게 정의하면 둘을 같이 못 읽는다.
+    """
+    z = np.asarray(z, float)
+    mask = np.asarray(mask, bool)
+    if int(np.count_nonzero(mask)) < 30 or len(z) == 0:
+        return 0.0
+    edges = np.linspace(z.min(), z.max() + 1e-9, z_bins + 1)
+    b = np.clip(np.digitize(z, edges) - 1, 0, z_bins - 1)
+    tot = np.bincount(b, minlength=z_bins)
+    hit = np.bincount(b[mask], minlength=z_bins)
+    ok = (tot > 0) & (hit / np.maximum(tot, 1) > frac)
+    best = run = 0
+    for v in ok:
+        run = run + 1 if v else 0
+        best = max(best, run)
+    return float(best) * float(edges[1] - edges[0])
+
+
 # ── 계획용 preview 캡처 전략 (거리스텝, sim/real 공용 로직) ─────────────────
 def simulate_planning_captures(pts_obj, nrm_obj, axis_xy, disc_top_z,
                                sensor: SensorModel = None,
-                               d_steps=(0.30, 0.38), azs=(0.0, 90.0),
-                               el_deg=25.0, max_heights=4):
+                               d_steps=None, azs=(0.0, 90.0),
+                               el_deg=25.0, max_heights=4, up_sign: float = +1.0):
     """real 계획용 preview 캡처 전략의 sim 모사 (★ 엄격 실기 DOF 그대로).
 
-    제약의 본질 = 스캐너→표면 거리(0.2~0.3m 창). 축에서 거리 d 캡처가 잡는
-    표면 반경 = [d-0.30, d-0.20] → **거리 2스텝(0.30/0.38)이면 r 0~18cm 전부
-    커버**(어느 스텝에 잡히는지 자체가 r 측정). 키큰 물체는 표면거리를 유지한
-    채 조준높이(tz)만 올려 추가 캡처 — 각 preview 는 FK 좌표로 독립이라
-    SLAM/relocalization 불필요.
+    제약의 본질 = 스캐너→표면 거리(작동거리 창). 축에서 거리 d 캡처가 잡는
+    표면 반경 = `[d−far, d−near]` → 창 폭 간격으로 스텝을 놓으면 반경 0~18cm 를
+    덮는다(어느 스텝에 잡히는지 자체가 r 측정). 격자는 **`standoff.preview_grid`
+    가 창에서 유도**한다 — 여기서 하드코딩하면 실기와 갈라진다. 키큰 물체는
+    표면거리를 유지한 채 조준높이(tz)만 올려 추가 캡처 — 각 preview 는 FK
+    좌표로 독립이라 SLAM/relocalization 불필요.
 
     종료 조건은 real 과 동일하게 GT 없이: "새 캡처가 상단을 더 못 늘리면 stop".
     반환 = 계획용으로 보인 점 마스크 (real 에선 이 점들이 preview 점군)."""
     sensor = sensor or SensorModel()
+    if not d_steps:
+        from utils.nbv.standoff import preview_grid
+        d_steps = preview_grid(sensor.dof)
     axis_xy = np.asarray(axis_xy, float)
     z = pts_obj[:, 2]
     seen = np.zeros(len(pts_obj), dtype=bool)
@@ -290,7 +411,7 @@ def simulate_planning_captures(pts_obj, nrm_obj, axis_xy, disc_top_z,
         prev_top = -np.inf
         for _ in range(max_heights):
             for d in d_steps:
-                pose = make_view_pose(axis_xy, tz, el_deg, az, d)
+                pose = make_view_pose(axis_xy, tz, el_deg, az, d, up_sign)
                 tr, _ = visible_masks(pts_obj, nrm_obj, pose, sensor)
                 seen |= tr
             top = float(z[seen].max()) if seen.any() else tz
@@ -306,6 +427,84 @@ def simulate_planning_captures(pts_obj, nrm_obj, axis_xy, disc_top_z,
 # 쓰도록 백엔드 의존 부분만 콜백으로 뺐다. 예전에는 이 루프가 sim 에만 있었고
 # real 은 home 고정이라, sim 에서 검증한 자세 선정이 실물에 전혀 적용되지 않았다.
 
+# ── `standoff` 재수출 ──────────────────────────────────────────────────────
+#  백엔드는 `lookaround` 를 `p1` 로 들고 다닌다. 거리 관련 상수·함수가 `standoff`
+#  에 있다고 해서 백엔드가 두 모듈을 따로 import 하게 하면, 한쪽만 고쳐서 갈라질
+#  자리가 하나 더 생긴다. preview 가 쓰는 것만 여기서 같이 내보낸다.
+#  (`standoff` 는 `lookaround` 를 import 하지 않으므로 순환이 없다.)
+from utils.nbv.standoff import (                              # noqa: E402,F401
+    PREVIEW_RADIUS_MAX_M, probe_bounds, blind_probe, preview_grid,
+    preview_start_distance, distance_correction)
+
+#: 스캔 대상 장애물을 축 둘레로 몇 방향 쓸어 등록할지 (sim·real 공용).
+#  1 = 끄기(θ=0 그대로). 예전엔 sim 만 env 로 바꿀 수 있어 조용히 갈라질 수 있었다.
+OBSTACLE_SWEEP_N: int = int(os.environ.get("MMS_OBSTACLE_SWEEP", "12"))
+
+
+def guard_cylinder_points(axis_pt, up_sign: float, radius_m: float,
+                          height_m: float = None, n_z: int = 24,
+                          n_r: int = 8, n_th: int = 24):
+    """preview 동안 축 둘레를 막는 **보수적 원기둥** 점군 (sim·real 공용).
+
+    왜 필요한가 — 물체를 장애물로 등록하려면 먼저 물체를 봐야 하는데 preview 가
+    바로 그 '보는' 단계다. 그동안 충돌 모델에는 대상이 **없다.** preview 는 축거리
+    200~480mm 를 훑으며 최대 48회 움직이므로 무방호로 두기엔 길다.
+
+    `radius_m` 은 **원판 반경**을 넘지 않게 줄 것 — 물체는 원판 위에 서 있으므로
+    그보다 넓을 수 없다(넘어진다). `PREVIEW_RADIUS_MAX_M`(180mm)은 거리격자가
+    상정하는 최대 반경이지 물체가 실제로 가질 수 있는 최대가 아니다.
+
+    ⚠ **반경이 크면 preview 자세를 막는다.** 카메라의 수평거리는 `d·cos(el)` 이라
+      el=30° 면 축거리 220mm 가 수평 191mm 다. keepout(반경+마진)이 210mm 면 그
+      자세가 기각되고, 탐침 사다리의 220mm 칸이 통째로 사라진다. 게다가 증상이
+      **조용하다** — 이동이 거부되면 빈 배열이 돌아가고 코어는 그걸 "스캐너가 못
+      봤다" 로 읽어 다음 탐침으로 넘어간다. 로봇은 가지도 않았는데 말이다.
+      그래서 `guard_blocks_probe()` 로 미리 검사해 경고한다.
+    """
+    a = np.asarray(axis_pt, float)
+    u = float(np.sign(up_sign)) or 1.0
+    R = float(radius_m)
+    H = float(radius_m * 2.0 if height_m is None else height_m)
+    z0 = float(a[2]); z1 = z0 + u * H
+    zs = np.linspace(min(z0, z1), max(z0, z1), int(n_z))
+    th = np.linspace(0.0, 2 * math.pi, int(n_th), endpoint=False)
+    rs = np.linspace(R / float(n_r), R, int(n_r))
+    return np.array([[a[0] + r * math.cos(t), a[1] + r * math.sin(t), z]
+                     for z in zs for r in rs for t in th], float)
+
+
+def guard_blocks_probe(radius_m: float, margin_m: float, el_deg: float,
+                       probe_lo_m: float):
+    """보호 원기둥이 탐침 사다리를 막는가 → (막는가, 최소가능 축거리).
+
+    카메라 수평거리 = `d·cos(el)`. keepout = 반경 + 마진. 그러므로 안전한 최소
+    축거리는 `(R+M)/cos(el)` 이고, 그게 탐색 하한보다 크면 그 사이 구간을 못 쓴다.
+    """
+    c = max(math.cos(math.radians(float(el_deg))), 1e-6)
+    d_min = (float(radius_m) + float(margin_m)) / c
+    return (d_min > float(probe_lo_m) + 1e-9), d_min
+
+
+def swept_about_axis(pts, axis_pt, axis_dir, n: int = None):
+    """점군을 축 둘레로 `n` 방향 쓸어 합친 **회전체** (충돌 장애물용, sim·real 공용).
+
+    왜 필요한가 — 스캔 점군은 `θ=0` canonical 로 쌓인다(`rot_about_axis(−θ)`).
+    그런데 로봇이 움직이는 시점의 턴테이블 각은 0 이 아니다(nbv 는 부분 스윕이라
+    특히). 비대칭 물체면 장애물이 **실제와 다른 방향을 향한 채** 걸려 있어,
+    있지도 않은 곳을 막고 정작 손잡이가 있는 쪽은 뚫린다.
+
+    회전체로 만들면 턴테이블이 어느 각도에 있든 실제 물체를 포함한다. 보수적이지만
+    카메라는 축에서 200mm 밖에 서므로 관측 자세가 기각되지는 않는다.
+    """
+    if n is None:
+        n = OBSTACLE_SWEEP_N
+    P = np.asarray(pts, float)
+    if len(P) == 0 or int(n) <= 1:
+        return P
+    return np.vstack([rot_about_axis(P, axis_pt, axis_dir, a)
+                      for a in np.linspace(0.0, 2 * math.pi, int(n), endpoint=False)])
+
+
 def rot_about_axis(pts, axis_pt, axis_dir, ang):
     """임의 축(axis_pt, axis_dir) 둘레로 점군을 ang(rad) 회전. sim·real 공용."""
     a = np.asarray(axis_dir, float)
@@ -317,23 +516,82 @@ def rot_about_axis(pts, axis_pt, axis_dir, ang):
         + np.asarray(axis_pt, float)
 
 
+def _unpack_preview(got):
+    """`preview_at` 반환을 **(pts, cam_pos, legacy)** 로 정규화.
+
+    `legacy` 는 **계약**을 말한다 — 콜백이 `(점군, 카메라위치)` 가 아니라 점군만
+    돌려주는 옛 구현인가. `cam_pos is None` 과 **반드시 구분해야 한다.**
+
+    ⚠ 예전엔 이 둘을 `cam is None` 하나로 겸했다. 그래서
+      · 빈 캡처로 카메라 위치를 못 준 프레임
+      · `prim_world_pose` 가 한 번 튄 프레임
+      이 전부 "옛 계약" 으로 오인돼 **실행 내내 적응이 영구히 꺼졌다.** 게다가 그
+      판정이 `blind_probe` 앞에 있어서, 빈 캡처가 탐침에 도달조차 못 했다 —
+      적응이 가장 필요한 순간에 정확히 꺼지는 구조였다.
+
+      계약은 **모양**으로만 본다(2-tuple 인가). 값이 None 인 것은 그 프레임의
+      사정일 뿐이다.
+    """
+    if got is None:                       # 콜백이 아무것도 못 냄 — 계약 문제 아님
+        return None, None, False
+    if isinstance(got, tuple) and len(got) == 2:
+        pts, cam = got
+        return ((None if pts is None else np.asarray(pts, float)),
+                (None if cam is None else np.asarray(cam, float)),
+                False)
+    return np.asarray(got, float), None, True
+
+
+def next_distance(d, pts, cam_pos, dof, lo, hi, blind_step=0.04):
+    """적응적 preview 의 다음 축거리. **밴드 캡처 중 거리추종과 같은 식**을 쓴다.
+
+    실제 계산은 `utils.nbv.standoff.distance_correction` 한 곳에만 있다 — preview 와
+    밴드가 다른 기준으로 거리를 정하면 "preview 는 맞췄는데 본 스캔은 멀다" 가 된다.
+    여기서는 이동량 제한을 걸지 않는다: preview 는 아직 녹화 중이 아니라 카메라가
+    훌쩍 뛰어도 SLAM 이 끊길 게 없고, 오히려 한 번에 가는 편이 이동 횟수가 준다.
+    """
+    from utils.nbv.standoff import distance_correction
+    return distance_correction(d, pts, cam_pos, dof, lo, hi,
+                               blind_step=blind_step, max_step=None)
+
+
 def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
-                            d_steps=(0.30, 0.38), thetas=(0.0, math.pi / 2),
+                            d_steps=None, thetas=(0.0, math.pi / 2),
                             max_heights: int = 4, rise_m: float = 0.03,
                             start_off_m: float = 0.05, top_eps_m: float = 0.01,
-                            up_sign: float = +1.0, log=None):
+                            up_sign: float = +1.0, sensor: "SensorModel" = None,
+                            adaptive: bool = True, max_dist_tries: int = 6,
+                            min_pts: int = MIN_USEFUL_PTS, log=None):
     """계획용 preview 를 모아 물체 프레임(θ=0) 점군으로 돌려준다.
 
-    `simulate_planning_captures` 가 sim 안에서 모사하던 전략을 **실제 장비로**
-    수행하는 루프다. 백엔드는 두 콜백만 제공한다.
-      preview_at(tz, d) -> (N,3)  조준높이 tz·축거리 d 로 구동 후 캡처하고
-                                  물체 점만 크롭해 돌려준다(작업 프레임).
+    백엔드는 두 콜백만 제공한다.
+      preview_at(tz, d) -> (N,3) | ((N,3), cam_pos)
+          조준높이 tz·축거리 d 로 구동 후 캡처하고 물체 점만 크롭해 돌려준다.
+          **카메라 위치를 같이 주면 적응적 거리 조절이 켜진다**(아래).
       move_turntable(theta_rad)   턴테이블을 절대각으로 돌리고 완료까지 대기.
 
     실루엣을 2방향(턴테이블 0°/90°)에서 얻는 이유는 로봇을 크게 돌리지 않고도
     비대칭 물체의 폭을 보기 위해서다. 90° 점군은 -θ 로 역회전해 물체 프레임으로
     통일한다. 조준높이는 "새 캡처가 상단을 더 못 늘리면 종료"로 올리므로 물체
     높이에 대한 사전지식(GT)이 필요없다.
+
+    ★ 거리 결정 — **적응적**(`adaptive=True`, 기본)
+      예전에는 고정 격자(`d_steps`)를 매 높이마다 전부 돌았다.
+      그 값은 "반경 0~18cm 를 창 안에 넣는다" 는 커버리지 기준이라, 작은 물체에선
+      먼 스텝이 빈 캡처가 된다(sim 실측: d=380mm 에서 3,233점 = 사실상 0).
+      그런데도 **매번 이동은 한다** — 실물에서 그냥 시간 낭비다.
+
+      이제는 한 장 찍고 `next_distance()` 로 다음 거리를 **계산**한다. 표면까지
+      거리 중앙값이 창 중앙에 오도록 옮기므로, 보통 1~2회면 수렴한다.
+      `preview_at` 이 카메라 위치를 안 주면 옛 고정 격자로 되돌아간다(하위호환).
+
+    `min_pts` — **이만큼 안 들어오면 "안 들어온 것"으로 친다** (기본 200).
+      거리 보정은 표면거리의 **중앙값**에 기대는데, 점이 서너 개뿐이면 그 중앙값은
+      물체가 아니라 자기점 잔여·배경 노이즈다. 그걸 믿으면 카메라가 엉뚱한 쪽으로
+      가고, "점이 있다" 는 이유로 탐침(`blind_probe`)까지 건너뛰어 회복 수단이
+      사라진다. 실물 preview 는 보통 수만 점이라 200 은 아주 낮은 문턱이다
+      (sim 실측 2026-09-17: 최소 15,912점). 실루엣 누적 문턱도 겸한다 — 거리에
+      못 믿을 점군이면 실루엣으로도 못 믿는다.
 
     `up_sign` — 작업 프레임에서 **어느 z 방향이 '위'인가** (+1 = +Z 가 위).
       sim 은 world 프레임이라 +1 이 맞다. real 은 base 프레임을 쓰는데 이 셀의
@@ -346,7 +604,20 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
       '위' 는 z 최대가 아니라 **z 최소**다.
     """
     axis_pt = np.asarray(axis_pt, float)
+    sensor = sensor or SensorModel()
+    dof = sensor.dof
+    # ★ 거리격자·탐색한계·시작거리 **전부 작동거리 창에서 유도**한다. 예전엔
+    #   격자가 sim (300,380) / real (240,300) 으로 하드코딩돼 갈라져 있었고,
+    #   real 쪽은 반경 40mm 만 넘어도 근접한계 안쪽이라 반환이 없었다.
+    #   창이 바뀌면(스캐너 설정·기종) 하드코딩은 조용히 틀려진다.
+    from utils.nbv.standoff import (probe_bounds, blind_probe, preview_grid,
+                                    preview_start_distance)
+    d_lo, d_hi = probe_bounds(dof)
+    if not d_steps:
+        d_steps = preview_grid(dof)
+    d_cur = float(np.clip(preview_start_distance(dof), d_lo, d_hi))
     acc = []
+    n_cap = n_move = 0
     for theta in thetas:
         # ★ 회전 성공 여부를 **확인한다.** 실패했는데 그대로 찍으면 다른 방위의
         #   실루엣이라고 믿으면서 실제로는 직전 각도의 점군을 한 번 더 쌓는다 —
@@ -363,10 +634,96 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
         s = float(np.sign(up_sign)) or 1.0
         tz, prev_top = float(axis_pt[2]) + s * start_off_m, -np.inf
         for _ in range(max_heights):
-            for d in d_steps:
-                obj = preview_at(float(tz), float(d))
-                if obj is not None and len(obj):
-                    acc.append(rot_about_axis(obj, axis_pt, axis_dir, -theta))
+            if adaptive:
+                d, d_anchor, n_blind = d_cur, d_cur, 0
+                for _k in range(max_dist_tries):
+                    got = preview_at(float(tz), float(d)); n_move += 1
+                    pts, cam, legacy = _unpack_preview(got)
+                    if legacy:              # 콜백이 점군만 준다 → 고정 격자로
+                        adaptive = False
+                        if log:
+                            log("preview_at 이 (점군, 카메라위치) 를 안 준다 "
+                                "— 고정 거리격자 사용")
+                        break
+                    n_pts = 0 if pts is None else len(pts)
+                    # ★ **몇 점 들어온 것은 '안 들어온 것'으로 친다.**
+                    #   `next_distance` 는 표면거리의 **중앙값**으로 다음 거리를
+                    #   정하는데, 점이 서너 개뿐이면 그 중앙값은 물체가 아니라
+                    #   자기점 잔여·배경 노이즈일 수 있다. 그걸 믿으면 카메라가
+                    #   엉뚱한 쪽으로 가고, 게다가 "점이 있다" 는 이유로 아래
+                    #   탐침(blind_probe)마저 건너뛴다 — 회복 수단이 사라진다.
+                    #   실물에서는 근접한계 안쪽이 0점이 아니라 **노이즈 몇 점**
+                    #   으로 나오므로 이 경로가 실재한다(docs/2_preview.md P3).
+                    useful = n_pts >= min_pts
+                    if useful:
+                        acc.append(rot_about_axis(pts, axis_pt, axis_dir, -theta))
+                        n_cap += 1
+                    if not useful:
+                        # ★ 쓸 만한 반환이 없다 = **방향을 모른다.** 가까이·멀리를
+                        #   번갈아 벌려 가며 찾는다. 한쪽만 믿고 가면 "너무 가까워서
+                        #   비었는데 더 가까이" 처럼 탐색이 실패 방향으로 달려간다.
+                        _why = ("반환 없음" if n_pts == 0
+                                else f"{n_pts}점뿐 (<{min_pts}) — 노이즈로 보고 버림")
+                        n_blind += 1
+                        d_try = blind_probe(d_anchor, n_blind, d_lo, d_hi)
+                        if d_try is None:
+                            if log:
+                                log(f"  d={d*1000:.0f}mm pts={n_pts} — {_why}, "
+                                    f"탐색범위({d_lo*1000:.0f}~{d_hi*1000:.0f}mm) 소진")
+                            break
+                        if _k == max_dist_tries - 1:
+                            # ★ 예산이 끝났다 — **가지도 않을 탐침을 찍지 않는다.**
+                            #   "460mm 탐침" 을 찍어놓고 안 가면, 로그만 보고
+                            #   "거기도 봤는데 없더라" 로 잘못 읽는다.
+                            if log:
+                                log(f"  d={d*1000:.0f}mm pts={n_pts} — {_why}, "
+                                    f"시도 {max_dist_tries}회 소진 "
+                                    f"(다음 후보 {d_try*1000:.0f}mm — 안 감)")
+                            break
+                        if log:
+                            log(f"  d={d*1000:.0f}mm pts={n_pts} — {_why}, "
+                                f"{d_try*1000:.0f}mm 탐침 (#{n_blind})")
+                        d = d_try
+                        continue
+                    if cam is None:
+                        # 점은 있는데 **이번 프레임만** 카메라 위치를 못 읽었다.
+                        # 표면거리를 못 구하니 보정은 건너뛰지만, 계약 문제가
+                        # 아니므로 **적응은 유지한다**(다음 높이에서 다시 시도).
+                        if log:
+                            log(f"  d={d*1000:.0f}mm pts={n_pts} — 카메라 위치 없음, "
+                                f"이번 보정만 건너뜀")
+                        d_cur = d
+                        break
+                    # 점이 들어왔다 = 방향을 안다. 여기부터는 창 중앙으로 수렴.
+                    d_anchor = d
+                    d_next, why = next_distance(d, pts, cam, dof, d_lo, d_hi)
+                    if log:
+                        log(f"  d={d*1000:.0f}mm pts={n_pts} — {why}")
+                    if d_next is None:
+                        d_cur = d                      # 다음 높이/방위의 출발점
+                        break
+                    d = d_next
+                else:
+                    d_cur = d
+            if not adaptive:
+                # ── 고정 거리격자 (하위호환 보험) ──────────────────────────
+                # ★ **실제로는 도달하지 않는다.** 두 백엔드 모두 `(pts, cam)` 을
+                #   돌려주고, `scripts/nbv/verify_preview_contract.py` 가 그것을
+                #   AST 로 강제한다 → `legacy=True` 가 될 수 없다. 남겨 두는 이유는
+                #   외부/옛 콜백이 붙었을 때 조용히 죽지 않게 하려는 것뿐이다.
+                #   즉 이 분기는 **테스트에서만 커버되는 코드**다. 지우려면 위
+                #   정적 검사를 CI 에 걸어 계약을 영구 보장한 뒤에 할 것.
+                for d in d_steps:
+                    got = preview_at(float(tz), float(d)); n_move += 1
+                    pts = _unpack_preview(got)[0]
+                    # 적응 경로와 **같은 문턱**을 쓴다 — 고정 격자라고 해서 노이즈를
+                    # 실루엣으로 받아들일 이유는 없다.
+                    if pts is not None and len(pts) >= min_pts:
+                        acc.append(rot_about_axis(pts, axis_pt, axis_dir, -theta))
+                        n_cap += 1
+                    elif log and pts is not None and len(pts):
+                        log(f"  d={d*1000:.0f}mm pts={len(pts)}점뿐 "
+                            f"(<{min_pts}) — 노이즈로 보고 버림")
             # 물체 상단 = up_sign 방향 최댓값 (base 프레임이면 z 최소)
             top = max(((s * a[:, 2]).max() for a in acc), default=s * tz)
             if top - prev_top < top_eps_m:      # 상단이 안 늘면 종료 (GT 불요)
@@ -376,12 +733,13 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
     move_turntable(0.0)
     pts = np.vstack(acc) if acc else np.zeros((0, 3))
     if log:
-        log(f"계획용 preview {len(pts)}pt ({len(acc)} 캡처)")
+        log(f"계획용 preview {len(pts)}pt ({n_cap} 유효 / {n_move} 이동"
+            + (", 적응적" if adaptive else ", 고정격자") + ")")
     return pts
 
 
 def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,
-                     fill_min: float = None):
+                     fill_min: float = None, return_poses: bool = False):
     """계획 자세(el, standoff, target_z)마다 az 를 스윕해 도달·충돌 통과하는 q 선택.
 
     방위각은 관측 조건을 바꾸지 않고(턴테이블이 회전을 담당) **도달성과 충돌만**
@@ -433,7 +791,7 @@ def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,
         log(f"  fill≤{fill_hard:.1f}cm² 인 밴드 {len(dropped)}개 제외 "
             f"(minfill={', '.join(dropped)}cm²) — 볼 면이 없어 tracking lost 난다")
 
-    qs = []
+    qs, vps = [], []
     for vp, ev in usable:
         target = np.array([axis_xy[0], axis_xy[1], vp.target_z], float)
         q = None
@@ -454,18 +812,53 @@ def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,
                 break
         if q is not None:
             qs.append(q)
+            # ★ 채택된 az 를 자세에 새겨 둔다. 캡처 중 거리추종이 **같은 밴드를
+            #   같은 방위로** 다시 풀어야 하기 때문이다(`StandoffTracker`).
+            vps.append(replace(vp, az_deg=float(azd)))
+    if return_poses:
+        return (qs or None), vps
     return qs or None
 
 
 # ── 계획 (단일 자세 → 부족하면 겹침 밴드 분할) ────────────────────────────────
-DEFAULT_ELS = (20.0, 30.0, 40.0, 50.0)
+#: 플래너가 고르는 elevation 후보 (deg).
+#
+#  ⚠ 20° 는 **도달 자세가 없다**(실측). 두 백엔드 모두 이 기본값을 안 쓰고
+#    (30,40,50,60,70) 으로 덮어써 왔는데, 그러면 `validate_lookaround.py` 같은
+#    검증 스크립트만 **실제로 안 쓰는 el 로** 검증하게 된다. 기본값을 실사용값에
+#    맞춘다 — 백엔드의 명시 지정은 그대로 두되, 안 주면 같은 값이 나온다.
+DEFAULT_ELS = (30.0, 40.0, 50.0, 60.0, 70.0)
+
 FILL_MIN_CM2 = 6.0            # 최악 프레임 이보다 작으면 tracking-risk (경고선)
 #: **배제선** — 이보다 작으면 볼 면이 사실상 없어 tracking lost 가 난다.
 #  실측(2026-09-16): minfill 2cm² 는 224프레임 정상, 0cm² 는 40프레임 만에 lost.
 #  경고선(6cm²)을 배제에 쓰면 멀쩡한 밴드까지 날아간다 — 215mm 물체가 1밴드가 됐다.
 FILL_HARD_MIN_CM2 = 1.0
 ZCOVER_MIN = 0.75             # 단일 자세 z-커버 임계 (미달 → 밴드 분할)
-BAND_OVERLAP = 0.35           # 인접 밴드 겹침 (relocalization 성립 조건)
+#: 인접 밴드가 겹치는 비율. **밴드 밀도를 정하는 유일한 손잡이**다.
+#
+#  겹침은 밴드 사이 SLAM 이 이어지는 유일한 근거이면서(relocalization),
+#  "FOV/캡처가 모델보다 좁다" 를 흡수하는 곳이기도 하다. 남는 쪽으로 틀리는
+#  비용은 회전 1회(실물 ~30s)지만, 부족한 쪽으로 틀리면 tracking lost 다.
+#
+#  ⚠ 2026-09-17 정리 전에는 같은 일을 하는 계수가 **둘**이었다:
+#        step_max = (실측 z폭 × BAND_H_SAFETY 0.60) × (1 − BAND_OVERLAP 0.35)
+#                 =  실측 z폭 × 0.39                → 실효 겹침 **61%**
+#    코드에는 35% 라고 적혀 있는데 실제로는 61% 로 돌고 있었다. 로그의
+#    "공칭overlap" 도 그래서 실제와 달랐다. 둘을 곱해 하나로 합쳤다 —
+#    0.61 은 새 값이 아니라 **이미 돌고 있던 값**이다(회귀 없음).
+#
+#  ★ `standoff.WORK_STANDOFF_M`(더 다가가기)도 같은 증상을 고칠 수 있지만
+#    **둘 다 당기면 이중보정**이다. 물리값인 standoff 는 실측 작동거리 창의
+#    중앙에 고정해 두고(= 사실), 모자람은 여기서만 흡수한다. 이유:
+#      · standoff 는 근접한계(170mm)·충돌이라는 물리 하한이 있다
+#      · standoff 를 당기면 band_h 도 같이 줄어(∝거리) 두 효과가 얽힌다
+#      · 여기는 스캔 시간만 더 드는, 물리적으로 안전한 손잡이다
+#
+#  A/B: `MMS_BAND_OVERLAP=0.35` 로 실행하면 안전계수 없던 원래 기하값이 된다.
+#       실측 2026-09-17(세제 h=202mm) — 0.61 → 밴드 4개 98,808점,
+#       0.35 → 밴드 3개로 줄고 "이득 부족" 판정에 걸려 단일 자세 44,360점.
+BAND_OVERLAP = float(os.environ.get("MMS_BAND_OVERLAP", "0.61"))
 
 #: 단일 자세로 끝내려면 **물체 높이의 이 비율 이상**을 한 자세가 덮어야 한다.
 #  `z_cover_frac` 은 "닿은 z-bin 의 *비율*" 이라 위·아래가 조금씩 걸치고 가운데가
@@ -475,23 +868,47 @@ BAND_OVERLAP = 0.35           # 인접 밴드 겹침 (relocalization 성립 조�
 #  높이 기준을 따로 두지 않으면 긴 물체가 한 자세로 처리된다.
 ZSPAN_MIN_FRAC = 0.90
 
-#: `band_h`(= 한 자세가 덮는 z 폭) 에 곱하는 **안전계수**.
-#  기하 모델은 frustum ∩ DOF ∩ 입사각만 보므로 실제 캡처량보다 낙관적이다.
-#  실측 2026-09-16: 모델 149mm vs 실물 자세당 ~87mm (밴드 3개·센터간격 34mm 로
-#  메시 155mm → 155 - 68 = 87mm). 비율 ≈ 0.58.
-#  이 계수는 밴드 수를 늘리고 센터를 물체 양 끝에 더 붙이는 방향으로만 작용한다
-#  (커버리지 보장 ↔ 스캔 시간 trade-off). 커버리지를 우선한다.
-BAND_H_SAFETY = 0.60
 
-#: 밴드 센터를 물체 양끝에서 얼마나 안쪽으로 들일지 (band_h 배수).
-#  0.5 면 센터가 [z_lo+band_h/2, z_hi-band_h/2] 에 갇힌다. 그런데
+#: 밴드 센터를 물체 양끝에서 얼마나 안쪽으로 들일지 — **센터 간격(step) 배수**.
+#  반 밴드(band_h/2)씩 물러나면 도달 범위를 그냥 버린다. 왜냐면
 #  (a) `h` 는 preview 가 잰 값이라 실제 물체보다 작고
 #      — 실측 2026-09-16: 플래너 h=215mm 인데 결과 메시는 252mm 였다 —
 #  (b) 끝 밴드는 공칭 반높이를 넘어서까지 캡처한다.
-#  그래서 반 밴드씩 물러나면 도달 범위를 그냥 버린다. 1/4 로 줄여 센터를
-#  양끝에 붙인다: 밴드 수(=스캔 시간)는 그대로인데 센터 간격 45→58mm,
-#  실제 overlap 44%→27%, 예상 커버 222→262mm.
-CENTER_INSET_FRAC = 0.25
+#  그래서 조금만 들인다: 센터 간격 45→58mm, 예상 커버 222→262mm.
+#
+#  ⚠ 기준이 `band_h` 가 아니라 `step` 인 이유 — 겹침(`BAND_OVERLAP`)을 올리면
+#    band_h 는 그대로인데 센터가 촘촘해진다. 들이는 양이 band_h 에 묶여 있으면
+#    겹침을 올릴수록 양끝을 **더 많이 버리는** 엉뚱한 결합이 생긴다.
+#    0.385 는 합치기 전 실효값(0.25×band_h = 0.385×step)을 그대로 옮긴 것이다.
+CENTER_INSET_FRAC = 0.385
+
+#: 캡처 순서상 **인접한 두 자세**가 공유해야 할 최소 seen 겹침 (측정값).
+#  밴드 전체가 한 IScan 으로 이어진 뒤로는(2026-09-16) 로봇이 다음 밴드로
+#  옮겨가는 동안 SLAM 이 붙어 있어야 한다. 그 조건은 공칭 기하 overlap
+#  (`BAND_OVERLAP`) 이 아니라 **직전 자세가 본 면을 다음 자세도 보는가** 다.
+#  둘은 꽤 다르다 — 실측 2026-09-17 세제: 공칭 38% 인데 측정 20%.
+#  미달이면 밴드를 늘려 다시 짠다(`BAND_MAX_EXTRA`).
+BAND_ADJ_OVERLAP_MIN = 0.25
+#: 겹침 미달로 추가할 수 있는 밴드 수 상한. 밴드 1개 = 전회전 1회(실물 30s)라
+#  무한정 늘릴 수는 없다. 상한에 걸리면 계획은 내되 경고한다.
+BAND_MAX_EXTRA = 3
+#: 밴드로 쪼개서 **더 덮는 표면점 비율**이 이만큼도 안 되면 단일 자세로 되돌린다.
+#  밴드 1개는 전회전 1회(실물 30s)라 공짜가 아니다. z-span 판정이 미달이라고
+#  해서 원인이 늘 '높이' 인 것은 아니다 — 납작하고 넓은 물체는 **윗면이 낮은
+#  el 에서 안 보여서** 미달이고, 그건 z 로 쪼개도 해결되지 않는다
+#  (`_augment_top_face` 의 몫이다).
+#
+#  ★ 이득은 z-span 이 아니라 **덮은 점 비율**로 잰다. z-span 은 "위에서 아래까지
+#    닿았나" 만 보므로 밴드가 같은 구간을 훨씬 촘촘히 덮어도 0mm 로 나온다
+#    (실측 2026-09-17 alarm_clock: Δz-span 0mm 인데 Δ커버 +4.8%p).
+#  실측 분포(testset 9종, Δ%p):
+#    밴드가 필요 없는 쪽 = mug +0.1 · drug_bottle −2.7 · povidone +0.6 ·
+#                          protein_drink +2.6
+#    밴드가 버는 쪽     = alarm_clock +4.8 · hand_drill +10.3 · mustard +10.6 ·
+#                          spray_can +17.4
+#  두 무리 사이(2.6 ~ 4.8)를 가른다. drug_bottle 이 **음수**인 것에 주의 —
+#  밴드는 각 밴드 안에서만 자세를 고르므로 더 나빠질 수도 있다.
+BAND_GAIN_MIN_COV = 0.035
 
 #: 물체 **윗면**(법선이 위를 향하는 수평면 = 뚜껑) 보강 기준.
 #  측면 점이 점수를 지배하므로 스코어러는 낮은 el 을 고르는데, 수평 윗면은
@@ -506,7 +923,7 @@ CAP_NORMAL_COS = 0.866        # 법선이 위와 이루는 각 ≤30° 를 '윗�
 
 
 def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
-                      els, sos, n_theta, up_sign):
+                      els, sos, n_theta, up_sign, quiet: bool = False):
     """윗면이 안 덮였으면 내려다보는 자세를 1개 추가한다 (in-place, 추가 여부 반환).
 
     `up_sign` — 작업 프레임에서 어느 z 방향이 '위'인가 (+1 = +Z 가 위).
@@ -528,14 +945,16 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
         return False
     cap_els = [float(e) for e in els if float(e) >= CAP_EL_MIN_DEG]
     if not cap_els:
-        print(f"[lookaround] ⚠ 윗면 커버 {cap_frac*100:.0f}% 인데 "
-              f"el≥{CAP_EL_MIN_DEG:.0f}° 후보가 없어 보강 못 함")
+        if not quiet:
+            print(f"[lookaround] ⚠ 윗면 커버 {cap_frac*100:.0f}% 인데 "
+                  f"el≥{CAP_EL_MIN_DEG:.0f}° 후보가 없어 보강 못 함")
         return False
     tz_cap = s_up * (top_up - CAP_ZONE_M)
     best = None
     for el in cap_els:
         for so in sos:
-            pose = make_view_pose(axis_xy, float(tz_cap), el, 0.0, so)
+            pose = make_view_pose(axis_xy, float(tz_cap), el, 0.0, so,
+                                  up_sign)
             ev = evaluate_viewpoint(pts_obj, nrm_obj, axis_xy, pose,
                                     sensor, n_theta=n_theta)
             sc = float(ev.seen_mask[cap].mean())
@@ -543,17 +962,93 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
                 best = (pose, ev, sc)
     if best is None or best[2] <= cap_frac:
         return False
+    best[0].is_cap = True                       # 밴드가 아님 — 정렬/겹침 판단에서 구분
     poses.append(best[0])
     evals.append(best[1])
-    print(f"[lookaround] 윗면 보강 자세 추가 — el={best[0].el_deg:.0f}° "
-          f"tz={best[0].target_z*1000:.0f}mm: 뚜껑 커버 "
-          f"{cap_frac*100:.0f}% → {best[2]*100:.0f}%")
+    if not quiet:
+        print(f"[lookaround] 윗면 보강 자세 추가 — el={best[0].el_deg:.0f}° "
+              f"tz={best[0].target_z*1000:.0f}mm: 뚜껑 커버 "
+              f"{cap_frac*100:.0f}% → {best[2]*100:.0f}%")
     return True
+
+
+def _adjacent_overlap(evals) -> List[float]:
+    """캡처 순서상 **인접한** 두 자세의 seen 겹침 (뒤 자세 기준 비율).
+
+    밴드가 한 IScan 으로 이어지므로(2026-09-16), 로봇이 다음 밴드로 옮겨가는
+    동안 SLAM 이 끊기지 않으려면 직전 자세가 본 면을 새 자세도 봐야 한다.
+    "누적 master 와의 겹침" 이 아니다 — 누적과는 겹치는데 **직전 자세와는 안
+    겹치는** 순서가 실제로 나왔다(아래 `_band_capture_order` 주석).
+    """
+    out = []
+    for a, b in zip(evals[:-1], evals[1:]):
+        inter = int(np.logical_and(a.seen_mask, b.seen_mask).sum())
+        out.append(float(inter / max(int(b.seen_mask.sum()), 1)))
+    return out
+
+
+def _worst_adjacent(poses, ov):
+    """(전체 최소 겹침, **밴드끼리만** 본 최소 겹침).
+
+    뚜껑 보강 자세가 낀 이음매는 el 이 달라서 겹침이 낮은 것이라 밴드를 더
+    쪼개도 나아지지 않는다. 밴드 수를 늘릴지는 두 번째 값으로 판단한다.
+    """
+    if not ov:
+        return 1.0, 1.0
+    band_only = [v for v, a, b in zip(ov, poses[:-1], poses[1:])
+                 if not (a.is_cap or b.is_cap)]
+    return min(ov), (min(band_only) if band_only else 1.0)
+
+
+def _union_covered_frac(evals) -> float:
+    """여러 자세가 **합쳐서** 품질-가시로 덮는 점 비율."""
+    if not evals:
+        return 0.0
+    u = np.zeros_like(evals[0].seen_mask, dtype=bool)
+    for e in evals:
+        u |= e.seen_mask
+    return float(u.mean())
+
+
+def _band_capture_order(poses, evals) -> List[int]:
+    """캡처 순서 = **z 단조**. 방향은 안전한 끝(minfill 큰 쪽)에서 시작.
+
+    ★ 예전에는 minfill 내림차순(safe-first)이었다. 그건 **밴드 = 독립 IScan**
+      이던 시절의 규칙이다 — 밴드가 끊겨도 각자 정합되니, 위험한 밴드를 뒤로
+      미뤄 "그때까지 쌓인 master 를 복구 앵커로 남기는" 것이 이득이었다.
+      2026-09-16 에 밴드 전체가 **한 IScan** 이 되면서 전제가 사라졌다: 로봇이
+      다음 밴드로 옮겨가는 동안 추적이 이어져야 하고, 그러려면 **캡처 순서상
+      인접한 두 자세가 같은 면을 봐야 한다.**
+
+      minfill 순서는 z 를 널뛰게 한다 — 실측 2026-09-17(testset 9종, 실제
+      점군): 세제가 tz 148→88→29→207→263mm 로 잡혀 3번째 이음매에서 겹침
+      **0%**, 9종 중 4종(mustard·spray_can·detergent·alarm_clock)이 0~12% 였다.
+      같은 자세를 z 로만 다시 세우면 같은 4종이 20~57% 가 된다. 실물에서 본
+      "band1/band2 가 정합되지 않음 · 메시 2덩어리" 가 이 순서 문제다.
+
+      safe-first 의 취지 중 단조성과 양립하는 부분(추적이 가장 잘 붙는 곳에서
+      시작한다)은 **방향 선택**으로 남긴다.
+    """
+    idx = sorted(range(len(poses)), key=lambda i: float(poses[i].target_z))
+    if (float(evals[idx[-1]].min_fill_cm2)
+            > float(evals[idx[0]].min_fill_cm2)):
+        idx = idx[::-1]
+    return idx
 
 
 def _score(ev: PoseEval, fill_target: float = 12.0) -> float:
     return (2.0 * min(ev.min_fill_cm2 / fill_target, 1.0)
             + 1.0 * ev.z_cover_frac + 0.5 * ev.covered_frac)
+
+
+#: **오차 주입용** 축거리 바이어스 (mm). 기본 0 = 꺼짐.
+#
+#  왜 있나 — 거리추종(`standoff.StandoffTracker`)이 실제로 되돌리는지 확인하려면
+#  틀린 거리에서 출발시켜야 한다. sim 은 반경 추정이 정확해서 계획 거리가 늘
+#  맞고, 그러면 추종은 "유지" 만 찍어 **루프가 도는지 안 도는지 구분이 안 된다.**
+#  실물에서 추종이 이상할 때도 알려진 오차를 넣고 수렴을 보는 것이 가장 빠르다.
+#    MMS_STANDOFF_BIAS_MM=60  → 계획보다 60mm 멀리 서서 시작
+STANDOFF_BIAS_M = float(os.environ.get("MMS_STANDOFF_BIAS_MM", "0.0")) / 1000.0
 
 
 def _standoff_candidates(pts_obj, axis_xy, sensor: SensorModel):
@@ -562,7 +1057,10 @@ def _standoff_candidates(pts_obj, axis_xy, sensor: SensorModel):
     mid = 0.5 * (sensor.dof[0] + sensor.dof[1])
     # near-편향 후보 포함: 지름이 DOF 대역(≈10cm)에 육박하는 큰 물체는
     # 최근접면을 near-clip 쪽에 붙여야 반대편이 far-clip 을 안 넘는다.
-    return [sensor.dof[0] + 0.02 + r_max, mid + r_max, mid + r_max + 0.03], r_max
+    cands = [sensor.dof[0] + 0.02 + r_max, mid + r_max, mid + r_max + 0.03]
+    if STANDOFF_BIAS_M:
+        cands = [c + STANDOFF_BIAS_M for c in cands]
+    return cands, r_max
 
 
 def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = None,
@@ -590,7 +1088,7 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
         for el in els:
             for s in sos:
                 for tz in tz_list:
-                    pose = make_view_pose(axis_xy, tz, el, 0.0, s)
+                    pose = make_view_pose(axis_xy, tz, el, 0.0, s, up_sign)
                     ev = evaluate_viewpoint(pts_r, nrm_r, axis_xy, pose,
                                             sensor, n_theta=n_theta)
                     if best is None or (_score(ev, fill_target)
@@ -607,10 +1105,12 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
     #   그 물체도 한 자세로 146mm/290mm 밖에 못 덮어 5밴드가 된다. "단일" 판정
     #   자체가 물체의 절반만 스캔하던 증상이었다. r=34mm/h=207mm 는 3밴드 유지.
     h = z_hi - z_lo
-    seen_z = z[ev.seen_mask]
     # 자세가 덮는 **연속 z 구간 길이**. z_cover_frac(닿은 bin 비율)과 달리
     # "위아래만 조금 걸치고 가운데가 빈" 경우를 높게 봐주지 않는다.
-    seen_span = float(np.ptp(seen_z)) if len(seen_z) > 30 else 0.0
+    # ⚠ 예전엔 `np.ptp(z[seen])` 이었다 — 최대−최소라 바로 그 경우를 못 걸렀다
+    #   (`contiguous_z_span` 주석 참조). 이 값은 밴드 판정과 `band_h` 둘 다의
+    #   입력이라 과대평가가 곧 밴드 부족으로 이어진다.
+    seen_span = contiguous_z_span(z, ev.seen_mask)
     span_frac = seen_span / max(h, 1e-6)
     print(f"[lookaround] z_cover={ev.z_cover_frac:.2f} (기준 {ZCOVER_MIN:.2f}) "
           f"zspan={seen_span*1000:.0f}mm={span_frac:.2f} (기준 {ZSPAN_MIN_FRAC:.2f}) "
@@ -618,75 +1118,128 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
           f"minfill={ev.min_fill_cm2:.0f}cm²")
     # ★ 두 조건을 **모두** 넘어야 단일 자세로 끝낸다. z_cover 만 보면 209mm 물체가
     #   149mm 만 덮는 자세 하나로 끝나버린다 (2026-09-16 실측).
-    if ev.z_cover_frac >= ZCOVER_MIN and span_frac >= ZSPAN_MIN_FRAC:
-        poses, evals = [pose], [ev]
-        added = _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z,
-                                  sensor, els, sos, n_theta, up_sign)
-        return LookaroundPlan(poses=poses, evals=evals, banded=added,
+    # ★ 단일 자세 + 윗면 보강 안을 **먼저** 만든다. 판정이 밴드로 가더라도 이것이
+    #   비교 기준이 된다 — 밴드가 실제로 더 덮지 못하면 되돌아온다(아래).
+    single_poses, single_evals = [pose], [ev]
+    #  ★ 여기서는 **조용히** 만든다 — 아직 채택된 게 아니라 비교 기준일 뿐이다.
+    #    안 그러면 밴드로 가는 경우에도 "윗면 보강 추가" 가 두 번 찍혀, 자세가
+    #    2개 추가된 것처럼 읽힌다.
+    single_cap = _augment_top_face(single_poses, single_evals, pts_obj, nrm_obj,
+                                   axis_xy, z, sensor, els, sos, n_theta, up_sign,
+                                   quiet=True)
+    single_cov = _union_covered_frac(single_evals)
+
+    def _single_plan(note):
+        if single_cap:
+            print(f"[lookaround] 윗면 보강 자세 포함 — el="
+                  f"{single_poses[-1].el_deg:.0f}° "
+                  f"tz={single_poses[-1].target_z*1000:.0f}mm")
+        return LookaroundPlan(poses=single_poses, evals=single_evals,
+                          banded=single_cap,
+                          band_overlap_frac=_adjacent_overlap(single_evals),
                           tracking_risk=any(e.min_fill_cm2 < fill_min
-                                            for e in evals),
-                          note="single+윗면" if added else "single")
+                                            for e in single_evals),
+                          note=note)
+
+    if ev.z_cover_frac >= ZCOVER_MIN and span_frac >= ZSPAN_MIN_FRAC:
+        return _single_plan("single+윗면" if single_cap else "single")
 
     # ── 밴드 분할: 자세가 실제로 덮은 z-대역 폭으로 밴드 수 산정 ──────────
-    # 기하 모델은 실제 캡처량보다 낙관적이므로 안전계수를 곱한다. 작아진 band_h 는
-    # 밴드 수를 늘리고 센터를 물체 양 끝에 더 붙인다 = 실제 커버리지가 늘어난다.
-    band_h_model = max(seen_span if seen_span > 0 else 0.06, 0.04)
-    band_h = max(band_h_model * BAND_H_SAFETY, 0.04)
+    # `band_h` 는 **사실 그대로**다 — 한 자세가 실제 덮은 연속 z 폭(`seen_span`).
+    # 여기에 안전계수를 곱하지 않는다. 모자람은 `BAND_OVERLAP` 한 곳에서만
+    # 흡수한다(이중보정 방지). 2026-09-17 실측: 모델 예측 148mm vs 실제 141·145mm
+    # — 모델은 정확하다. 예전의 0.60 계수는 '모델 보정' 이 아니라 겹침이었다.
+    band_h = max(seen_span if seen_span > 0 else 0.06, 0.04)
     # ★ 밴드 수는 **센터 간격**과 맞물려야 한다. 센터는 아래 linspace 로
-    #   [z_lo+band_h/2, z_hi-band_h/2] 를 m 등분하므로 실제 간격은
-    #       step = (h - band_h) / (m - 1)
-    #   인데, 예전 식 `ceil(h / (band_h·(1-ov)))` 은 "step = band_h·(1-ov)" 를
-    #   가정해 세운 것이라 m 을 과다 산정했다. m 이 커지면 step 이 더 작아져
-    #   밴드가 서로를 덮기만 하고 **아래로 내려가지 않는다**.
-    #   실측 2026-09-16: h=209mm·band_h=106mm 에서 의도 step 69mm 인데 m=4 →
-    #   step 34mm. 조준점 3개가 68mm 안에 몰려 360° 전회전을 3번 하고도
-    #   메시가 155mm 에 그쳤다.
-    #   step = band_h·(1-ov) 를 m 에 대해 풀면 m = 1 + span/(band_h·(1-ov)).
-    #   ★ ceil 대신 round 를 쓴다. ceil 은 m 을 한 칸 올려 step 을 의도보다
-    #     작게 만들어 overlap 만 키운다 (h=215·band_h=80: 의도 52mm → 45mm,
-    #     overlap 35% → 44%). round 가 |실제 step − 의도 step| 을 최소화한다.
-    inset = band_h * CENTER_INSET_FRAC
+    #   [z_lo+inset, z_hi-inset] 을 m 등분하므로 실제 간격은 step = span/(m-1) 이고,
+    #   공칭 겹침은 1 - step/band_h 다. 겹침을 BAND_OVERLAP 이상으로 두려면
+    #       step ≤ band_h·(1-ov)  ⟺  m ≥ 1 + span/(band_h·(1-ov))
+    #   이므로 **ceil** 이 맞다.
+    #   ⚠ 2026-09-16 에 round 로 바꿨던 것은 과교정이었다. 그때 고쳐야 했던 진짜
+    #     버그는 식이 `ceil(h/(band_h·(1-ov)))` 로 **센터 span 이 아니라 물체
+    #     높이**를 쓴 것(+ inset 이 band_h/2 였던 것)이고, ceil 자체가 아니었다.
+    #     round 는 m 을 한 칸 **내려서** step 을 키우므로 겹침이 기준 아래로
+    #     떨어진다 — 실측 2026-09-17: 공칭 27%/29%/31% (기준 35%).
+    #     겹침은 밴드 사이 SLAM 이 이어지는 유일한 근거라 **부족한 쪽으로 틀리면
+    #     안 된다.** 남는 쪽으로 틀리는 비용은 회전 1회다.
+    step_max = max(band_h * (1.0 - BAND_OVERLAP), 1e-9)
+    inset = step_max * CENTER_INSET_FRAC
     lo_c, hi_c = z_lo + inset, z_hi - inset
     span = max(hi_c - lo_c, 0.0)
-    m_bands = max(2, int(round(
-        1.0 + span / (band_h * (1.0 - BAND_OVERLAP)))))
-    centers = np.linspace(lo_c, hi_c, m_bands)
-    _step = span / max(m_bands - 1, 1)
-    print(f"[lookaround] 밴드 {m_bands}개  band_h={band_h*1000:.0f}mm "
-          f"센터간격={_step*1000:.0f}mm "
-          f"overlap={(1.0 - _step / band_h)*100:.0f}% "
-          f"센터span={span*1000:.0f}mm (물체 h={h*1000:.0f}mm)")
-    poses, evals = [], []
-    for c in centers:
-        b = search([float(c)], restrict=(c - band_h / 2, c + band_h / 2))
-        poses.append(b[0])
-        # 겹침/coverage 는 전체 점군 기준으로 재평가
-        evals.append(evaluate_viewpoint(pts_obj, nrm_obj, axis_xy, b[0],
-                                        sensor, n_theta=n_theta))
-    # ★ 윗면(뚜껑) 보강은 **정렬 전**에 넣는다. 그래야 safe-first 정렬과
-    #   겹침(ov) 계산에 같이 들어간다.
-    n_band_only = len(poses)
-    _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z,
-                      sensor, els, sos, n_theta, up_sign)
-    n_cap = len(poses) - n_band_only
-    # ★ 안전한 밴드부터 스캔 (minfill 내림차순): 위험 밴드를 나중에 돌면
-    #   lost 가 나도 이미 master 가 쌓여 있어 replan/relocalization 앵커 존재.
-    order = sorted(range(len(evals)),
-                   key=lambda i: -evals[i].min_fill_cm2)
-    poses = [poses[i] for i in order]
-    evals = [evals[i] for i in order]
-    # 겹침 = 각 밴드의 seen 이 "그 전까지 누적된 master" 와 겹치는 비율
-    #        (relocalization 앵커 가용성을 직접 측정)
-    ov, acc = [], evals[0].seen_mask.copy()
-    for e in evals[1:]:
-        inter = np.logical_and(acc, e.seen_mask).sum()
-        ov.append(float(inter / max(e.seen_mask.sum(), 1)))
-        acc |= e.seen_mask
+    m_min = max(2, 1 + int(math.ceil(span / step_max - 1e-9)))
+
+    def _build(m):
+        """센터 m 개로 밴드 자세를 풀고, 캡처 순서(z 단조)까지 확정해 돌려준다."""
+        ps, es = [], []
+        for c in np.linspace(lo_c, hi_c, m):
+            b = search([float(c)], restrict=(c - band_h / 2, c + band_h / 2))
+            ps.append(b[0])
+            # 겹침/coverage 는 전체 점군 기준으로 재평가
+            es.append(evaluate_viewpoint(pts_obj, nrm_obj, axis_xy, b[0],
+                                         sensor, n_theta=n_theta))
+        # ★ 윗면(뚜껑) 보강은 **정렬 전**에 넣는다 — 정렬과 겹침 계산에 같이 들어가야
+        #   뚜껑 자세로 건너뛰는 구간의 겹침도 보인다.
+        n_band = len(ps)
+        # 재시도 루프 안이라 조용히 — 채택된 계획의 자세 수는 note 로 나간다.
+        _augment_top_face(ps, es, pts_obj, nrm_obj, axis_xy, z,
+                          sensor, els, sos, n_theta, up_sign, quiet=True)
+        idx = _band_capture_order(ps, es)
+        return [ps[i] for i in idx], [es[i] for i in idx], len(ps) - n_band
+
+    # ── 겹침을 **재서** 밴드 수를 정한다 ────────────────────────────────
+    #  공칭 기하 겹침(위 식)은 "밴드 창이 얼마나 포개지나" 일 뿐, 실제로 두
+    #  자세가 **같은 면을 보는지**는 아니다 — 곡률·입사각·가림 때문에 늘 더
+    #  작게 나온다(실측 2026-09-17 세제: 공칭 38% → 측정 20%). 그래서 공칭식을
+    #  시작점으로만 쓰고, 측정 겹침이 기준에 닿을 때까지 밴드를 늘린다.
+    #  BAND_OVERLAP 을 일괄로 키우는 것보다 이쪽이 낫다 — 물체마다
+    #  필요한 만큼만 늘어나고, 왜 늘었는지가 로그에 숫자로 남는다.
+    poses = evals = None
+    n_cap = 0
+    m_bands = m_min
+    for m_try in range(m_min, m_min + BAND_MAX_EXTRA + 1):
+        poses, evals, n_cap = _build(m_try)
+        m_bands = m_try
+        ov = _adjacent_overlap(evals)
+        worst, worst_band = _worst_adjacent(poses, ov)
+        _step = span / max(m_try - 1, 1)
+        print(f"[lookaround] 밴드 {m_try}개  band_h={band_h*1000:.0f}mm "
+              f"센터간격={_step*1000:.0f}mm "
+              f"공칭overlap={(1.0 - _step / band_h)*100:.0f}% "
+              f"측정 인접겹침 최소={worst*100:.0f}% "
+              f"(기준 {BAND_ADJ_OVERLAP_MIN*100:.0f}%) "
+              f"센터span={span*1000:.0f}mm (물체 h={h*1000:.0f}mm)")
+        # 뚜껑 자세와의 겹침이 부족한 것은 **밴드를 더 쪼개도 안 낫는다**
+        #  (el 이 달라서 생긴 차이다) → 밴드끼리의 겹침만 보고 늘릴지 정한다.
+        if worst_band >= BAND_ADJ_OVERLAP_MIN:
+            break
+        if m_try < m_min + BAND_MAX_EXTRA:
+            print(f"[lookaround]   ↳ 밴드 간 겹침 {worst_band*100:.0f}% < "
+                  f"{BAND_ADJ_OVERLAP_MIN*100:.0f}% — 밴드를 1개 늘려 다시 짠다 "
+                  f"(한 IScan 안에서 SLAM 이 이어져야 한다)")
+        else:
+            print(f"[lookaround]   ⚠ 밴드 {m_try}개에서도 겹침 {worst_band*100:.0f}% "
+                  f"— 상한({BAND_MAX_EXTRA}개 추가) 도달. 이 이음매에서 "
+                  f"tracking lost 가능 (nbv 가 메운다)")
+
+    # ── 밴드가 **실제로 더 덮는가** ─────────────────────────────────────
+    #  z-span 미달의 원인이 높이가 아니라 윗면이면(납작·넓은 물체) z 로 쪼개도
+    #  커버가 안 늘고 전회전 횟수만 늘어난다. 재서 확인하고 아니면 되돌린다.
+    band_cov = _union_covered_frac(evals)
+    gain = band_cov - single_cov
+    if gain < BAND_GAIN_MIN_COV:
+        print(f"[lookaround] 밴드 {m_bands}개 커버 {band_cov*100:.1f}% vs "
+              f"단일+윗면 {single_cov*100:.1f}% — 이득 {gain*100:+.1f}%p "
+              f"(<{BAND_GAIN_MIN_COV*100:.1f}%p) → 단일 자세로 되돌린다 "
+              f"(높이가 아니라 윗면이 문제였다)")
+        return _single_plan("single+윗면(밴드 무익)" if single_cap
+                            else "single(밴드 무익)")
+
+    ov = _adjacent_overlap(evals)
     risk = any(e.min_fill_cm2 < fill_min for e in evals)
     return LookaroundPlan(poses=poses, evals=evals, banded=True,
                       band_overlap_frac=ov, tracking_risk=risk,
                       note=(f"{m_bands} bands (band_h={band_h*1000:.0f}mm, "
-                            f"safe-first)"
+                            f"z-monotonic)"
                             + (f" + 윗면 {n_cap}" if n_cap else "")))
 
 
@@ -694,7 +1247,7 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
 def recovery_replan(master_pts, master_nrm, axis_xy, resume_theta: float,
                     sensor: SensorModel = None, els=DEFAULT_ELS,
                     n_theta: int = 36, w_overlap: float = 1.5,
-                    min_overlap_cm2: float = 8.0):
+                    min_overlap_cm2: float = 8.0, up_sign: float = +1.0):
     """lost 후 재계획: 재개 각도에서 **이미 스캔된 면(master)** 이 충분히
     보여야 relocalization 이 성립 → overlap 항 + 남은 회전 maximin.
     반환 (pose, overlap_cm2) — overlap 미달 후보는 탈락, 전부 미달이면 None."""
@@ -710,7 +1263,7 @@ def recovery_replan(master_pts, master_nrm, axis_xy, resume_theta: float,
     for el in els:
         for s in sos:
             for tz in tzs:
-                pose = make_view_pose(axis_xy, tz, el, 0.0, s)
+                pose = make_view_pose(axis_xy, tz, el, 0.0, s, up_sign)
                 tr, _ = visible_masks(p_r, n_r, pose, sensor)
                 ov = sensor.cm2(int(tr.sum()))          # 재개각에서 보이는 기존면
                 if ov < min_overlap_cm2:

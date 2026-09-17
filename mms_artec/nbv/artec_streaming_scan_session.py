@@ -432,6 +432,9 @@ class ArtecStreamingScanSession:
         live_viewer: Optional["LiveScanViewer"] = None,
         band_poses=None,
         move_robot_fn=None,
+        retarget_fn=None,
+        standoff_of=None,
+        scan_range=None,
     ):
         self.mms = mms
         self.robot = robot
@@ -444,6 +447,13 @@ class ArtecStreamingScanSession:
         #: 밴드 이동 콜백 `fn(q) -> None`. 녹화 중 호출되므로 **느리게** 움직여야
         #  추적이 유지된다 (호출자가 속도를 정한다).
         self.move_robot_fn = move_robot_fn
+        #: 거리추종 — `retarget_fn(q_cur, d_new) -> q_new|None` 은 **같은 el/az/tz**
+        #  를 새 축거리로 다시 푼다. `standoff_of(q) -> m` 은 그 밴드의 계획 거리.
+        #  판단(얼마나·언제 움직일지)은 sim 과 공유하는 `StandoffTracker` 가 하고,
+        #  여기는 "표면거리를 재서 넘기고, 결과대로 옮긴다" 만 한다.
+        self.retarget_fn = retarget_fn
+        self.standoff_of = standoff_of
+        self.scan_range = scan_range
         # 선택적 라이브 뷰어 — multipass 가 pass 들 사이에 재사용하라고 넘김.
         # None 이면 모든 viewer 경로 no-op. 절대 스캔을 깨뜨리지 않음.
         self.live_viewer = live_viewer
@@ -527,11 +537,18 @@ class ArtecStreamingScanSession:
             if s.sensitivity is not None:
                 try: session.set_sensitivity(float(s.sensitivity))
                 except Exception: pass
-            if s.scan_range_near_mm is not None and s.scan_range_far_mm is not None:
+            # 작동거리 창 — 세션 설정이 없으면 **스캐너(ArtecConfig)의 값을 따른다.**
+            # 두 SDK 객체(IScanningProcedure / IFrameProcessor)가 따로 노는 것을 막는다.
+            _near, _far = s.scan_range_near_mm, s.scan_range_far_mm
+            if _near is None or _far is None:
                 try:
-                    session.set_scanning_range(
-                        float(s.scan_range_near_mm), float(s.scan_range_far_mm),
-                    )
+                    _near, _far = self.mms.sensor.scanning_range()
+                except Exception:                        # noqa: BLE001
+                    _near = _far = None
+            if _near is not None and _far is not None:
+                try:
+                    session.set_scanning_range(float(_near), float(_far))
+                    print(f"  스캔 범위 {float(_near):.0f}~{float(_far):.0f}mm")
                 except Exception: pass
             session.set_frame_callback(tracking.on_frame)
 
@@ -630,6 +647,11 @@ class ArtecStreamingScanSession:
                             session.poll_events()      # 큐 비움 (freeze 방지)
                             time.sleep(s.poll_interval_s)
                     tracking.mark_started()
+                # ★ 거리추종 — 회전을 시작하기 **전에**, 턴테이블이 멈춰 있는 동안
+                #   표면거리를 재서 축거리만 고친다. 회전 중이 아니라 여기서 하는
+                #   이유: 밴드 경계는 이미 로봇이 움직이고 settle 하는 자리라
+                #   추가 위험이 0 이다(회전+이동이 겹치면 SLAM 이 흔들린다).
+                self._track_standoff(session, _band_q, _bi, len(bands))
                 vel_rad_s = (2.0 * np.pi) / s.rotation_duration_s
                 if s.sweep_rad is not None:            # 부분 스윕 (nbv gap 겨냥)
                     target_rad = float(abs(s.sweep_rad)) \
@@ -909,6 +931,84 @@ class ArtecStreamingScanSession:
         if isinstance(v, bool) or v is None:
             return float(fallback), False
         return float(v), True
+
+    # ── 거리추종 (el·az·tz 고정 · 축거리만 창 중앙으로) ──────────────────
+    def _latest_frame_ranges_m(self, session, timeout_s: float = 1.5):
+        """최근 OK 프레임의 **스캐너 프레임 정점**으로 표면거리 배열(m)을 만든다.
+
+        `frame_mesh.vertices()` 는 스캐너 좌표계 mm 라 원점이 곧 카메라다 —
+        거리 = 정점의 노름. 좌표변환·hand-eye 가 전혀 끼지 않아, 거리추종이
+        캘리브 오차에 오염되지 않는다(이게 이 경로를 고른 이유다).
+        """
+        import time as _t
+        best = None
+        t0 = _t.time()
+        FS = artec_scanning.FrameState
+        while _t.time() - t0 < timeout_s:
+            try:
+                events = session.poll_events()
+            except Exception:                                   # noqa: BLE001
+                break
+            for ev in (events or []):
+                try:
+                    if ev.frame_state == FS.OK and ev.frame_mesh is not None:
+                        v = ev.frame_mesh.vertices()
+                        if v is not None and len(v):
+                            best = np.asarray(v, float)
+                except Exception:                               # noqa: BLE001
+                    continue
+            if best is not None:
+                break
+            time.sleep(self.s.poll_interval_s)
+        if best is None:
+            return None
+        return best / 1000.0                     # mm → m (원점 = 카메라)
+
+    def _track_standoff(self, session, band_q, band_i: int, n_bands: int) -> None:
+        """밴드 시작에서 축거리를 작동거리 창 중앙으로 1회 보정한다.
+
+        판단은 sim 과 **같은** `StandoffTracker` 가 한다. 실패(측정 없음·IK·충돌)는
+        전부 무시하고 계획 거리 그대로 간다 — 밴드를 버리는 것보다 낫다.
+        """
+        if (self.retarget_fn is None or self.standoff_of is None
+                or self.move_robot_fn is None or band_q is None):
+            return
+        from utils.nbv.standoff import StandoffTracker
+        d0 = self.standoff_of(band_q)
+        if d0 is None:
+            return
+        dof = self.scan_range or (0.20, 0.30)
+        trk = StandoffTracker(dof, max(0.05, d0 - 0.12), d0 + 0.12,
+                              log=lambda m: print(f" {m}"))
+        if not trk.enabled:
+            return
+        if self._latest_frame_ranges_m(session) is None:
+            print(f"  [거리추종] band {band_i+1}/{n_bands} — OK 프레임이 없어 건너뜀")
+            return
+
+        def _retarget(d_new) -> bool:
+            qn = self.retarget_fn(band_q, float(d_new))
+            if qn is None:
+                return False
+            try:
+                self.move_robot_fn(qn)
+            except Exception as e:                              # noqa: BLE001
+                print(f"  [거리추종] 이동 실패({e})")
+                return False
+            return True
+
+        cam0 = np.zeros(3)                       # 스캐너 프레임 원점 = 카메라
+        # 회전 전(정지)이라 제한을 유지한 채 여러 번 수렴시킨다 — sim 과 동일.
+        d1 = trk.converge(float(d0),
+                          lambda: (self._latest_frame_ranges_m(session), cam0),
+                          _retarget)
+        if d1 != d0 and self.s.band_settle_s > 0:
+            # 움직였으면 SLAM 이 새 시점에서 다시 정착할 시간을 준다 — 밴드
+            # 경계 이동에 settle 을 두는 것과 같은 이유다.
+            t0 = time.time()
+            while time.time() - t0 < self.s.band_settle_s:
+                session.poll_events()
+                time.sleep(self.s.poll_interval_s)
 
     def _reset_turntable_to_zero(self, reset_vel_rad_s: float = np.radians(30.0)) -> bool:
         """
