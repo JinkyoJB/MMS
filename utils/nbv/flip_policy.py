@@ -89,3 +89,32 @@ def describe_flip(angle_deg: float) -> str:
     if abs(a - 180.0) < 1e-6:
         return "뒤집어 주세요 (180° — 바닥면이 위로)"
     return f"{a:.0f}° 회전해 주세요"
+
+
+# ── flip 테두리(rim) 패스 ─────────────────────────────────────────────────
+#  flip 뒤 새 면(원래 바닥)을 정면(el≈70°)에서 한 바퀴 찍어도 **바닥 모서리(필렛)**
+#  는 남는다. 실측 2026-09-18(세제 preview 점군): 원판 위 5~30mm 옆면·필렛의 법선은
+#  아래로 9~25° 라, 180° flip 뒤 **위로 9~25°** 를 향한다. el=70° 카메라에서 입사각
+#  45~61° → 50° 필터에 대부분 잘리고, lookaround(el≥30, 위에서)에서는 애초에 아래를
+#  향해 안 보였다. 그래서 flip 결과 메시 바닥 둘레에 10~20mm 띠가 빈다.
+#  → flip = "뒤집힌 물체의 lookaround": 면 패스 뒤에 **테두리 패스**를 el≈45° 로 한 번 더.
+#  후보 순서는 **측정된 필렛 법선**으로 정했다(세제 preview 점군, flip 뒤 법선 elev 중앙 +12°):
+#      el 30°: 창 안+입사각 50° 통과 100% · 35°: 100% · 40°: 90% · 45°: 57% · 50°: 10%
+#  45° 를 먼저 쓴 첫 구현은 바닥 둘레 띠(h 18~28mm)를 그대로 남겼다(2026-09-18 173629 런).
+RIM_EL_CANDS_DEG = (35.0, 30.0, 40.0, 45.0)     # 도달·충돌로 걸러 첫 성공
+
+
+def rim_standoff(r_m: float, el_deg: float, window_center_m: float = 0.25) -> float:
+    """조준점(새 면 중심)에서의 축거리 s — **테두리의 카메라 쪽 점**이 창 중앙에 오게.
+
+    카메라 = 조준점 + s·(cos el, sin el), 테두리 근점 = 조준점 + (r, 0) (같은 평면).
+        |카메라 − 근점|² = s² − 2 s r cos el + r² = wc²
+        → s = r cos el + sqrt(wc² − r² sin² el)
+    r 이 wc/sin el 보다 크면 해가 없다(테두리가 창 안에 못 든다) → 그때는 el 을 낮춰야 한다.
+    """
+    import math
+    el = math.radians(float(el_deg)); r = float(r_m); wc = float(window_center_m)
+    disc = wc * wc - (r * math.sin(el)) ** 2
+    if disc <= 0.0:
+        return float("nan")
+    return r * math.cos(el) + math.sqrt(disc)

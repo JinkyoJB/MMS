@@ -237,7 +237,7 @@ if _SCAN_SETTINGS_AVAILABLE:
     )
 elif CFG.backend == "isaac":
     # isaac: Artec SDK scan-settings 없이 sim 스캔(IsaacScanSession) 실행.
-    # IsaacScanSession = lookaround GT 누적 + nbv NBV(공용 nbv_core/robot_collision).
+    # IsaacScanSession = lookaround GT 누적 + nbv(공용 nbv_core/robot_collision).
     # 후처리(GlobalReg/Fusion/Texturize)는 sim sensor stub 가 skip → 결과=점군/mesh.
     PROCESS_SETTINGS = ArtecProcessSettings(
         dev_mode=DEV_MODE, use_multipass_scan=True,
@@ -300,7 +300,8 @@ def main() -> None:
             print(f"  export sproj: "
                   f"{PROCESS_SETTINGS.export_sproj_path or '끔 (--sproj 로 켜기)'}")
 
-            # 흐름: home → lookaround→2→3 → home  (sim/real 공통)
+            # 흐름: home → preview→lookaround→nbv→flip → home  (sim/real 공통)
+            #       어디까지 갈지는 --until / stage_until 이 정한다.
             _go_home(robot, confirm_home, "시작")
 
             result = None

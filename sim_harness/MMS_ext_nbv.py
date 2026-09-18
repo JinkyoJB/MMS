@@ -133,7 +133,7 @@ VOXEL_M        = 0.002
 # el=30° 에서 윗면(≈60° 입사) 은 버리고 측면(≈30°) 은 살리도록 50° 로.
 MAX_INCIDENCE_DEG = 50.0
 
-# nbv NBV — 윗면 gap 을 **옆에서 비스듬히** 내려다봄. 곧장 위로 뻗는 무리한(특이점/접촉)
+# nbv — 윗면 gap 을 **옆에서 비스듬히** 내려다봄. 곧장 위로 뻗는 무리한(특이점/접촉)
 # 자세를 피하려 낮은 앙각 우선(50~65°, 윗면 입사각<50° 라 여전히 잡힘). min-motion 이 측면
 # 자세(el=30)에 가까운 낮은 앙각을 자연히 선호. standoff 키워 스캐너-물체 여유 확보.
 NBV_STANDOFF       = 0.27
@@ -675,7 +675,7 @@ def _finish_lookaround():
 # ── nbv — NBV 계획 ────────────────────────────────────────────────────────
 def _plan_nbv():
     """윗면 gap → NBV 카메라 포즈 후보 생성 → 해석 IK + swept 충돌 통과 + 관절이동 최소 선택.
-    프로덕션 경로 = nbv_core.detect_gaps/nbv_pose_from_candidate + _rank_nbv_candidates
+    프로덕션 경로 = nbv_core.detect_gaps + nbv_planner.plan_frontier (gap 직접 겨냥)
     (open3d). 여기선 gap=윗면(엔지니어링됨)이라 윗면중심+상향법선으로 직접 NBV 포즈 산출."""
     O_top = _obj_center_world() + np.array([0, 0, OBJ_H / 2.0])   # 윗면 중심
     Twb, T_EC = _ctx["T_W_base"], _ctx["T_EC_gt"]

@@ -11,7 +11,7 @@
 | `MMS_ext_lookaround.py` | lookaround — GT 누적으로 view-planning 검증 (SLAM 없음) | `3_lookaround.md` |
 | `MMS_ext_lookaround_recovery1.py` | recovery — **빗나감**(대상물을 측면으로 조준) | `3_lookaround.md` §6 |
 | `MMS_ext_lookaround_recovery2.py` | recovery — **윗면 미포착**(너무 낮은 el) | `3_lookaround.md` §6 |
-| `MMS_ext_nbv.py` | nbv NBV 루프 | `4_nbv.md` §6.4 |
+| `MMS_ext_nbv.py` | nbv 루프 | `4_nbv.md` §6.4 |
 
 ## 터미널에서 돌리려면 → `scripts/sim/calib_handeye_sim.py`
 

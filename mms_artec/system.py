@@ -359,7 +359,7 @@ class ArtecMMS:
         move_robot: bool = True,
         confirm: bool = True,
     ) -> dict:
-        """θ 최적화 + 실행. nbv NBV 가 사용."""
+        """θ 최적화 + 실행. nbv 가 사용."""
         if self.turntable_transform is None or self._T_EC is None:
             raise RuntimeError("turntable_transform / T_EC 필요.")
         if robot is None:

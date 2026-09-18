@@ -1,18 +1,19 @@
 """
-isaac_scan_session — Isaac Sim 스캔 세션 (lookaround GT 누적 + nbv NBV 보강).
+isaac_scan_session — Isaac Sim 스캔 세션 (lookaround GT 누적 + nbv 보강).
 
 `mms_artec/system.py::artec_process` 의 isaac 분기가 호출하는 **production sim 스캔**.
 지금까지 standalone 하니스(MMS_ext_nbv.py)에만 있던 로직을 여기로 옮겨,
 `main_artec.py`(BACKEND="isaac", `~/isaacsim/python.sh main_artec.py`)로 동작하게 한다.
 
 ★ standalone(python.sh) 에선 Isaac 확장의 `utils` 패키지 충돌이 없으므로 **공용 lib을
-  그대로 import** 한다 → nbv NBV 가 **real 과 동일한 공용 코어**를 쓴다:
+  그대로 import** 한다 → nbv 가 **real 과 동일한 공용 코어**를 쓴다:
     - `utils/nbv/nbv_core.py`        : pcd→mesh→gap→커버리지→NBV pose (공용)
     - `utils/collision/robot_collision`: CollisionWorld·swept·keepout (공용)
     - `utils/robot/xarm7_kinematics`   : 해석 IK/FK (공용)
   sim 전용(USD 객체·Isaac 카메라·입사각 스캐너 모델·스캐너 mesh 자가충돌)만 이 파일에 둔다.
 
-흐름: lookaround(턴테이블 GT θ + 로봇 고정 + 입사각필터 + −θ 누적) → nbv(부족면 NBV).
+흐름: lookaround(높이 밴드마다 자세 이동 + 턴테이블 GT θ + 입사각필터 + −θ 누적)
+      → nbv(부족면 NBV).
 입사각 필터 = 구조광 스캐너가 grazing 면을 못 잡는 모델 → 윗면 gap 생성(=NBV 대상).
 
 설정은 아래 모듈 상수(또는 env)로. 실행 후 결과는 ArtecProcessResult-호환 shim 으로 반환
@@ -34,6 +35,8 @@ from utils.nbv import lookaround as p1
 from utils.nbv.scan_stage_controller import (
     run_scan_stages, resolve_stage_until, AT_CURRENT)
 from utils.nbv.nbv_planner import NbvPlanner as _NbvPlanner
+from utils.nbv import nbv_planner as _nbvp   # sim·real 공용 수렴·회계·IK 예산 상수
+from utils.nbv.nbv_debug_dump import NbvDebugDump as _NbvDebugDump   # 반복마다 겨냥·수집 기록
 from utils.collision.robot_collision import (
     CollisionWorld, pose_collision, DEFAULT_LINK_RADII, capsules_from_joints)
 from utils.collision import mesh_self_collision as _mesh_sc
@@ -71,13 +74,22 @@ SPAWN_PRIM      = "/World/SimScanObject"
 # (카메라 클립=실 스펙 0.2~0.3 유지 → 표면이 0.25 면 근/원접클립 모두 안전).
 #: 카메라↔**표면** 목표 거리. ★ 공용 상수 하나에서 온다 — sim 만 0.25 를 쓰고
 #  real 은 0.225 를 쓰던 갈라짐을 없앴다(`utils/nbv/standoff.py`).
+from utils.collision.collision_model import SCAN_OBSTACLE_MARGIN_M as _OBS_MARGIN
 from utils.nbv.standoff import (WORK_STANDOFF_M as _WORK_STANDOFF,
-                                StandoffTracker as _StandoffTracker)
+                                StandoffTracker as _StandoffTracker,
+                                TRACK_CORE_HALF_M as _TRACK_CORE_HALF)
 WORK_FOCUS      = _WORK_STANDOFF
-# 관절 보간 스텝 — 클수록 부드럽고 느리다. 스텝마다 world.step(render) 하므로
-# **스텝 수가 곧 이동 시간**이다. 30→15 로 속도 2배(2026-08-19 요청).
-# 충돌 검사는 스텝 수와 무관하다(보수적 전진이 별도로 경로를 보증).
-DRIVE_STEPS     = int(_envf("MMS_SIM_DRIVE_STEPS", 15))
+# 관절 보간 스텝 — 클수록 부드럽고 느리다. 스텝마다
+# `set_servo_angle(wait=True)` + `world.step(render=True)` 를 하므로
+# **스텝 수가 곧 이동 시간**이다. 30→15(2026-08-19), 15→8(2026-09-17) 로 각각 2배.
+#
+# ★ 이 값은 **sim 의 화면 속도일 뿐**이고 실물 속도와 무관하다. real 은 관절속도
+#   (`band_move_speed_deg_s` 등 deg/s)로 움직이므로 여기를 바꿔도 real 은 그대로다.
+#   따라서 "sim 이 답답하다" 는 여기서 고치는 것이 맞고, 그래도 real 예측은 안 깨진다.
+# ★ 충돌 검사는 스텝 수와 무관하다 — 경로 안전은 `is_path_safe`/`_plan_path` 가
+#   따로 보증하고, 여기 스텝은 **이미 안전하다고 판정된 경로를 몇 번에 나눠
+#   그리느냐** 일 뿐이다. 그래서 줄여도 안전성이 내려가지 않는다.
+DRIVE_STEPS     = int(_envf("MMS_SIM_DRIVE_STEPS", 8))
 # 녹화 시에는 이동 보간을 촘촘히 해 로봇이 연속으로 움직이는 것처럼 보이게 한다.
 # (스캔 결과에는 영향 없음 — 경유 자세만 잘게 나눌 뿐 시작·끝 자세는 동일)
 DRIVE_STEPS_REC = int(_envf("MMS_SIM_DRIVE_STEPS_REC", 60))
@@ -162,6 +174,8 @@ APPLY_INCIDENCE = _envs("MMS_SIM_INCIDENCE", "1") == "1"
 #   sim 은 GT 깊이라 그 점들이 '정확'하지만, 실물 구조광은 그 각도에서 못 잡는다 —
 #   즉 완화는 **실물에 없는 데이터를 만들어내는** 셈이라 검증도 무의미해진다.
 MAX_INCIDENCE_INNER_DEG = _envf("MMS_SIM_MAXINC_INNER", 60.0)
+#: 입사각 판정용 PCA 법선을 재는 대표점 상한 — `_incidence_filter` 주석.
+INCIDENCE_PCA_MAX = int(_envf("MMS_SIM_INCIDENCE_PCA_MAX", 1500))
 # ── 패스 간 정합 (real 과 같은 구조) ─────────────────────────────────────────
 # real 은 새 패스를 master 에 **open3d ICP** 로 붙인다
 # (`artec_multipass_scan_session._hint_icp_refine`, colored ICP + point-to-plane fallback,
@@ -197,13 +211,13 @@ FLIP_AXIS = _envs("MMS_SIM_FLIP_AXIS", "y")
 FLIP_ANGLES_DEG = tuple(float(x) for x in
                         _envs("MMS_SIM_FLIP_ANGLES", "180").split(",") if x.strip())
 
-# nbv NBV
+# nbv
 NBV_DISTANCE_M  = 0.225
 NBV_APPROACH_ELS  = [55.0, 50.0, 60.0, 65.0]
 NBV_APPROACH_AZIS = [0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0, 180.0]
 # nbv 반복 횟수. gap 을 **직접 겨냥**하게 되면서 자세마다 덮는 영역이 국소적이라
 # (예전엔 축을 봐서 한 패스가 광역을 덮었다) 더 많은 패스가 필요하다.
-NBV_K_MAX       = int(_envf("MMS_SIM_NBV_K", 8))
+NBV_K_MAX       = int(_envf("MMS_SIM_NBV_K", _nbvp.K_MAX))   # 기본은 공용값(12) — real 과 같은 상한
 # ★ nbv 부분 스윕 — 목표 gap 이 보이는 **좁은 각도 구간만** 돌고 끝낸다.
 #   예전에는 자세마다 무조건 360°(24프레임)를 돌았다. gap 하나 채우려고 한 바퀴를 도는
 #   동안 스캐너는 이미 가진 면만 다시 본다 — 순수한 낭비다.
@@ -220,14 +234,14 @@ DRIFT_ROT_DEG   = _envf("MMS_SIM_DRIFT_R", 15.0)
 FLIP_ASPECT     = _envf("MMS_SIM_FLIP_ASPECT", 2.0)      # 키/지름 이 값 이상=세장형
 FLIP_EL_MIN     = _envf("MMS_SIM_FLIP_EL_MIN", 30.0)     # flip 관측 고도각 하한
 FLIP_EL_MAX     = _envf("MMS_SIM_FLIP_EL_MAX", 70.0)     # 상한(고앙각은 자가충돌)
-CONV_NEW_EPS    = _envf("MMS_SIM_CONV_NEW_EPS", 0.005)   # 전역 백스톱 임계 (보수적:
+CONV_NEW_EPS    = _nbvp.CONV_NEW_EPS   # 공용(env MMS_NBV_CONV_NEW_EPS)   # 전역 백스톱 임계 (보수적:
 #   GT 검증에서 0.5%/3회는 손실 최대 0.27%p. 주 종료는 gap 단위 dry 회계가 맡는다)
 ICP_INFLATION_M = _envf("MMS_SIM_ICP_INFLATION", 0.005)  # 정합이 물체를 부풀리는 한계
 #   (실측 9종: 정상 −0.1~3.8mm / 회귀 8.5·10.0mm — 5mm 가 그 사이를 가른다)
-DRY_EPS         = _envf("MMS_SIM_DRY_EPS", 0.015)        # 패치 생산성 판정 (실측:
+DRY_EPS         = _nbvp.DRY_EPS        # 공용(env MMS_NBV_DRY_EPS)        # 패치 생산성 판정 (실측:
 #   비생산 패치 0.2~1.2%, 생산 패치 1.7~10.3% — 1.5% 가 그 사이를 가른다)
-CONV_VOX_M      = _envf("MMS_SIM_CONV_VOX", 0.004)       # 커버리지 판정 복셀 크기
-CONV_AREA_N     = int(_envf("MMS_SIM_CONV_AREA_N", 3))   # 연속 정체 횟수
+CONV_VOX_M      = _nbvp.CONV_VOX_M     # 공용       # 커버리지 판정 복셀 크기
+CONV_AREA_N     = _nbvp.CONV_STALL_N   # 공용(env MMS_NBV_CONV_STALL_N)   # 연속 정체 횟수
 STAGE_DUMP      = os.environ.get("MMS_SIM_STAGE_DUMP", "")
 ICP_DUMP        = os.environ.get("MMS_SIM_ICP_DUMP", "")
 ICP_SCALE_DEBUG = bool(_envf("MMS_SIM_ICP_DEBUG", 0))
@@ -564,18 +578,39 @@ class IsaacScanSession:
         return obj
 
     def _incidence_filter(self, pts_b):
-        nrm = _pca_normals(pts_b, c_ref=self.obj_center_b)
-        if nrm is None:
-            return pts_b
+        """입사각 필터 — 법선은 **대표점 부분집합**에서 PCA 로 재고, 판정을 최근접
+        대표점에서 전파한다.
+
+        ★ 프레임마다 전 점(2mm 복셀, 수천 점)에 k=12 PCA 를 돌리면 lookaround 프레임
+          처리시간의 16%(세제 1,440프레임 = 31s)였다(2026-09-18 프로파일). 법선은
+          국소 면 방향이라 4mm 격자 대표점으로 재도 같고, 입사각 판정은 점이 아니라
+          면의 성질이므로 최근접 대표점의 판정을 그대로 물려받아도 된다.
+          대표점 상한 `INCIDENCE_PCA_MAX`(1,500). 그 이하면 예전과 완전히 같다.
+        """
         _cam = self._cam_pos_base()
         if _cam is None:
             return pts_b
-        vd = _cam[None, :] - pts_b
+        P = np.asarray(pts_b, float)
+        if len(P) > INCIDENCE_PCA_MAX:
+            rep = _voxel(P, VOXEL_M * 2.0)                 # 4mm 대표점
+            if len(rep) > INCIDENCE_PCA_MAX:
+                rep = rep[np.random.default_rng(0).choice(len(rep), INCIDENCE_PCA_MAX, replace=False)]
+        else:
+            rep = P
+        nrm = _pca_normals(rep, c_ref=self.obj_center_b)
+        if nrm is None:
+            return pts_b
+        vd = _cam[None, :] - rep
         vd /= (np.linalg.norm(vd, axis=1, keepdims=True) + 1e-9)
         cos_inc = np.sum(nrm * vd, axis=1)
         lim = (MAX_INCIDENCE_INNER_DEG if getattr(self, "_gap_pass", False)
                else MAX_INCIDENCE_DEG)
-        return pts_b[cos_inc > math.cos(math.radians(lim))]
+        ok_rep = cos_inc > math.cos(math.radians(lim))
+        if rep is P:
+            return P[ok_rep]
+        from scipy.spatial import cKDTree
+        _, j = cKDTree(rep).query(P, k=1, workers=-1)   # 판정 전파
+        return P[ok_rep[j]]
 
     # ── 충돌 (공용 robot_collision + 스캐너 mesh) ────────────────────────────
     def _build_world(self) -> CollisionWorld:
@@ -677,40 +712,21 @@ class IsaacScanSession:
         if master is None or len(master) < ICP_MIN_PTS:
             return pts, None
         try:
-            import open3d as o3d
-            from utils.nbv.icp_strategy import icp_with_gates
-            src = o3d.geometry.PointCloud()
-            src.points = o3d.utility.Vector3dVector(_voxel(pts, VOXEL_M))
-            tgt = o3d.geometry.PointCloud()
-            tgt.points = o3d.utility.Vector3dVector(master)
+            from utils.nbv.icp_strategy import refine_to_master
             if ICP_DUMP and tag == "flip":      # 오프라인 분석용 입력 덤프
-                np.savez_compressed(ICP_DUMP, src=np.asarray(src.points),
-                                    tgt=np.asarray(tgt.points))
+                np.savez_compressed(ICP_DUMP, src=_voxel(pts, VOXEL_M), tgt=master)
                 print(f"[isaac_scan]   (덤프) ICP 입력 → {ICP_DUMP}")
-            # flip 패스(tag="flip")는 hint 기준 오차가 프레임 드리프트보다 크므로
-            # 이동 허용치를 넓힌다. 그래도 게이트는 유지 — 틀린 정합이 통과하면
-            # 메시 전체가 망가진다.
-            # ⚠ 게이트를 완화하면 안 된다(2026-08-18 실측). flip 패스에서 RMSE 임계를
-            #   2→4mm 로 풀었더니 ICP 가 14.6mm·24.6mm 를 보정했는데 **결과가 나빠졌다**
-            #   (bbox Z 79→83mm, 아랫면 정점 25,608→11,033). 뒤집힌 바닥면이 물체 옆면에
-            #   미끄러져 붙는 국소최소다. 게이트가 기각한 데는 이유가 있다.
-            is_flip = (tag == "flip")
-            drift = 0.080 if is_flip else DRIFT_TRANS_M
-            drot = 15.0 if is_flip else DRIFT_ROT_DEG
-            T, res = np.eye(4), None
-            for corr in ICP_SCALES_M:
-                self._pump()
-                res = icp_with_gates(src, tgt, T, max_correspondence_distance=corr,
-                                     rmse_thresh=corr / 2.0, fitness_thresh=0.20,
-                                     drift_trans_m=drift, drift_rot_deg=drot,
-                                     max_inflation_m=ICP_INFLATION_M)
-                if ICP_SCALE_DEBUG:
-                    print(f"[isaac_scan]   (icp/{tag}) corr={corr*1000:.0f}mm "
-                          f"ok={res.ok} fitness={res.fitness:.3f} "
-                          f"rmse={res.rmse*1000:.2f}mm Δt={res.delta_translation_m*1000:.1f}mm "
-                          f"Δr={res.delta_rotation_deg:.1f}° [{res.reason}]")
-                T = res.T_refined
+            # ★ 정합은 **sim·real 공용** `refine_to_master` — 다단 point-to-plane
+            #   ICP + 3중 게이트 + 팽창 게이트. flip 은 이동 허용치만 넓다(함수 안).
+            #   예전엔 이 루프가 sim 에만 있었고 real 은 colored ICP 로 달랐다
+            #   (2026-09-18 공용화). 게이트 완화 금지 근거는 함수 주석에 있다.
+            res = refine_to_master(
+                _voxel(pts, VOXEL_M), master, np.eye(4),
+                mode=("flip" if tag == "flip" else "patch"),
+                voxel_m=0.0, on_step=self._pump,
+                log=(lambda m: print(f"[isaac_scan]   {m}")) if ICP_SCALE_DEBUG else None)
             if res is not None and res.ok:
+                T = res.T_refined
                 return pts @ T[:3, :3].T + T[:3, 3], res
             return pts, res
         except Exception as e:                       # noqa: BLE001
@@ -965,10 +981,30 @@ class IsaacScanSession:
                       f"그 구간 탐침은 **로봇이 가지도 않고** 빈 캡처로 보인다")
             pts = p1.guard_cylinder_points(self.axis_b, self.up_sign, _R)
             self._cm.set_dynamic_obstacle(pts, margin_m=0.0)
+            _viz.show_obstacle(self.stage, self._viz_pts(pts), tag="guard",
+                               color=(0.2, 0.5, 1.0))          # 파랑 = 가정치
             print(f"[isaac_scan]   preview 보호 원기둥 — r={_R*1000:.0f}mm 마진 0 "
                   f"({len(pts):,}pt, 최소 축거리 {d_min*1000:.0f}mm)")
         except Exception as e:                                # noqa: BLE001
             print(f"[isaac_scan] ⚠ preview 보호 원기둥 실패({type(e).__name__}: {e})")
+
+    def _pause_to_inspect(self, what: str) -> None:
+        """GUI 에서 **다음 단계로 넘어가기 전에 잠깐 멈춰** 눈으로 보게 한다.
+
+        `MMS_SIM_PAUSE` 초(기본 0 = 안 멈춤). 헤드리스면 무시한다 — 볼 창이 없다.
+        오버레이를 그려놓고 바로 다음 단계로 넘어가면 화면이 지나가 버린다.
+        """
+        try:
+            sec = float(os.environ.get("MMS_SIM_PAUSE", "0"))
+        except ValueError:
+            sec = 0.0
+        if sec <= 0 or self.world.headless:
+            return
+        print(f"[isaac_scan]   ⏸ {sec:.0f}초 — {what}")
+        import time as _t
+        t0 = _t.time()
+        while _t.time() - t0 < sec:                # 렌더를 계속 돌려야 창이 산다
+            self.world.step(4, render=True)
 
     def _register_object_obstacle(self, pts_b, tag: str) -> None:
         """**base** 점군을 스캔 대상 장애물로 등록한다 (실패해도 스캔은 계속).
@@ -980,17 +1016,44 @@ class IsaacScanSession:
             return
         try:
             pts_b = np.asarray(pts_b, float)
-            # ★ (b) 등록하는 점군은 **θ=0 canonical** 이다(`_accumulate` 가 −θ 로
+            # ★ 등록하는 점군은 **θ=0 canonical** 이다(`_accumulate` 가 −θ 로
             #   되돌려 쌓는다). 그런데 로봇이 움직이는 시점의 턴테이블 각은 0 이
             #   아니다 — nbv 는 부분 스윕이라 특히 그렇다. 비대칭 물체(손잡이 달린
             #   드릴·주전자)면 장애물이 **실제와 다른 방향을 향한 채** 걸린다.
-            #   축 둘레로 **쓸어 돌린 부피**(swept volume)를 등록해 해결한다 —
-            #   회전체라 어느 각도에서도 실제 물체를 포함한다. 보수적이지만
-            #   카메라는 축에서 200mm 밖에 서므로 자세가 기각되지는 않는다.
-            swept = p1.swept_about_axis(pts_b, self.axis_b, self.axis_dir_b)
+            #   그래서 축 둘레 **회전체 외피**로 등록한다(높이별 최대 반경).
+            #   이산 N방향 샘플(`swept_about_axis`)과 달리 각도 틈이 원리적으로
+            #   없고, 고정 원기둥(원판 반경)과 달리 물체만큼만 굵어서 고도각 높은
+            #   자세(nbv·flip·뚜껑)를 기각하지 않는다 — 근거는 그 함수 주석.
+            swept = p1.revolution_envelope(pts_b, self.axis_b, self.axis_dir_b)
             self._cm.set_dynamic_obstacle(swept)
-            lo, hi = pts_b.min(axis=0), pts_b.max(axis=0)
-            print(f"[isaac_scan]   대상물 장애물({tag}) base bbox "
+            # ★ **넘어간 바로 그 점**을 그린다. bbox·점 수만으로는 회전체가 물체를
+            #   제대로 감쌌는지, 프레임이 맞는지 알 수 없다 — 비대칭 물체에서
+            #   장애물이 엉뚱한 방향을 향해도 숫자는 그럴듯하게 나온다.
+            _viz.clear_obstacle(self.stage, "guard")       # 가정치는 치운다
+            _viz.show_obstacle(self.stage, self._viz_pts(swept), tag=tag)
+            # ★ 나중에 오프라인으로 겹쳐 보려고 덤프한다(GUI 를 못 띄울 때).
+            #   `scripts/sim/overlay_env_npz.py` 와 같은 방식으로 씬에 올린다.
+            if os.environ.get("MMS_SIM_OBSTACLE_DUMP", "1") == "1":
+                try:
+                    from utils import PROJECT_ROOT
+                    d = os.path.join(str(PROJECT_ROOT), "output", "debug", "obstacle")
+                    os.makedirs(d, exist_ok=True)
+                    f = os.path.join(d, f"{self._dbg.run_ts}_{tag}.npz")
+                    np.savez_compressed(f, raw_b=pts_b.astype(np.float32),
+                                        swept_b=swept.astype(np.float32),
+                                        axis_b=self.axis_b, axis_dir_b=self.axis_dir_b,
+                                        T_WB=self.T_WB, margin_m=_OBS_MARGIN)
+                    print(f"[isaac_scan]   장애물 덤프 → {os.path.relpath(f, str(PROJECT_ROOT))}")
+                except Exception as e:                    # noqa: BLE001
+                    print(f"[isaac_scan]   ⚠ 장애물 덤프 실패({e})")
+            # ★ **등록된 점군**의 bbox 를 찍는다. 예전엔 원본(pts_b)을 찍었는데,
+            #   그러면 회전체가 반영됐는지 로그로는 알 수 없었다 — 원통형 물체는
+            #   원본과 회전체의 bbox 가 같아서 특히 구분이 안 된다.
+            lo, hi = swept.min(axis=0), swept.max(axis=0)
+            _r = float(np.linalg.norm(
+                (swept - self.axis_b)[:, :2], axis=1).max())
+            print(f"[isaac_scan]   대상물 장애물({tag}) {len(swept):,}pt "
+                  f"최대반경 {_r*1000:.0f}mm · base bbox "
                   f"x[{lo[0]:.3f},{hi[0]:.3f}] y[{lo[1]:.3f},{hi[1]:.3f}] "
                   f"z[{lo[2]:.3f},{hi[2]:.3f}]")
         except Exception as e:                                # noqa: BLE001
@@ -1035,7 +1098,10 @@ class IsaacScanSession:
 
         self._retarget_fn = retarget
         trk = _StandoffTracker(sensor.dof, lo, hi,
-                               log=lambda m: print(f"[isaac_scan]{m}"))
+                               log=lambda m: print(f"[isaac_scan]{m}"),
+                               # 밴드가 맡은 높이대(조준높이 ±40mm)의 면을 창 중앙에
+                               # 놓는다 — 창 안 전체 중앙값은 윗부분에 끌려 물러난다.
+                               core=(vp.target_z, self.up_sign, _TRACK_CORE_HALF))
         if trk.enabled:
             print(f"[isaac_scan]   거리추종 {trk.mode} — el={vp.el_deg:.0f}° "
                   f"az={vp.az_deg:.0f}° 고정, 축거리 {vp.standoff*1000:.0f}mm "
@@ -1047,7 +1113,7 @@ class IsaacScanSession:
         """★ 통합 캡처 = 로봇을 q 자세로 두고 **턴테이블 전회전**하며 프레임 캡처·−θ 누적.
         real 캡처(로봇 pose + streaming 전회전 + relocalization)에 1:1 대응. lookaround·2 공용.
         sim 은 GT θ 라 −θ 회전 = relocalization 역할(정확). 입사각 필터로 좋은 프레임만 기여."""
-        # AT_CURRENT = '이동 없이 현재 자세에서 캡처'(flip flip 후). 센티널이므로
+        # AT_CURRENT = '이동 없이 현재 자세에서 캡처'(flip 으로 물체를 뒤집은 뒤). 센티널이므로
         # 관절해로 해석하면 안 된다 — sim 은 flip 가 미지원이라 이 경로가 미검증이었다.
         if q is not AT_CURRENT and q is not None:
             if not self._drive(q):
@@ -1194,6 +1260,7 @@ class IsaacScanSession:
         #   패치를 한 덩어리로 모으면 master 와의 중첩이 충분해 안정적으로 붙는다.
         if patch_pts:
             pts = np.vstack(patch_pts)
+            raw = pts
             aligned, res = self._icp_to_master(pts, ICP_MIN_PTS, "patch")
             if res is not None and res.ok:
                 print(f"[isaac_scan]   패치 정합: Δt={res.delta_translation_m*1000:.2f}mm "
@@ -1202,6 +1269,10 @@ class IsaacScanSession:
             elif res is not None:
                 print(f"[isaac_scan]   ⚠ 패치 정합 게이트 실패({res.reason}) — 기구학 그대로")
             self.accum.append(pts)
+            if getattr(self, "_nbv_dbg", None) is not None:      # 겨냥·수집·정합 기록
+                self._nbv_dbg.patch(raw_pts=raw, aligned_pts=pts, result=res)
+        elif getattr(self, "_nbv_dbg", None) is not None:
+            self._nbv_dbg.patch(raw_pts=np.zeros((0, 3)), aligned_pts=np.zeros((0, 3)), result=None)
         if _viz.ENABLED and self.accum:
             _viz.show_accum(self.stage, self._viz_pts(np.vstack(self.accum)))   # θ=0 기준으로 되그림
         added = sum(len(a) for a in self.accum) - before
@@ -1224,7 +1295,7 @@ class IsaacScanSession:
         """lookaround 시점선정 (E2E, 2026-07-03) — **real 과 동일 경로**:
         거리스텝 preview 캡처(실제 카메라) → 기하 크롭 → maximin 플래너.
         반환 = q 또는 [q,...](밴드 계획, 공용 컨트롤러가 대역별 전회전).
-        MMS_SIM_P1_MODE=legacy 면 기존 GT-bbox azimuth sweep 사용."""
+        플래너가 실패하면 AT_CURRENT(현재 자세에서 캡처) — real 과 같은 폴백이다."""
         self.go_home()
         seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
         self.home_q = seed.copy()                    # retract-approach 경유점(known-good home)
@@ -1233,17 +1304,15 @@ class IsaacScanSession:
         self.world.step(30, render=True)
         _ = self.scanner.capture_points_base(self.robot, self.mms._T_EC, settle=4)
 
-        if _envs("MMS_SIM_P1_MODE", "planner") == "legacy":
-            return self._pick_lookaround_legacy(seed)
-
         try:
             plan_qs = self._pick_lookaround_planner(seed)
             if plan_qs:
                 return plan_qs
-            print("[isaac_scan] ⚠ P1 플래너 실패 — legacy sweep 으로 fallback")
+            print("[isaac_scan] ⚠ lookaround 플래너 실패 — 현재 자세에서 캡처")
         except Exception as e:
-            print(f"[isaac_scan] ⚠ P1 플래너 예외({type(e).__name__}: {e}) — legacy fallback")
-        return self._pick_lookaround_legacy(seed)
+            print(f"[isaac_scan] ⚠ lookaround 플래너 예외"
+                  f"({type(e).__name__}: {e}) — 현재 자세에서 캡처")
+        return AT_CURRENT
 
     # ── lookaround 시점선정: real 경로 (preview → 크롭 → 플래너) ────────────
     def _pick_lookaround_planner(self, seed):
@@ -1363,6 +1432,7 @@ class IsaacScanSession:
         #   이전에는 **sim 만 이게 빠져 있었다** — sim 에서 통과한 경로가 real
         #   에서 막히는(또는 그 반대) 갈라짐이었다.
         self._register_object_obstacle(pts, "preview")
+        self._pause_to_inspect("대상물 장애물 등록 (주황=등록된 회전체)")
         nrm = p1.estimate_outward_normals(pts, axis_xy)
         # 후보 elevation 을 명시 — p1.DEFAULT_ELS=(20,30,40,50) 의 20 은 실측에서도
         # 도달 자세가 없다. P1_ELS 는 env 로 조정 가능.
@@ -1383,30 +1453,6 @@ class IsaacScanSession:
         self._p1_sensor = sensor
         self._p1_seed = np.asarray(seed, float).copy()
         return qs
-
-    # ── lookaround 시점선정: legacy (GT bbox azimuth sweep, fallback) ────────
-    def _pick_lookaround_legacy(self, seed):
-        chosen = None
-        # 측면 standoff: 표면(중심에서 obj_radius)이 WORK_FOCUS 에 오도록.
-        standoff = WORK_FOCUS + self.obj_radius
-        # ★ 타깃 = **턴테이블 축**(객체중심 아님). 객체가 축에서 벗어나도 회전 중 시야·클립 안 유지.
-        view_target = np.array([self.axis_b[0], self.axis_b[1], self.obj_center_b[2]])
-        for azd in VIEW_AZIS_DEG:                    # 도달 가능한 측면 azimuth 채택
-            q, _ = self._view_q(view_target, VIEW_EL_DEG, azd, standoff, seed)
-            if q is not None and self._cm is not None:
-                ok, why = self._cm.is_pose_safe(q)
-                if not ok:                     # lookaround 도 이제 충돌을 본다(예전 무검사)
-                    print(f"[isaac_scan]   az={azd:.0f}° 충돌({why}) — 건너뜀")
-                    q = None
-            if q is not None:
-                chosen = q
-                print(f"[isaac_scan] lookaround 측면자세 az={azd:.0f}° el={VIEW_EL_DEG:.0f}° IK ok")
-                break
-        if chosen is None:
-            print("[isaac_scan] ⚠ lookaround 자세 IK 전부 실패 — home 자세 유지")
-            chosen = seed
-        self._drive(chosen)
-        return chosen
 
     def capture_rotation(self, pose, label: str, stage: str) -> bool:
         """lookaround·flip = 전회전(전면 커버), **nbv = 부분 스윕**(목표 gap 만).
@@ -1457,22 +1503,32 @@ class IsaacScanSession:
         #   MMS_SIM_VIZ=1 일 때만. 시뮬레이터를 쓰는 최대 이점 중 하나.
         _viz.show_gaps(self.stage, gaps)
         if self.accum:
-            _acc = self._viz_pts(np.vstack(self.accum))
-            _viz.show_accum(self.stage, _acc)
-            _viz.show_voxels(self.stage, _acc,
-                             self._base_to_world(self.obj_center_b),
-                             max(self.obj_radius, self.obj_height / 2) + 0.01)
+            _viz.show_accum(self.stage, self._viz_pts(np.vstack(self.accum)))
 
         def solve_lookat(eye, tgt):
+            # 스크리닝 예산은 **real 과 같은 공용값**. sim 만 후하면(7seed/200iter)
+            # "sim 에선 풀리고 real 에선 안 풀리는" 후보가 생긴다(2026-09-18 리뷰).
             return _vp.solve_look_at_q(
                 kin, eye, tgt, q_cur, self.T_EC, T_WB=None,
                 convention=_vp.CAM_USD, rolls_deg=VIEW_ROLLS_DEG,
-                n_seed_alt=IK_SEED_TRIES)
+                n_seed_alt=_nbvp.FRONTIER_IK_SEEDS,
+                ik_max_iter=_nbvp.FRONTIER_IK_MAX_ITER)
 
         # ── ① 보장 고도각 — 오목 내부는 gap 으로 안 잡히므로(닭·달걀) 사전지식 ──
+        self._nbv.disc_z = float(self.axis_b[2])       # 바닥 근처 gap 은 모든 경로에서 flip 몫
         need = [e for e in ENSURE_ELS
                 if not any(abs(float(v[0]) - float(e)) < 1e-6
                            for v in self._nbv.visited)]
+        # ★ 윗면 개구부(경계 고리)가 있을 때만 돈다 — 없는 물체에서 55° 전회전은
+        #   30초 낭비다(공용 `needs_ensure`, 2026-09-18). 오목 물체는 입구가 경계로 남는다.
+        if need:
+            _ens, _uplen = _nbvp.needs_ensure(gaps, self.up_sign)
+            if not _ens:
+                print(f"[isaac_scan]   보장 고도각 {need} 건너뜀 — 윗면 향한 gap "
+                      f"{_uplen*1000:.0f}mm < {_nbvp.ENSURE_MIN_UP_LEN_M*1000:.0f}mm (개구부 없음)")
+                for e in need:                       # 다시 묻지 않게 방문 처리
+                    self._nbv.visited.append((float(e), 0.0))
+                need = []
         if need:
             res0 = self._nbv.plan(gaps, q_cur, solve_pose, swept,
                                   roll_order_fn=roll_order)
@@ -1485,6 +1541,8 @@ class IsaacScanSession:
                 # 커버의 근거이므로 줄일 때는 내부 취득량을 함께 확인할 것).
                 self._next_theta = 0.0
                 self._next_span = ENSURE_SPAN_DEG
+                self._nbv_dbg_plan(gaps, None, "ensure", res0[0], look_target, 0.0, ENSURE_SPAN_DEG,
+                                   note=f"ensure el={res0[1]:.0f}° az={res0[2]:.0f}°")
                 return res0[0]
 
         # ── ② gap 겨냥 (주경로) ─────────────────────────────────────────────
@@ -1495,13 +1553,32 @@ class IsaacScanSession:
         #   → 표면점 p 에서 법선 n 방향 standoff 위치로 **그 gap 을 정면으로** 본다
         #     (`nbv_core.nbv_pose_from_candidate` 와 같은 원리).
         #   법선 정면이 막히면(작동거리가 물체보다 큰 오목면 등) 개구부 쪽으로 기울인다.
+        # ★ 방위는 **축→로봇 방향 기준**으로 만든다(공용 `robot_side_azimuths`).
+        #   VIEW_AZIS_DEG 원시값 (0,±30) 을 그대로 넘기면 base +X = 축 너머
+        #   **로봇 반대편**을 가리켜 카메라 eye 가 도달한계 직전으로 가고 IK 가
+        #   전멸한다. real 은 2026-09-16 에 고쳤는데 sim 은 그대로였다 — sim 도
+        #   v2 셀을 base 프레임으로 돌게 된 뒤로 정확히 180° 어긋나 있었다
+        #   (2026-09-18 리뷰). 그래서 gap 겨냥 주경로가 sim 에서 검증된 적이 없다.
+        _obj_pts = None
+        if self.accum:
+            _obj_pts = np.vstack(self.accum)
+            if len(_obj_pts) > 3000:
+                _obj_pts = _obj_pts[np.random.default_rng(0).choice(
+                    len(_obj_pts), 3000, replace=False)]
         fr = self._nbv.plan_frontier(gaps, q_cur, solve_lookat, swept,
                                      standoff_m=WORK_FOCUS,
                                      axis_xy=self.axis_b[:2],
-                                     az_pref_deg=tuple(VIEW_AZIS_DEG))
+                                     az_pref_deg=_nbvp.robot_side_azimuths(
+                                         self.axis_b[:2], VIEW_AZIS_DEG),
+                                     obj_pts=_obj_pts,
+                                     # 정합 겹침 안전장치 — 누적 원시 점군이 기지 면
+                                     known_pts=(np.vstack(self.accum) if self.accum else None))
         if fr is not None:
             self._gap_pass = True
             self._next_theta = fr[3]        # 이 θ 주변만 부분 스윕
+            self._nbv_dbg_plan(gaps, fr[1], "frontier", fr[0], np.asarray(fr[1].p_O, float),
+                               float(fr[3]), NBV_PATCH_SPAN_DEG,
+                               note=f"L={float(fr[1].L)*1000:.0f}mm")
             try:                            # 겨냥한 gap + 카메라 위치를 씬에 표시
                 _q = fr[0]
                 # 씬 오버레이는 world — gap 점(base)과 카메라를 같이 올린다.
@@ -1514,11 +1591,43 @@ class IsaacScanSession:
                 pass
             return fr[0]
 
-        # ── ③ 폴백: 축-고도각 (턴테이블 회전과 궁합이 좋은 광역 스윕) ──────────
+        # ── ③ 폴백: 축-고도각 — gap 군집을 로봇 앞으로 가져와 **180° 부분 스윕** ──
+        #   예전엔 전회전이었다(gap 위치를 버리는 방식). 위치는 후보에 있으니
+        #   가장 큰 gap 들이 앞에 오도록 θ 를 정하고 그 주변만 돈다(공용
+        #   `gap_cluster_theta`, 2026-09-18). 군집 방위를 못 구하면 전회전.
         self._gap_pass = False
         res = self._nbv.plan(gaps, q_cur, solve_pose, swept,
                              roll_order_fn=roll_order)
-        return None if res is None else res[0]
+        if res is None:
+            return None
+        _th = _nbvp.gap_cluster_theta(
+            gaps, self.axis_b[:2],
+            _nbvp.robot_side_azimuths(self.axis_b[:2], VIEW_AZIS_DEG)[0], self.up_sign)
+        if _th is not None:
+            self._next_theta = float(_th)
+            self._next_span = _nbvp.FALLBACK_SPAN_DEG
+            print(f"[isaac_scan]   폴백 스윕 θ={math.degrees(_th) % 360:.0f}° 중심 "
+                  f"±{_nbvp.FALLBACK_SPAN_DEG/2:.0f}° (gap 군집 방위)")
+        self._nbv_dbg_plan(gaps, None, "fallback", res[0], look_target,
+                           float(_th) if _th is not None else 0.0,
+                           _nbvp.FALLBACK_SPAN_DEG if _th is not None else 360.0,
+                           note=f"axis-el el={res[1]:.0f}° az={res[2]:.0f}°")
+        return res[0]
+
+    def _nbv_dbg_plan(self, gaps, chosen, mode, q, target_b, theta, span_deg, note=""):
+        """nbv 디버그 기록(계획 시점) — `utils/nbv/nbv_debug_dump`. 실패해도 무시."""
+        try:
+            if getattr(self, "_nbv_dbg", None) is None:
+                self._nbv_dbg = _NbvDebugDump()
+            eye = (kin._fk_frames_m(np.asarray(q, float))[7]
+                   @ np.linalg.inv(self.T_EC))[:3, 3]
+            idx = next((i for i, c in enumerate(gaps or []) if c is chosen), -1)
+            self._nbv_dbg.plan(gaps=gaps, chosen=idx, mode=mode, eye=eye, target=target_b,
+                               theta=theta, span_deg=span_deg,
+                               master_pts=(np.vstack(self.accum) if self.accum else None),
+                               axis_pt=self.axis_b, up_sign=self.up_sign, note=note)
+        except Exception as e:                                   # noqa: BLE001
+            print(f"[isaac_scan]   [nbv-dbg] plan 기록 실패({e})")
 
     # ── nbv (NBV hole-fill) 프리미티브 — 수렴 루프는 공용 컨트롤러 소유 ──
     def _pump(self, n=1):
@@ -1633,12 +1742,8 @@ class IsaacScanSession:
         #   누적 점군은 점이 더해지기만 하므로 신규 복셀 = 진짜 새로 관측한 공간이다.
         new_frac = None
         if self.accum:
-            k = np.floor(np.vstack(self.accum) / CONV_VOX_M).astype(np.int64)
-            cur = set(map(tuple, np.unique(k, axis=0)))
-            seen = getattr(self, "_conv_vox", None)
-            if seen is not None and seen:
-                new_frac = len(cur - seen) / len(seen)
-            self._conv_vox = cur
+            new_frac, self._conv_vox = _nbvp.new_voxel_frac(
+                np.vstack(self.accum), getattr(self, "_conv_vox", None), CONV_VOX_M)
         # ── gap 단위 회계 (주 종료 경로) ─────────────────────────────────
         # 직전 패치가 frontier 겨냥이었으면 결과를 planner 에 보고한다. 비생산
         # 패치의 겨냥점 주변은 후보에서 빠져, **계획기가 후보를 소진하면 루프가
@@ -1648,14 +1753,16 @@ class IsaacScanSession:
             self._nbv.report_patch(new_frac >= DRY_EPS)
         area = float(mesh.get_surface_area())
         if new_frac is not None:
-            flat = getattr(self, "_conv_flat", 0)
-            self._conv_flat = flat + 1 if new_frac < CONV_NEW_EPS else 0
+            stall = getattr(self, "_stall", None)
+            if stall is None:
+                stall = self._stall = _nbvp.StallTracker(CONV_NEW_EPS, CONV_AREA_N)
+            done = stall.update(new_frac)
             print(f"[isaac_scan]   신규복셀={new_frac*100:.2f}% "
-                  f"표면적={area*1e4:.0f}cm² 정체 {self._conv_flat}/{CONV_AREA_N}")
-            if self._conv_flat >= CONV_AREA_N:
+                  f"표면적={area*1e4:.0f}cm² 정체 {stall.flat}/{stall.n}")
+            if done:
                 print("[isaac_scan]   수렴 — 새로 보이는 곳이 없다. 완료.")
                 return True
-        if p2.is_converged(cov, 0.012, 0.92):
+        if p2.is_converged(cov, _nbvp.CONV_BOUNDARY_M, _nbvp.CONV_COVERAGE_TAU):
             print("[isaac_scan]   수렴 — 완료.")
             return True
         return False
@@ -1855,8 +1962,21 @@ class IsaacScanSession:
         #   60.8→53.2%. 반대로 90° flip 은 끝면이 수평을 향하므로 낮은 el 이 맞다.
         try:
             seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
-            standoff = WORK_FOCUS + self.obj_radius
-            tgt = np.array([self.axis_b[0], self.axis_b[1], self.obj_center_b[2]])
+            # ★ 조준점 = **새로 드러난 면의 중심**, 축거리 = 그 면까지 **작동거리 창 중앙**.
+            #   예전엔 옆면 공식(물체 중심 조준 + WORK_FOCUS+r)을 그대로 썼다. 180° flip
+            #   을 el=70° 로 내려다보면 새 윗면은 중심보다 h/2 위라 카메라에서
+            #   ≈191mm(세제) — 근접한계 200mm **안쪽**이라 창 필터에 잘리고, 남는 건
+            #   가장자리 스침 점뿐이라 입사각 필터가 전멸시켰다. 실측 2026-09-18:
+            #   flip 패스 240프레임 전부 `incidence후=0`, 합계 +11점.
+            #   새 면 중심 = 원래 바닥면 중심을 flip 회전 R 로 돌려 원판 위로 올린 점.
+            _bot0 = np.array([c[0], c[1], (o0["zlo"] if (o0["zlo"] - c[2]) * self.up_sign < 0 else o0["zhi"])])
+            face_c = R @ (_bot0 - c) + c + np.array([0.0, 0.0, dz])
+            _dof = getattr(self, "_p1_dof", None) or p1.SensorModel().dof
+            standoff = 0.5 * (float(_dof[0]) + float(_dof[1]))     # 표면을 창 중앙에
+            tgt = face_c
+            self._flip_face_c = face_c.copy()          # 테두리 패스(flip_extra_poses)가 쓴다
+            print(f"[isaac_scan]   flip 조준: 새 면 중심 z={(face_c[2]*self.up_sign - float(self.axis_b[2])*self.up_sign)*1000:.0f}mm(원판 위) "
+                  f"표면거리 {standoff*1000:.0f}mm")
             el_cands, el_face, _elmin = self._flip_view_els(ang)
             moved = False
             for eld in el_cands:                            # 도달·충돌로 걸러 첫 성공
@@ -1889,6 +2009,39 @@ class IsaacScanSession:
               f"({i+1}/{len(angles)}) ===")
         return True
 
+    def flip_extra_poses(self):
+        """flip 면 패스 뒤 **테두리 패스** 자세 — [q] 또는 []. 컨트롤러 `_flip_extra_passes`.
+
+        면 패스(el≈70°)는 새 면은 잡지만 **바닥 모서리(필렛)** 를 못 잡는다 — flip 뒤
+        그 면의 법선은 위로 9~25° 라 70° 에서 입사각이 50° 를 넘는다(실측 2026-09-18
+        세제: 바닥 둘레 10~20mm 띠가 빔). el≈45° 에서 조준점(새 면 중심)까지의 축거리를
+        `flip_policy.rim_standoff` 로 잡으면 테두리 근점이 창 중앙(250mm)에 온다.
+        캡처는 면 패스와 같은 flip 경로(hint + 전역/국소 정합)다.
+        """
+        face_c = getattr(self, "_flip_face_c", None)
+        if face_c is None:
+            return []
+        from utils.nbv.flip_policy import rim_standoff, RIM_EL_CANDS_DEG
+        _dof = getattr(self, "_p1_dof", None) or p1.SensorModel().dof
+        wc = 0.5 * (float(_dof[0]) + float(_dof[1]))
+        seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        r = float(self.obj_radius)
+        for eld in RIM_EL_CANDS_DEG:
+            s = rim_standoff(r, eld, wc)
+            if not np.isfinite(s):
+                continue
+            for azd in VIEW_AZIS_DEG:
+                q, _ = self._view_q(np.asarray(face_c, float), float(eld), float(azd), float(s), seed)
+                if q is None:
+                    continue
+                if self._cm is not None and not self._cm.is_pose_safe(q)[0]:
+                    continue
+                print(f"[isaac_scan]   flip 테두리 자세: el={eld:.0f}° az={azd:.0f}° "
+                      f"축거리 {s*1000:.0f}mm (테두리 r={r*1000:.0f}mm → 창 중앙 {wc*1000:.0f}mm)")
+                return [q]
+        print("[isaac_scan]   ⚠ flip 테두리 자세 못 찾음 — 테두리 패스 생략")
+        return []
+
     def finalize(self) -> IsaacScanResult:
         if getattr(self, "_rec", None) is not None:
             self._rec.finish()
@@ -1905,7 +2058,8 @@ class IsaacScanSession:
 
     # ── run — 공용 단계 컨트롤러에 위임 ────────────────────────────────────
     def run(self) -> IsaacScanResult:
-        # stage_until 순차 누적 (sim): 1=lookaround만, 2+=lookaround→2(NBV).
+        # stage_until 순차 누적 (sim): "lookaround"=밴드 캡처까지,
+        # "nbv" 이상=NBV 보강까지. 값은 단계 이름이다(옛 정수도 해석된다).
         # flip(바닥면 flip)은 사용자 손회전 필요 → supports_flip=False (sim 미지원).
         #
         # real 과 **같은 설정**(ArtecProcessSettings.multipass_settings.stage_until)을 따른다.
@@ -1935,12 +2089,22 @@ def _axis_rot(axis: str, ang: float) -> np.ndarray:
 
 # ── 모듈 함수(자기완결) ─────────────────────────────────────────────────────────
 def _voxel(pts, v):
+    """복셀 다운샘플 — 복셀당 첫 점. **단일 정수 키**로 unique 한다.
+
+    ★ 예전 `np.unique(keys, axis=0)` 는 행 단위 unique 라 느리다(구조체 뷰 정렬).
+      프레임마다 불려서 lookaround 프레임 처리시간의 **46~50%**(`crop` 항목,
+      세제 240프레임×6밴드 = 87s) 가 여기였다(2026-09-18 프로파일). 축별 정수를
+      int64 하나로 묶으면 1-D unique 라 4.6배 빠르고(110k 점: 97→21ms) 결과는 같다.
+    """
     pts = np.asarray(pts, float)
     if len(pts) == 0:
         return pts
     keys = np.floor(pts / v).astype(np.int64)
-    _, idx = np.unique(keys, axis=0, return_index=True)
-    return pts[idx]
+    keys -= keys.min(axis=0)                       # 음수 제거 → 안전한 묶기
+    span = keys.max(axis=0) + 1                    # 축별 칸 수
+    flat = (keys[:, 0] * span[1] + keys[:, 1]) * span[2] + keys[:, 2]
+    _, idx = np.unique(flat, return_index=True)
+    return pts[np.sort(idx)]
 
 
 _PCA_CHUNK = 40000          # (N,k,3) 이웃 버퍼 상한 — 메모리 폭주 방지

@@ -49,7 +49,7 @@ env -u PYTHONPATH ~/miniconda3/envs/mms-env/bin/python \
 2. home 이 충돌 게이트를 통과하는가 (여기서 막히면 `is_path_safe` 의 start 검사에
    걸려 **모든 이동이 거부**된다 — 실물에서 하루를 날리기 전에 잡을 것)
 3. lookaround 계획 자세(el × az)의 IK · 충돌 · **home 에서 경로** 통과율
-4. nbv NBV 가 몇 번 · 얼마나 움직이며 도는지
+4. nbv 가 몇 번 · 얼마나 움직이며 도는지
 
 > ### ⚠ sim 으로는 이 점검을 대신할 수 없다
 >

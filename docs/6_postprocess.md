@@ -26,7 +26,7 @@
 | `export_obj_path` / `export_sproj_path` | 결과 저장 경로 | 타임스탬프로 자동 |
 
 캡처는 **streaming(`IScanningProcedure`) 하나**다. `use_multipass_scan` 으로
-멀티패스(lookaround→2→3 · tracking-lost 복구) 여부만 고르고,
+멀티패스(lookaround→nbv→flip · tracking-lost 복구) 여부만 고르고,
 `streaming_scan_settings` / `multipass_settings` 에 각 설정을 넣는다.
 
 > 옛 discrete 경로(`artec_scan_session.py`)와 그걸 고르던 `use_streaming_scan`·

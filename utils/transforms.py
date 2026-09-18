@@ -144,7 +144,7 @@ class TurntableTransformConfig:
     #   lookaround 플래너가 실측 원판 [0.799,0.005,0.688] 대신
     #   [-0.862,0.080,-0.603] (2105mm 떨어진 base 반대쪽)을 겨눴다.
     #   축 방향도 18.1° 틀렸다. 같은 실수가 check_calibration 교차검증,
-    #   nbv NBV 충돌 world, recovery 조준에도 퍼져 있었다.
+    #   nbv 충돌 world, recovery 조준에도 퍼져 있었다.
     #
     #   그래서 계산을 여기 한 곳에 두고 호출부는 이것만 쓴다.
 

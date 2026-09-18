@@ -61,10 +61,11 @@ env -u PYTHONPATH MMS_BACKEND=isaac \
 ### ④ 물체·단계를 바꾸고 싶다
 
 ```bash
-./scripts/sim/run_e2e_gui.sh spray_can 2      # 물체 spray_can, lookaround→2 (⚠ v3 씬)
+./scripts/sim/run_e2e_gui.sh spray_can nbv    # 물체 spray_can, nbv 까지 (⚠ v3 씬)
 ```
-인자는 `[물체] [stage_until] [planner|legacy] [ΔH cm]`. 물체 이름은 부분만 써도 된다
-(`mug` `drill` `detergent` …). `stage_until` 는 누적: `1`=5면 · `2`=+NBV · `3`=+바닥면.
+인자는 `[물체] [stage_until]`. 물체 이름은 부분만 써도 된다
+(`mug` `drill` `detergent` …). `stage_until` 는 단계 이름이고 **앞 단계는 항상 포함**이다:
+`preview`(계획만) · `lookaround`(5면) · `nbv`(+보강) · `flip`(+바닥면).
 ⚠ 이 스크립트는 아직 **v3 씬**을 쓴다 — 실물 배치로 보려면 ② 를 쓸 것.
 
 **헤드리스**(GUI 없이, 원격/CI)로 돌리려면 위 ②에 `MMS_ISAAC_HEADLESS=1` 을 붙인다.
@@ -208,7 +209,7 @@ mms_testset_dir         # 대상물 USD 트리
 
 # lookaround 만 가볍게 9종 순회
 scripts/sim/e2e_sweep.sh
-# 9종 전체 lookaround→2→3 스윕 (물체당 ~5분, summary.tsv 생성)
+# 9종 전체 lookaround→nbv→flip 스윕 (물체당 ~5분, summary.tsv 생성)
 scripts/sim/testset_sweep.sh              # 전체
 scripts/sim/testset_sweep.sh 0146_mug     # 특정 물체만
 ```
@@ -229,8 +230,8 @@ python scripts/sim/build_results_page.py   # docs/testset_results.md 의 웹판 
 | `MMS_SIM_PROFILE_EVERY` | 20 | N프레임마다 단계별 소요시간 (0=끔) |
 | `MMS_SIM_ICP_DEBUG` | 0 | ICP 스케일별 fitness/drift 출력 |
 | `MMS_SIM_STAGE_DUMP` | — | nbv 반복마다 메시+누적점군 덤프 dir |
-| `MMS_SIM_CONV_NEW_EPS` / `_N` | 0.005 / 3 | 전역 수렴 백스톱 (신규복셀 비율/연속횟수) |
-| `MMS_SIM_DRY_EPS` | 0.015 | gap 패치 생산성 판정 (dry 회계) |
+| `MMS_NBV_CONV_NEW_EPS` / `MMS_NBV_CONV_STALL_N` | 0.005 / 3 | 전역 수렴 백스톱 (신규복셀 비율/연속횟수, sim·real 공용) |
+| `MMS_NBV_DRY_EPS` | 0.015 | gap 패치 생산성 판정 (dry 회계, sim·real 공용) |
 | `MMS_SIM_FLIP_ASPECT` | 2.0 | 세장형(90° flip 추가) 종횡비 임계 |
 | `MMS_SIM_FLIP_EL_MIN` / `_MAX` | 30 / 70 | flip 관측 고도각 하한·상한(°) |
 | `MMS_SIM_FLIP_ANGLES` | 자동 | flip 각 명시 (설정 시 정책 무시) |

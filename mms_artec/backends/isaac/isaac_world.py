@@ -93,11 +93,35 @@ START_VIEW_DIR    = (-1.0, 1.0, 0.8)        # 카메라가 놓일 방향(타깃 
 START_VIEW_DIST   = float(os.environ.get("MMS_SIM_VIEW_DIST", "1.1"))
 
 #: 렌더 해상도 (w, h). **세로형** — 실물 Spider 가 960x1280 세로형이다.
-#  FOV 는 아래에서 hfov·vfov 로 직접 지정하므로 해상도는 **표본 밀도만** 정한다.
-#  다만 화소 종횡비가 FOV 종횡비와 어긋나면 화소가 비정방형이 되므로 맞춰 둔다
-#  (288x384 → 28.51° ≈ 실측 28.58°). 화소 수는 옛 값과 같아 성능 영향 없음.
-SCANNER_RESOLUTION      = tuple(int(v) for v in
-                                os.environ.get("MMS_SIM_SCAN_RES", "288,384").split(","))
+#
+#  ★ 세로 FOV 는 **해상도 종횡비가 정한다** — authored `verticalAperture` 가 아니다.
+#    Isaac `Camera` 는 정방 화소를 강제한다: `get_vertical_aperture()` 가
+#    `horizontalAperture × H/W` 로 다시 계산해 authored 값과 다르면 **덮어쓴다**
+#    (isaacsim.sensors.camera/camera.py `_ensure_square_pixels`, 2026-09-18 확인).
+#    내부행렬·point cloud 도 그 값을 쓴다. 그래서 (w,h) 가 곧 FOV 손잡이다.
+#    예전 주석 "해상도는 표본 밀도만 정한다" 는 틀렸고, 288x384 가 28.51° ≈ 28.58° 로
+#    우연히 맞아 아무도 못 알아챘다(GUI 뷰포트가 가로형이면 세로 12° 로 잘려 보인다).
+#  → 기본값은 **FOV 에서 h 를 유도**한다(아래 `_scanner_resolution`). env 로 (w,h) 를
+#    직접 주면 유도값과 0.3° 넘게 어긋날 때 **기동 시 오류**로 막는다 — 조용히
+#    밴드 수가 바뀌는 것보다 낫다. 화소 밀도만 바꾸고 싶으면 w 만 주면 된다.
+def _scanner_resolution():
+    env = os.environ.get("MMS_SIM_SCAN_RES", "").strip()
+    ratio = math.tan(math.radians(SPIDER_VFOV_DEG) / 2.0) / math.tan(math.radians(SPIDER_HFOV_DEG) / 2.0)
+    if not env:
+        w = 288
+        return (w, int(round(w * ratio)))
+    parts = [int(v) for v in env.split(",")]
+    if len(parts) == 1:                          # w 만 → h 유도
+        return (parts[0], int(round(parts[0] * ratio)))
+    w, h = parts[:2]
+    vfov_eff = 2.0 * math.degrees(math.atan(math.tan(math.radians(SPIDER_HFOV_DEG) / 2.0) * h / w))
+    if abs(vfov_eff - SPIDER_VFOV_DEG) > 0.3:
+        raise ValueError(
+            f"MMS_SIM_SCAN_RES={w},{h} 는 세로 FOV 를 {vfov_eff:.2f}° 로 만든다 "
+            f"(센서 모델 {SPIDER_VFOV_DEG:.2f}°). Isaac 은 정방 화소를 강제해 해상도 종횡비가 "
+            f"곧 FOV 다. h={int(round(w * ratio))} 로 주거나 w 만 주면 된다.")
+    return (w, h)
+SCANNER_RESOLUTION      = _scanner_resolution()
 
 # 드라이브 게인 (트램블링 방지) / joint1 한계 정상화
 DRIVE_STIFFNESS        = 2000.0
@@ -138,9 +162,27 @@ class IsaacWorld:
         self._ArticulationActionImported = False
 
         # ── 3. stage 열기 + 광학/한계 설정 ───────────────────────────────────
+        # ★ 파일이 있는지 **먼저** 본다. 없으면 `open_stage` 는 조용히 실패하고
+        #   `get_stage()` 가 None 을 돌려주는데, 그 뒤 첫 사용처에서
+        #   `AttributeError: 'NoneType' object has no attribute 'GetPrimAtPath'`
+        #   가 난다 — 진짜 원인(경로)이 트레이스백 어디에도 안 보인다.
+        #   2026-09-17: `MMS_SIM_USD="$ASSET/..."` 에서 $ASSET 이 비어 15초를
+        #   기동하고 저 에러로 끝났다. 흔한 실수라 여기서 잡는다.
+        if not os.path.isfile(self.usd_path):
+            raise FileNotFoundError(
+                f"씬 USD 가 없다: {self.usd_path!r}\n"
+                f"  · 경로가 비었거나 잘렸으면 MMS_SIM_USD 를 확인할 것 "
+                f"(셸 변수가 안 풀렸을 수 있다)\n"
+                f"  · 지정 안 하면 기본 씬을 쓴다: {DEFAULT_USD_PATH}\n"
+                f"  · 자산 루트: MMS_ASSET_ROOT (지금 {asset('')!r})")
         print(f"[IsaacWorld] Opening USD: {self.usd_path}")
         open_stage(usd_path=self.usd_path)
         self.stage = omni.usd.get_context().get_stage()
+        if self.stage is None:
+            raise RuntimeError(
+                f"씬 USD 를 열지 못했다: {self.usd_path!r}\n"
+                f"  파일은 있는데 USD 가 못 읽는다 — 손상됐거나 USD 가 아닐 수 있다.\n"
+                f"  `usdview` 로 직접 열어 확인할 것.")
 
         self._widen_joint1_limit()
         self._configure_scanner_camera()
@@ -225,6 +267,18 @@ class IsaacWorld:
             get_active_viewport().set_active_camera(cam_path)
             print(f"[IsaacWorld] 시작 시점: eye={_np.round(eye,2).tolist()} → "
                   f"target={tgt.tolist()}")
+            # ★ 뷰포트 종횡비 정책 = **fit**. Kit 기본(설정 없음 = 1, match-horizontal)은
+            #   가로 조리개만 지키고 세로를 창 종횡비로 잘라, 스캐너 카메라(3:4 세로형)를
+            #   16:9 뷰포트로 보면 세로 28.6° 중 12° 만 보인다 — 저장되는 디버그 PNG
+            #   (오프스크린 288x385)와 "비율이 다르다" 로 보인 원인(2026-09-18).
+            #   fit(=2) 이면 카메라 프레임 전체를 좌우 여백을 두고 보여줘 PNG 와 같다.
+            #   값 정의: omni.kit.widget.viewport/api.py (0 vertical·1 horizontal·2 fit·3 crop).
+            try:
+                import carb
+                carb.settings.get_settings().set("/app/hydra/aperture/conform", 2)
+                print("[IsaacWorld] 뷰포트 aperture conform = fit (스캐너 카메라를 PNG 와 같은 비율로)")
+            except Exception as e:                               # noqa: BLE001
+                print(f"[IsaacWorld][WARN] aperture conform 설정 실패(무시): {e}")
         except Exception as e:                                   # noqa: BLE001
             print(f"[IsaacWorld][WARN] 시작 시점 설정 실패(무시): {type(e).__name__}: {e}")
 
@@ -244,16 +298,20 @@ class IsaacWorld:
         h_ap_attr = cam.GetAttribute("horizontalAperture")
         h_aperture = float(h_ap_attr.Get()) if h_ap_attr.IsValid() and h_ap_attr.Get() else 20.5
         focal = h_aperture / (2.0 * math.tan(math.radians(SPIDER_HFOV_DEG) / 2.0))
-        # ★ 세로 조리개를 **vfov 로 직접** 잡는다 — 예전처럼 해상도 종횡비에서
-        #   유도하면 해상도를 바꿀 때 FOV 가 같이 바뀌어 버린다(표본 밀도와 광학이
-        #   엉킨다). 이제 해상도는 밀도만, FOV 는 SensorModel 만 정한다.
-        v_aperture = 2.0 * focal * math.tan(math.radians(SPIDER_VFOV_DEG) / 2.0)
+        # ★ 세로 조리개는 **해상도 종횡비에서** 잡는다 — Isaac `Camera` 가 정방 화소를
+        #   강제해 어차피 이 값으로 덮어쓰기 때문이다(`SCANNER_RESOLUTION` 주석).
+        #   vfov 로 직접 잡던 예전 코드는 authored 값만 바꿨고 렌더는 안 따라왔다.
+        #   FOV 일치는 `_scanner_resolution()` 이 해상도 쪽에서 보장한다.
+        w_px, h_px = SCANNER_RESOLUTION
+        v_aperture = h_aperture * float(h_px) / float(w_px)
+        vfov_eff = 2.0 * math.degrees(math.atan(v_aperture / (2.0 * focal)))
 
         _attr("focalLength",        Sdf.ValueTypeNames.Float, float(focal))
         _attr("horizontalAperture", Sdf.ValueTypeNames.Float, float(h_aperture))
         _attr("verticalAperture",   Sdf.ValueTypeNames.Float, float(v_aperture))
         print(f"[IsaacWorld] 스캐너 FOV {SPIDER_HFOV_DEG:.2f}deg(가로) x "
-              f"{SPIDER_VFOV_DEG:.2f}deg(세로)  해상도 {SCANNER_RESOLUTION}")
+              f"{vfov_eff:.2f}deg(세로, 해상도 {SCANNER_RESOLUTION} 에서 유도; "
+              f"센서 모델 {SPIDER_VFOV_DEG:.2f}deg)")
         _attr("clippingRange",      Sdf.ValueTypeNames.Float2,
               Gf.Vec2f(float(SPIDER_CLIP_RANGE[0]), float(SPIDER_CLIP_RANGE[1])))
         _attr("focusDistance",      Sdf.ValueTypeNames.Float, float(SPIDER_FOCUS_DISTANCE))

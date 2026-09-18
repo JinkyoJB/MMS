@@ -313,11 +313,14 @@ env -u PYTHONPATH MMS_BACKEND=isaac MMS_SIM_WD_FILTER=0 \
 
 ### 3. lookaround — 5면 스캐닝 (streaming SLAM + view planning)  ✅🔬
 
-로봇을 한 자세에 고정하고 턴테이블을 360° 돌려 측면·윗면을 얻는다.
+물체를 **높이 방향 밴드로 썰어**, 밴드마다 로봇을 그 높이의 자세로 옮기고 턴테이블을
+360° 돌린다. 한 자세가 물체를 다 덮으면 밴드는 1개다.
 Artec 은 frame-to-frame 상대 정합이라 **overlap 유지**가 전부다 — 연속 회전 + max FPS.
+밴드 전체가 **한 IScan** 이라 밴드 사이 이동 중에도 SLAM 이 붙어 있어야 한다.
 
-- 자세 선정: elevation view-score (최적 작업거리 225mm 근처 · FOV 안, **최악 프레임 기준**)
-- 커버 부족(z-커버율 <0.75) 시 밴드 분할, 안전한 밴드부터
+- 자세 선정: 밴드마다 elevation view-score 재채점 (**최악 프레임 기준**)
+- 밴드 수는 겹침을 **측정해서** 정한다. 캡처 순서는 **z 단조**(safe-first 아님)
+- 밴드 시작마다 축거리를 창 중앙으로 보정 (`StandoffTracker`)
 - 추적 감시 4종 watchdog + 3회 자동 recovery
 - ★ 정합 알고리즘은 **`HYBRID`** — `ICP` 는 빈 턴테이블에도 정합 성공해 lost 를 놓친다
 

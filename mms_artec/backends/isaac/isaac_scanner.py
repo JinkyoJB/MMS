@@ -59,9 +59,20 @@ class IsaacArtecScanner:
         sim 카메라 포즈가 ground-truth. SLAM 추적 개념 없음.)
         """
         cam = self._world.ensure_camera()
-        for _ in range(int(settle)):
-            self._world.world.step(render=True)
-        pc = cam.get_pointcloud()
+        # ★ 디버그 오버레이를 **캡처 동안 숨긴다.** `get_pointcloud()` 는 씬을
+        #   렌더해서 만들기 때문에, 오버레이가 보이면 그게 그대로 점군이 된다 —
+        #   누적 점군을 그리면 다음 캡처에 자기 자신이 다시 들어오고(되먹임),
+        #   장애물 가드 원기둥은 물체 대신 그게 측량된다(2026-09-17).
+        #   `purpose=guide` 로도 막지만, 렌더러 설정에 따라 guide 를 그리는 경우가
+        #   있어 여기서 한 번 더 막는다. 비용은 가시성 토글 한 번이다.
+        from mms_artec.backends.isaac import isaac_debug_viz as _dbgviz
+        _dbgviz.set_hidden(self._world.stage, True)
+        try:
+            for _ in range(int(settle)):
+                self._world.world.step(render=True)
+            pc = cam.get_pointcloud()
+        finally:
+            _dbgviz.set_hidden(self._world.stage, False)
         if pc is None or len(pc) == 0:
             return np.zeros((0, 3))
         pc = np.asarray(pc, dtype=float)
@@ -115,10 +126,16 @@ class IsaacArtecScanner:
         """
         from mms_artec.backends.isaac.isaac_world import CAMERA_PRIM
         cam = self._world.ensure_camera()
-        for _ in range(int(settle)):
-            self._world.world.step(render=True)
-        depth = np.asarray(cam.get_depth())
-        rgba = np.asarray(cam.get_rgba())
+        # 캡처 경로는 전부 오버레이를 숨긴다 (위 `capture_points_base` 주석 참조).
+        from mms_artec.backends.isaac import isaac_debug_viz as _dbgviz
+        _dbgviz.set_hidden(self._world.stage, True)
+        try:
+            for _ in range(int(settle)):
+                self._world.world.step(render=True)
+            depth = np.asarray(cam.get_depth())
+            rgba = np.asarray(cam.get_rgba())
+        finally:
+            _dbgviz.set_hidden(self._world.stage, False)
         H, Wd = depth.shape
         gray = (0.299 * rgba[:, :, 0] + 0.587 * rgba[:, :, 1]
                 + 0.114 * rgba[:, :, 2]).astype(np.uint8)

@@ -146,7 +146,7 @@ def main() -> None:
         print(f"   {el:>5.0f} | " + "".join(f"{c:>10}" for c in cells))
     print(f"   합계 {n_cell}칸 — IK {tot_ik} · 충돌통과 {tot_ok} · home 에서 경로 {tot_path}")
 
-    # ── 4. nbv NBV 모사 ───────────────────────────────────────────
+    # ── 4. nbv 모사 ───────────────────────────────────────────
     print("\n" + "═" * 72)
     print(f"4. nbv 축-고도각 NBV {a.iters}회 모사 (가짜 gap · 충돌 게이트 적용)")
     gaps = [_Gap(np.array([0.77, 0., 0.64])), _Gap(np.array([0., 0.77, 0.64])),
