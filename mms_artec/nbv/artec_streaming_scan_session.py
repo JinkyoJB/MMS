@@ -651,7 +651,11 @@ class ArtecStreamingScanSession:
                 #   표면거리를 재서 축거리만 고친다. 회전 중이 아니라 여기서 하는
                 #   이유: 밴드 경계는 이미 로봇이 움직이고 settle 하는 자리라
                 #   추가 위험이 0 이다(회전+이동이 겹치면 SLAM 이 흔들린다).
-                self._track_standoff(session, _band_q, _bi, len(bands))
+                _live = self._track_standoff(session, _band_q, _bi, len(bands))
+                # 회전 중 거리추종(live) 상태 — 트래커·현재 축거리·재겨냥 콜백.
+                _live_trk, _live_d, _live_rt = (_live if _live else (None, 0.0, None))
+                _live_since = 0            # 마지막 판정 이후 OK 프레임 수
+                _last_ok_v = None          # 최근 OK 프레임 정점 (스캐너 프레임, m)
                 vel_rad_s = (2.0 * np.pi) / s.rotation_duration_s
                 if s.sweep_rad is not None:            # 부분 스윕 (nbv gap 겨냥)
                     target_rad = float(abs(s.sweep_rad)) \
@@ -722,6 +726,38 @@ class ArtecStreamingScanSession:
                         #   둘 다 IScan 에 들어가니 viewer 에서도 통과시켜야 거짓말 없음.
                         if events:
                             _lv_ev += len(events)
+                        # ── 거리추종 live — 회전 중에도 축거리를 창 중앙으로 ──────
+                        #  sim 과 같은 `StandoffTracker.update()`. 측정은 최근 OK
+                        #  프레임의 정점(스캐너 프레임, 원점=카메라)이라 hand-eye 가
+                        #  안 낀다. 이동은 밴드 경계와 같은 `move_robot_fn`(녹화 유지,
+                        #  느린 속도)이고 1회 ≤ TRACK_MAX_STEP_M(25mm). 이동 중엔
+                        #  프레임이 비므로 stall watchdog 기준점을 다시 찍는다.
+                        #  ⚠ 회전+이동이 겹칠 때 SLAM 이 붙어 있는지는 실기 확인
+                        #    항목이다 — 깨지면 MMS_STANDOFF_TRACK_STEP_MM·_EVERY 를
+                        #    조이고, 그래도 안 되면 MMS_STANDOFF_TRACK=band.
+                        if events and _live_trk is not None and _live_trk.mode == "live":
+                            try:
+                                FS = artec_scanning.FrameState
+                                for ev in events:
+                                    if ev.frame_state == FS.OK and ev.frame_mesh is not None:
+                                        _live_since += 1
+                                        _v = ev.frame_mesh.vertices()
+                                        if _v is not None and len(_v):
+                                            _last_ok_v = np.asarray(_v, float) / 1000.0
+                            except Exception:                    # noqa: BLE001
+                                pass
+                            if _live_since >= _live_trk.every and _last_ok_v is not None:
+                                _live_since = 0
+                                try:
+                                    _d_new = _live_trk.update(
+                                        int(tracking.frames_ok), _live_d, _last_ok_v,
+                                        np.zeros(3), _live_rt)
+                                except Exception as e:           # noqa: BLE001
+                                    print(f"  [거리추종] live 판정 실패({e}) — 유지")
+                                    _d_new = _live_d
+                                if _d_new != _live_d:
+                                    _live_d = _d_new
+                                    tracking.mark_started()      # 이동 공백 = stall 아님
                         if live is not None and live_ok and events:
                             try:
                                 FS = artec_scanning.FrameState
@@ -964,27 +1000,38 @@ class ArtecStreamingScanSession:
             return None
         return best / 1000.0                     # mm → m (원점 = 카메라)
 
-    def _track_standoff(self, session, band_q, band_i: int, n_bands: int) -> None:
-        """밴드 시작에서 축거리를 작동거리 창 중앙으로 1회 보정한다.
+    def _track_standoff(self, session, band_q, band_i: int, n_bands: int):
+        """밴드 시작에서 축거리를 작동거리 창 중앙으로 보정하고, **트래커를 돌려준다**.
 
+        반환 = (tracker, 현재 축거리 m, retarget(d)->bool) 또는 None.
         판단은 sim 과 **같은** `StandoffTracker` 가 한다. 실패(측정 없음·IK·충돌)는
         전부 무시하고 계획 거리 그대로 간다 — 밴드를 버리는 것보다 낫다.
+
+        ★ 2026-09-18 까지 real 은 여기 **밴드 시작 1회**뿐이었고 `live` 모드는
+          sim 에만 배선돼 있었다. 이제 회전 루프가 반환된 트래커로 `TRACK_EVERY`
+          OK 프레임마다 `update()` 를 부른다(아래 밴드 루프 "거리추종 live").
         """
         if (self.retarget_fn is None or self.standoff_of is None
                 or self.move_robot_fn is None or band_q is None):
-            return
-        from utils.nbv.standoff import StandoffTracker
+            return None
+        from utils.nbv.standoff import StandoffTracker, core_mask_camera_frame
         d0 = self.standoff_of(band_q)
         if d0 is None:
-            return
+            return None
         dof = self.scan_range or (0.20, 0.30)
+        # ★ 표면거리는 **밴드 핵심 높이대**(광축 세로 ±9.5°)의 점으로 잰다.
+        #   프레임 전체 중앙값은 내려다보는 자세에서 가까운 윗부분에 끌려 카메라를
+        #   물리고, 그러면 창의 먼 끝이 이 밴드가 맡은 아랫부분을 자른다
+        #   (2026-09-18 sim 실측: tz=32mm 밴드가 50~138mm 만 잡음). sim 은 같은
+        #   것을 base 높이 ±40mm 로 넘긴다 — 정의는 `standoff.TRACK_CORE_HALF_*`.
         trk = StandoffTracker(dof, max(0.05, d0 - 0.12), d0 + 0.12,
-                              log=lambda m: print(f" {m}"))
+                              log=lambda m: print(f" {m}"),
+                              core=core_mask_camera_frame)
         if not trk.enabled:
-            return
+            return None
         if self._latest_frame_ranges_m(session) is None:
             print(f"  [거리추종] band {band_i+1}/{n_bands} — OK 프레임이 없어 건너뜀")
-            return
+            return None
 
         def _retarget(d_new) -> bool:
             qn = self.retarget_fn(band_q, float(d_new))
@@ -1009,6 +1056,7 @@ class ArtecStreamingScanSession:
             while time.time() - t0 < self.s.band_settle_s:
                 session.poll_events()
                 time.sleep(self.s.poll_interval_s)
+        return trk, float(d1), _retarget
 
     def _reset_turntable_to_zero(self, reset_vel_rad_s: float = np.radians(30.0)) -> bool:
         """

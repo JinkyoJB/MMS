@@ -22,10 +22,10 @@ nbv 만 따로 돌릴 수는 없다 — 메울 구멍이 있어야 하므로 `st
 
 | 환경변수 | 뜻 | 기본 |
 |---|---|---|
-| `MMS_SIM_NBV_K` | NBV 최대 반복 | 8 |
+| `MMS_NBV_K_MAX` | NBV 최대 반복 (sim·real 공용) | 12 |
 | `MMS_SIM_NBV_SPAN` | 목표 θ 중심 스윕 폭(°) | 90 (±45°) |
-| `MMS_SIM_DRY_EPS` | 패치 생산성 판정(신규 복셀 비율) | 0.015 |
-| `MMS_SIM_CONV_NEW_EPS` / `_AREA_N` | 전역 백스톱(비율 / 연속 횟수) | 0.005 / 3 |
+| `MMS_NBV_DRY_EPS` | 패치 생산성 판정(신규 복셀 비율, sim·real 공용) | 0.015 |
+| `MMS_NBV_CONV_NEW_EPS` / `MMS_NBV_CONV_STALL_N` | 전역 백스톱(비율 / 연속 횟수, sim·real 공용) | 0.005 / 3 |
 | `MMS_SIM_ENSURE_ELS` | 반드시 한 번은 방문할 고도각(°) | 55 |
 | `MMS_SIM_STAGE_DUMP` | 반복마다 메시·누적점군 덤프 디렉터리 | (끔) |
 | `MMS_SIM_PROFILE_EVERY` | N 프레임마다 단계별 소요시간 (0=끔) | 20 |
@@ -45,7 +45,7 @@ nbv 만 따로 돌릴 수는 없다 — 메울 구멍이 있어야 하므로 `st
 | `nbv_ensure_els_deg` | `(55,)` | gap 과 무관하게 한 번은 갈 고도각 (오목 내부 대비) |
 | `nbv_view_azis_deg` | `(0, 30, -30)` | 축-고도각 방위 후보 |
 | `nbv_turntable_radius_mm` / `_body_height_mm` / `_collision_margin_mm` | 150 / 200 / 10 | 충돌 world 치수 — **실제 셀 측정치로 보정할 것**(T2) |
-| `MMS_REAL_DRY_GAP` / `MMS_REAL_DRY_EPS` | 1 / 0.015 | gap 회계 on-off, 생산성 임계 |
+| `MMS_REAL_DRY_GAP` / `MMS_NBV_DRY_EPS` | 1 / 0.015 | gap 회계 on-off(real), 생산성 임계(sim·real 공용) |
 
 ---
 
@@ -57,10 +57,31 @@ nbv 만 따로 돌릴 수는 없다 — 메울 구멍이 있어야 하므로 `st
 | | sim | real |
 |---|---|---|
 | 자세 선정 | ① ensure_el → ② gap 직접 겨냥 → ③ 축-고도각 | **같은 3단**(2026-09-10 배선) |
-| 캡처 범위 | ② 는 목표 θ 중심 **부분 스윕**(±45°), ①③ 은 전회전 | **같음**(2026-09-16 배선, T6) |
-| 병합 | GT θ 누적이라 정합 불필요 | camera-motion `T_pre` + ICP (§5) |
+| 캡처 범위 | ② 목표 θ 중심 **부분 스윕**(±45°) · ③ 폴백은 gap 군집 중심 **±90°**(2026-09-18) · ① ensure_el 은 전회전이지만 **윗면 개구부가 있을 때만** 돈다(`needs_ensure`) | **같음** |
+| 병합 | 기구학(identity) 초기값 → **공용 `refine_to_master`** (다단 point-to-plane ICP + RMSE/fitness/drift(단계·누적)/팽창 게이트) | camera-motion `T_pre` 초기값 → **같은 함수**(2026-09-18 배선. 그 전엔 nbv 는 정합 없이 T_pre 만, flip 은 colored ICP) |
 | SDK relocalization | 개념 없음 | **미배선**(T5). `nbv_use_relocalization=True` 여도 실제로는 위 경로로 간다 |
 | 수렴 회계 기준 | 누적 **원시 점군**의 신규 복셀 | master **메시 정점**의 신규 복셀 |
+
+### 디버그 뷰어 — 겨냥·수집·정합을 그림으로 (sim·real 공용, 2026-09-18)
+
+반복마다 `output/debug/nbv/nbv_<런>_<NN>.npz` + `.png` 가 남는다(`utils/nbv/nbv_debug_dump.py`,
+끄기 `MMS_NBV_DEBUG=0`). 담기는 것: master 점군(회색) · gap 후보 전부(주황, 크기=L) ·
+고른 gap(빨강) · 카메라 프러스텀과 광축(파랑) · 스윕 구간(초록) · 찍힌 점(노랑) ·
+정합 후 점(연두) · 정합 결과(ok/fitness/Δt). PNG 는 창 없이도 생기고(위·옆 두 시점),
+창으로 보려면 **다른 터미널에서**:
+
+```bash
+conda activate mms-env && python scripts/nbv/nbv_debug_view.py     # [ ] 로 반복 이동
+```
+
+확인 순서: 파란 프러스텀이 빨간 gap 을 담고 있나(겨냥) → 노란 점이 그 gap 자리에 있나(수집)
+→ 연두가 노랑에서 크게 안 벗어나고 회색과 이어지나(정합).
+
+이 뷰어로 처음 잡은 결함(2026-09-18, 세제): 바닥 테두리 gap 을 겨냥한 패치가 **정합에서
+18.6mm 밀려 붙었는데 게이트를 전부 통과**했다 — 패치 대부분이 새 면이라 ICP 가 기존 면으로
+미끄러진 것. 그래서 ① 정합은 초기 자세에서 master 와 8mm 안에 겹치는 점만 쓰고(`REFINE_OVERLAP_R_M`),
+② 패치 보정 한계를 8mm/2°(초기값 오차 크기)로 내렸고(`REFINE_DRIFT`), ③ 원판 위 25mm 안의
+gap 은 frontier 에서 뺐다(`FRONTIER_MIN_HEIGHT_M` — flip 몫).
 
 **실물 통합에서 가장 불확실한 지점은 병합이다.** 자세를 어디로 보낼지는 sim 이
 담보하지만, 로봇이 이동한 뒤 새 스캔이 기존 master 에 제대로 붙느냐는 실물에서만
@@ -173,8 +194,9 @@ d(θ_t) = normalize(n̂·cos θ_t + ẑ·sin θ_t)      θ_t ∈ {0, 30, 45, 60,
 `nbv_swept_steps`(12) 지점으로 나눠 전부 검사한다(`swept_pose_collision`). 한 곳이라도
 걸리면 그 후보를 버린다. 끝점이 포함되므로 단일 자세 검사를 대체한다.
 
-lookaround 은 로봇이 고정이라 필요 없던 검사다 — 여기서는 **가는 길이 문제**다. SDK IK 는
-쓰지 않는다(2026-06 결정, `collision.md` §3).
+lookaround 도 밴드마다 자세를 옮기므로 같은 검사가 필요하지만, 거기서는 이동이 z 방향
+이웃 밴드로 짧다. nbv 는 gap 을 겨냥해 **반대편으로도 크게 돌므로 가는 길이 문제**가 된다.
+SDK IK 는 쓰지 않는다(2026-06 결정, `collision.md` §3).
 
 ---
 
@@ -269,7 +291,7 @@ utils/collision/robot_collision.py # swept_pose_collision / collision_free_ik
 utils/control/theta_planner.py     # DEFAULT_JOINT_WEIGHTS, θ assist 최소이동
 
 mms_artec/nbv/artec_multipass_scan_session.py   ★ real nbv
-    _build_master_mesh_B · _nbv_feasible_q · _rank_nbv_candidates
+    _build_master_mesh_B · _nbv_feasible_q
     _capture_nbv_pose · _merge_into_master · is_converged · _build_collision_world
 mms_artec/backends/isaac/isaac_scan_session.py  # sim (_scan_patch 부분 스윕)
 
@@ -334,9 +356,10 @@ gap 직접 겨냥(②)의 캡처는 이제 **목표 θ 중심 부분 스윕**이
 
 ⚠ 실기 검증 전이다.
 
-참고로 `_rank_nbv_candidates`, `nbv_pose_from_candidate`, `NbvPlanner.split_inward` 은
-**정의만 있고 호출부가 없다**(per-gap 정면 방식의 잔재, 2026-06-30 캡처 통일 때 대체).
-코드를 읽을 때 현행으로 오해하지 말 것.
+참고로 `nbv_pose_from_candidate`, `NbvPlanner.split_inward` 은 **정의만 있고 호출부가
+없다**(per-gap 정면 방식의 잔재, 2026-06-30 캡처 통일 때 대체). 같은 잔재였던
+`_rank_nbv_candidates`·`geometric_cost` 는 2026-09-18 에 지웠다. 코드를 읽을 때
+현행으로 오해하지 말 것.
 
 ### T7. 〔死조건〕 `is_converged` 의 boundary 임계는 발동한 적이 없다
 경계 총길이 12mm 미만을 요구하는데 실측은 130~900mm 다. **한 번도 참이 된 적이 없다**

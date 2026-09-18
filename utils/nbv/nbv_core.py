@@ -220,22 +220,6 @@ def joint_motion_cost(
     return float(np.sum(np.asarray(weights, float) * dq * dq)) - delta * L_hat
 
 
-def geometric_cost(
-    cand: FrontierCandidate,
-    T_CB_des: np.ndarray,
-    p_cam_prev: np.ndarray,
-    L_max: float,
-    delta: float = 0.3,
-) -> float:
-    """
-    대안(Cartesian) — 관절 q 를 못 구할 때의 카메라 이동거리 기준.
-    cost = ‖Δp_cam‖² − δ·L̂. **기본은 `joint_motion_cost`** (관절공간이 직접 목표).
-    """
-    dp = T_CB_des[:3, 3] - np.asarray(p_cam_prev)
-    L_hat = cand.L / max(L_max, 1e-9)
-    return float(dp @ dp) - delta * L_hat
-
-
 def gap_normal_elevations_deg(gaps, top_k: int = 8,
                               up_sign: float = +1.0) -> List[float]:
     """큰 gap 들의 바깥법선 elevation(수평 위 각도, deg). 윗면 gap≈90°, 측면≈0°.
