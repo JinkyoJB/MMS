@@ -197,6 +197,94 @@ def check_min_pts() -> int:
     return 0 if ok else 1
 
 
+def check_obstacle_envelope() -> int:
+    """대상물 장애물이 **회전 불변**이고 자세를 안 막는가."""
+    import math
+    from utils.nbv.lookaround import revolution_envelope
+    rng = np.random.default_rng(0)
+    ax, ad = np.zeros(3), np.array([0.0, 0.0, 1.0])
+    # 손잡이 달린 비대칭 물체 (몸통 r=34mm + 한쪽 돌출 r=90mm)
+    t = rng.uniform(0, 2 * np.pi, 3000)
+    P = np.vstack([
+        np.c_[0.034 * np.cos(t), 0.034 * np.sin(t), rng.uniform(0, 0.20, 3000)],
+        np.c_[rng.uniform(0.04, 0.09, 300), rng.uniform(-0.01, 0.01, 300),
+              rng.uniform(0.10, 0.13, 300)]])
+    E = revolution_envelope(P, ax, ad)
+    bad = 0
+
+    # ① 회전 불변 — 물체를 θ 만큼 돌려도 외피 안에 들어가야 한다
+    worst = 0.0
+    for deg in (17, 53, 91, 137, 210, 300):
+        a = math.radians(deg)
+        R = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0],
+                      [0, 0, 1.0]])
+        Q = P @ R.T
+        # 각 점이 그 높이의 외피 반경 안에 있는가
+        for z0, z1 in [(0.10, 0.13), (0.0, 0.20)]:
+            m = (Q[:, 2] > z0) & (Q[:, 2] < z1)
+            e = (E[:, 2] > z0) & (E[:, 2] < z1)
+            if not m.any() or not e.any():
+                continue
+            rq = np.linalg.norm(Q[m, :2], axis=1).max()
+            re = np.linalg.norm(E[e, :2], axis=1).max()
+            worst = max(worst, rq - re)
+    ok = worst <= 1e-6
+    bad += 0 if ok else 1
+    print(f"  {'✓' if ok else '✘'} 회전 불변 — 6개 각도에서 외피 밖으로 "
+          f"{worst*1000:+.2f}mm (0 이하여야 함)")
+
+    # ② 실제 쓰이는 자세를 기각하지 않는가
+    #    ⚠ **3D 로 본다.** 수평거리만 비교하면 안 된다 — el 이 크면 카메라가
+    #      물체 **위**에 있어서 수평거리가 반경보다 작아도 충돌이 아니다.
+    #      충돌 게이트(SDF)도 3D 거리로 판정하므로 여기도 같아야 한다.
+    from utils.collision.collision_model import SCAN_OBSTACLE_MARGIN_M as M
+    z_top = float(P[:, 2].max())
+    for name, el, d, tz in [("lookaround", 30, 0.284, 0.5 * z_top),
+                            ("nbv", 50, 0.259, 0.5 * z_top),
+                            ("flip/뚜껑", 70, 0.259, 0.9 * z_top)]:
+        a = math.radians(el)
+        tgt = np.array([0.0, 0.0, tz])
+        eye = tgt + d * np.array([math.cos(a), 0.0, math.sin(a)])
+        clear = float(np.linalg.norm(E - eye, axis=1).min())
+        good = clear > M
+        bad += 0 if good else 1
+        print(f"  {'✓' if good else '✘'} {name:10s} el={el}° "
+              f"카메라↔외피 {clear*1000:.0f}mm  (여유 {M*1000:.0f}mm 필요)")
+    return bad
+
+
+def check_evidence() -> int:
+    """플래너가 "못 본 방위" 를 "없는 면" 으로 읽지 않는가 (2026-09-18 세제 회귀).
+
+    원통을 하나는 전 방위, 하나는 카메라 쪽 반원만 남긴 점군으로 채점한다.
+    반쪽 점군에서 minfill 이 0 으로 무너지면 회귀다 — 그것이 아랫밴드 전부를
+    기각시킨 원인이었다. 전 방위 점군은 근거 없는 각도가 없어야 한다.
+    """
+    import math
+    from utils.nbv import lookaround as p1
+    th = np.linspace(0, 2 * math.pi, 720, endpoint=False)
+    z = np.linspace(0.0, 0.10, 40)
+    T, Z = np.meshgrid(th, z)
+    r = 0.06
+    full = np.column_stack([r * np.cos(T).ravel(), r * np.sin(T).ravel(), Z.ravel()])
+    half = full[np.cos(T).ravel() > 0]            # 카메라(+X) 쪽 반원만
+    S = p1.SensorModel()
+    pose = p1.make_view_pose((0.0, 0.0), 0.05, 30.0, 0.0, 0.22 + r, +1.0)
+    bad = 0
+    for name, P in (("전 방위", full), ("반원만", half)):
+        n = p1.estimate_outward_normals(P, (0.0, 0.0))
+        ev = p1.evaluate_viewpoint(P, n, (0.0, 0.0), pose, S, n_theta=36)
+        ok = ev.min_fill_cm2 > p1.FILL_HARD_MIN_CM2
+        if name == "전 방위":
+            ok = ok and ev.unknown_frac == 0.0
+        else:
+            ok = ok and 0.25 < ev.unknown_frac < 0.75   # 진실 50%, 섹터 폭만큼 과신 허용
+        bad += 0 if ok else 1
+        print(f"  {'✓' if ok else '✘'} {name}: minfill={ev.min_fill_cm2:.1f}cm² "
+              f"근거없는 방위={ev.unknown_frac*100:.0f}%")
+    return bad
+
+
 def main() -> None:
     print("preview 콜백 계약 (AST)")
     bad = check_returns()
@@ -208,6 +296,10 @@ def main() -> None:
     bad += check_min_pts()
     print("\n반환 0 탐침 수열 (양쪽 브래킷)")
     bad += check_probe_sequence()
+    print("\npreview 가 못 본 방위 (없는 면으로 읽지 않는가)")
+    bad += check_evidence()
+    print("\n대상물 장애물 회전체 외피")
+    bad += check_obstacle_envelope()
     print("\n" + ("✓ 전부 통과" if not bad else f"✘ 실패 {bad}건"))
     raise SystemExit(1 if bad else 0)
 

@@ -89,13 +89,25 @@ def preview_start_distance(dof) -> float:
 #  모드 (`MMS_STANDOFF_TRACK`)
 #  --------------------------
 #    off   기존 동작 — 계획 거리 그대로
-#    band  ★ 기본. **밴드 시작(θ=0, 턴테이블 정지)에서 1회** 보정하고 회전.
+#    band  **밴드 시작(θ=0, 턴테이블 정지)에서 1회** 보정하고 회전.
 #          로봇이 서 있는 동안만 움직이므로 real 에서도 추가 위험이 없다
 #          (이미 밴드 경계에서 로봇이 이동하고 settle 하는 그 자리다).
-#    live  회전 중 `every` 프레임마다 보정. 비원통 물체에 가장 좋지만 real 에서는
-#          **회전+로봇이동이 겹쳐** SLAM 이 흔들릴 수 있다(밴드 경계에서 굳이
-#          settle 을 넣는 이유가 그것이다). 실물 검증 전까지 opt-in 으로 둔다.
-TRACK_MODE: str = os.environ.get("MMS_STANDOFF_TRACK", "band").strip().lower()
+#    live  ★ 기본(2026-09-18). 회전 중 `every` 프레임마다 보정. 비원통 물체는
+#          한 바퀴 안에서 표면거리가 출렁이므로(세제: 반경 45↔97mm) θ=0 의
+#          한 값으로 못 박으면 다른 방위에서 창 밖으로 나간다.
+#          가림 반영 모사(세제 preview 점군, 240프레임, 2026-09-18):
+#              밴드      프레임당 점    합집합 커버   연속프레임 겹침 최소
+#              tz=32mm   2142 → 2228    60.7 → 62.3%   82 → 81%
+#              tz=91mm   1904 → 2126    54.5 → 59.3%   86 → 62%   (30~45mm 7→42%)
+#              tz=149mm   664 → 1042    27.5 → 35.4%   74 → 46%
+#          점·커버는 늘고, 대가는 **보정 순간의 연속 프레임 겹침**이 46~62% 로
+#          내려가는 것이다. 실물 SLAM 이 그 겹침에서 붙어 있는지가 유일한 미검증
+#          항목 — 실기에서 확인할 것. 깨지면 `TRACK_MAX_STEP_M`·`TRACK_EVERY` 를
+#          조여서(더 작게·더 자주) 해결하는 것이 순서이고, band 로 되돌리는 것은
+#          그 다음이다. 되돌리려면 MMS_STANDOFF_TRACK=band.
+#          real 배선: `artec_streaming_scan_session` 밴드 루프가 OK 프레임
+#          TRACK_EVERY 개마다 `update()` 를 부른다(2026-09-18). sim 은 `_scan_pass`.
+TRACK_MODE: str = os.environ.get("MMS_STANDOFF_TRACK", "live").strip().lower()
 #: live 모드에서 몇 프레임마다 볼지. 전회전 144프레임 / 8 = 18회.
 TRACK_EVERY: int = max(1, int(os.environ.get("MMS_STANDOFF_TRACK_EVERY", "8")))
 #: 한 번에 움직일 수 있는 최대량 (m). 스캔 도중 카메라가 훌쩍 뛰면 프레임 간
@@ -112,6 +124,22 @@ TRACK_MAX_STEP_M: float = float(
 #
 #  더 조이면 로봇이 자주 움직여 스캔 시간·SLAM 위험이 는다. 5mm 미만 보정은
 #  어차피 무시하므로(`distance_correction`) 떨림으로는 안 간다.
+#: 트래커가 표면거리를 재는 **밴드 핵심 높이대** 반폭 (m). 조준높이 ±40mm —
+#  세로 FOV 가 240mm 거리에서 ±60mm 이므로 그 안쪽. 양쪽 백엔드가 같은 값.
+TRACK_CORE_HALF_M: float = 0.04
+#: 같은 것을 **스캐너 프레임**에서 표현한 값 — 광축 기준 세로 각도 반폭 (deg).
+#  240mm 거리에서 ±40mm ≈ ±9.5°. 세로 FOV(28.6°) 의 가운데 2/3 다.
+TRACK_CORE_HALF_DEG: float = 9.5
+
+
+def core_mask_camera_frame(pts_cam, half_deg: float = None):
+    """스캐너(OpenCV: x 오른쪽·y 아래·z 앞) 프레임 정점 중 **광축 세로 ±half_deg**
+    안의 점 마스크 — real 이 `StandoffTracker(core=...)` 에 넘긴다. 프레임 원점이
+    카메라이므로 좌표변환 없이 각도만 본다(hand-eye 오차가 안 낀다)."""
+    import numpy as np
+    P = np.asarray(pts_cam, float)
+    h = math.radians(TRACK_CORE_HALF_DEG if half_deg is None else float(half_deg))
+    return np.abs(np.arctan2(P[:, 1], np.maximum(P[:, 2], 1e-9))) <= h
 TRACK_TOL_M: float = float(os.environ.get("MMS_STANDOFF_TOL_MM", "0.0")) / 1000.0
 
 
@@ -274,7 +302,27 @@ class StandoffTracker:
     """
 
     def __init__(self, dof, lo, hi, mode: str = None, every: int = None,
-                 max_step: float = None, tol: float = None, log=None):
+                 max_step: float = None, tol: float = None, log=None,
+                 core=None):
+        """`core` — 표면거리를 **밴드 핵심 높이대**의 점으로만 잰다. 없으면 창 안
+        점 전체의 중앙값. 두 형태를 받는다 (백엔드가 넘기는 점군의 프레임이 달라서):
+          · (target_z, up_sign, half_m) : base 프레임 점군 — 조준높이 ±half_m (sim)
+          · callable(pts) -> bool mask  : 프레임을 아는 쪽이 직접 고른다 (real 은
+            스캐너 프레임 정점이라 **광축 기준 세로 각도** ±TRACK_CORE_HALF_DEG)
+
+        ★ 왜 핵심 높이대인가 (2026-09-18 세제 실측·모사). 카메라는 el=30° 로
+          내려다보므로, 조준높이보다 **위**의 면은 가깝고 **아래**의 면은 멀다.
+          창 안 점 전체의 중앙값은 가까운 윗부분에 끌려 "창 중앙보다 가깝다" 로
+          읽히고, 트래커는 카메라를 **물린다**(모사 317→338mm). 물러나면 창의 먼
+          끝이 아랫부분을 자른다 — tz=32mm 밴드가 실제로는 50~138mm(중앙 102)만
+          잡았다. 이 밴드가 맡은 높이대의 면을 창 중앙에 놓아야 한다.
+        """
+        self.core = None
+        if callable(core):
+            self.core = core
+        elif core is not None:
+            tz, us, half = core
+            self.core = (float(tz), (1.0 if float(us) >= 0 else -1.0), float(half))
         self.dof = (float(dof[0]), float(dof[1]))
         # 불감대: 명시값 > env > 자동(창 폭의 1/6)
         self.tol = float(tol) if tol else (
@@ -290,6 +338,19 @@ class StandoffTracker:
     @property
     def enabled(self) -> bool:
         return self.mode in ("band", "live")
+
+    def _core_points(self, pts):
+        """`core` 가 있으면 조준높이 ±half 의 점만. 30점 미만이면 전체로 폴백."""
+        if self.core is None or pts is None or len(pts) == 0:
+            return pts
+        import numpy as np
+        P = np.asarray(pts, float)
+        if callable(self.core):
+            m = np.asarray(self.core(P), bool)
+        else:
+            tz, us, half = self.core
+            m = np.abs(P[:, 2] * us - tz * us) <= half
+        return P[m] if int(m.sum()) >= 30 else pts
 
     def due(self, i: int) -> bool:
         """이 프레임에서 보정을 시도할 차례인가."""
@@ -307,6 +368,17 @@ class StandoffTracker:
         """
         if not self.enabled:
             return d
+        # ★ live 모드에서 **빈 반환은 방향을 모른다** — 붙잡아 둔다.
+        #   `distance_correction` 의 "반환 없음 → 가까이 한 스텝" 은 preview·밴드
+        #   시작(멀어서 비는 경우가 실측상 대부분)을 위한 규칙이다. 회전 중에는
+        #   반대로 **너무 가까워서** 창 앞으로 빠진 직후일 수 있고, 그때 또
+        #   가까이 가면 근접한계(lo)까지 달려가 그 밴드가 통째로 빈다(가림 없는
+        #   모사에서 실제로 317→200mm 로 폭주했다, 2026-09-18). 한 프레임 비면
+        #   다음 측정(8프레임 뒤)까지 자리를 지키는 것이 안전하다.
+        if self.mode == "live" and i > 0 and (pts is None or len(pts) == 0):
+            self.log(f"  [거리추종] f{i} 반환 없음 — 회전 중이라 유지 (d={d*1000:.0f}mm)")
+            return d
+        pts = self._core_points(pts)
         d_next, why = distance_correction(d, pts, cam_pos, self.dof,
                                           self.lo, self.hi,
                                           max_step=self.max_step, tol=self.tol)

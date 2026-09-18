@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="500" viewBox="0 0 980 500" font-family="'Noto Sans KR','Malgun Gothic',sans-serif">
+  <style>
+    .bg   { fill:#ffffff; stroke:#d1d5db; stroke-width:1; }
+    .ttl  { font-size:15px; font-weight:700; fill:#111827; }
+    .lbl  { font-size:13px; fill:#111827; }
+    .sym  { font-size:15px; font-weight:700; }
+    .note { font-size:11.5px; fill:#6b7280; }
+    .obj  { fill:#e5e7eb; stroke:#9ca3af; stroke-width:1.5; }
+    .disc { fill:#cbd5e1; stroke:#64748b; stroke-width:1.5; }
+    .axis { stroke:#64748b; stroke-width:1.5; stroke-dasharray:6 4; }
+    .thin { stroke:#9ca3af; stroke-width:1; stroke-dasharray:4 3; }
+    .cam  { fill:#2563eb; }
+    .camg { fill:#c7d2fe; }
+    .blue { stroke:#2563eb; stroke-width:2.2; fill:none; }
+    .amb  { stroke:#d97706; stroke-width:2; fill:none; }
+    .grn  { stroke:#059669; stroke-width:2.2; fill:none; }
+    .pur  { stroke:#7c3aed; stroke-width:2; fill:none; }
+  </style>
+  <defs>
+    <marker id="aB" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#2563eb"/></marker>
+    <marker id="aA" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#d97706"/></marker>
+    <marker id="aAs" markerWidth="9" markerHeight="9" refX="1" refY="3" orient="auto">
+      <path d="M8,0 L0,3 L8,6 z" fill="#d97706"/></marker>
+    <marker id="aG" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#059669"/></marker>
+    <marker id="aP" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#7c3aed"/></marker>
+  </defs>
+
+  <rect x="0" y="0" width="980" height="500" fill="#fafafa"/>
+
+  <!-- ══════════ A. 옆에서 본 단면 ══════════ -->
+  <rect class="bg" x="16" y="16" width="536" height="468" rx="6"/>
+  <text class="ttl" x="36" y="44">A. 옆에서 본 단면 — <tspan fill="#d97706">tz</tspan> · <tspan fill="#2563eb">standoff</tspan> · <tspan fill="#2563eb">el</tspan></text>
+
+  <!-- 원판 -->
+  <ellipse class="disc" cx="250" cy="400" rx="150" ry="14"/>
+  <rect class="disc" x="100" y="400" width="300" height="12"/>
+  <ellipse class="disc" cx="250" cy="412" rx="150" ry="14"/>
+  <text class="note" x="100" y="446">턴테이블 원판 (상면 = 높이 0 기준)</text>
+
+  <!-- 물체 -->
+  <path class="obj" d="M212,400 L212,230 Q212,206 232,202 L232,178 L268,178 L268,202
+                       Q288,206 288,230 L288,400 z"/>
+  <text class="note" x="298" y="344">물체</text>
+
+  <!-- 회전축 -->
+  <line class="axis" x1="250" y1="400" x2="250" y2="104"/>
+  <text class="note" x="256" y="118">턴테이블 회전축</text>
+
+  <!-- tz 치수선 -->
+  <line class="thin" x1="128" y1="400" x2="250" y2="400"/>
+  <line class="thin" x1="128" y1="272" x2="250" y2="272"/>
+  <line class="amb" x1="146" y1="400" x2="146" y2="272" marker-end="url(#aA)" marker-start="url(#aAs)"/>
+  <text class="sym"  x="66" y="330" fill="#d97706">tz</text>
+  <text class="note" x="46" y="348">조준높이</text>
+  <text class="note" x="46" y="362">(밴드 센터)</text>
+
+  <!-- 조준점 T -->
+  <circle cx="250" cy="272" r="5.5" fill="#d97706"/>
+  <text class="lbl" x="194" y="252" fill="#d97706">조준점</text>
+
+  <!-- 수평 기준선 + el 호 -->
+  <line class="thin" x1="250" y1="272" x2="452" y2="272"/>
+  <path class="blue" d="M316,272 A 66 66 0 0 0 304.1,233.9"/>
+  <text class="sym" x="322" y="252" fill="#2563eb">el</text>
+  <text class="note" x="342" y="252">고도각 (수평에서 올려본 각)</text>
+  <line class="thin" x1="414" y1="157" x2="414" y2="272"/>
+  <text class="note" x="300" y="292">평면상 반경 = standoff · cos(el)  (= B 의 반지름)</text>
+
+  <!-- standoff -->
+  <line class="blue" x1="250" y1="272" x2="414" y2="157" marker-end="url(#aB)"/>
+  <text class="sym"  x="300" y="196" fill="#2563eb" transform="rotate(-35 300 196)">standoff</text>
+  <text class="note" x="300" y="212" fill="#2563eb" transform="rotate(-35 300 212)">축 ↔ 카메라</text>
+
+  <!-- 카메라 -->
+  <g transform="translate(424,148) rotate(325)">
+    <rect class="cam" x="-4" y="-14" width="34" height="28" rx="4"/>
+    <path fill="#93c5fd" d="M-4,-11 L-34,-26 L-34,26 L-4,11 z"/>
+  </g>
+  <text class="lbl" x="424" y="120" fill="#2563eb">스캐너</text>
+
+  <!-- 반경 r / 표면거리 -->
+  <line class="pur" x1="250" y1="368" x2="288" y2="368" marker-end="url(#aP)"/>
+  <text class="sym" x="258" y="388" fill="#7c3aed">r</text>
+  <text class="note" x="46" y="466">축거리(standoff) = 표면거리 + 반경 r  —  작동거리 창은 <tspan font-weight="700">표면</tspan> 기준이다</text>
+  <text class="note" x="46" y="482">el 의 &#39;위&#39;가 어느 방향인지는 up_sign 이 정한다 (real 의 base 는 +Z 가 아래)</text>
+
+  <!-- ══════════ B. 위에서 본 평면 ══════════ -->
+  <rect class="bg" x="568" y="16" width="396" height="468" rx="6"/>
+  <text class="ttl" x="588" y="44">B. 위에서 본 평면 — <tspan fill="#059669">az</tspan></text>
+
+  <circle class="disc" cx="766" cy="240" r="118"/>
+  <circle class="obj" cx="766" cy="240" r="34"/>
+  <circle cx="766" cy="240" r="5" fill="#d97706"/>
+
+  <!-- 턴테이블 회전 -->
+  <path class="grn" style="stroke:#94a3b8;stroke-width:2;stroke-dasharray:5 4"
+        d="M766,100 A 140 140 0 1 1 762,100"/>
+  <path fill="#94a3b8" d="M756,94 L772,100 L756,107 z"/>
+  <text class="note" x="600" y="96">턴테이블 360°</text>
+
+  <!-- +X 기준축 -->
+  <line class="thin" x1="766" y1="240" x2="916" y2="240"/>
+  <text class="note" x="852" y="230">base +X (az=0)</text>
+
+  <!-- az 호 -->
+  <path class="grn" d="M826,240 A 60 60 0 0 0 811.9,201.4"/>
+  <text class="sym" x="820" y="212" fill="#059669">az</text>
+
+  <!-- 선택된 az 의 카메라 -->
+  <line class="grn" x1="766" y1="240" x2="864" y2="158" marker-end="url(#aG)"/>
+  <g transform="translate(878,146) rotate(320)">
+    <rect class="cam" x="-4" y="-12" width="28" height="24" rx="4"/>
+    <path fill="#93c5fd" d="M-4,-10 L-28,-22 L-28,22 L-4,10 z"/>
+  </g>
+
+  <!-- 다른 az 후보(회색) -->
+  <g opacity="0.55">
+    <line class="thin" x1="766" y1="240" x2="866" y2="326"/>
+    <g transform="translate(878,336) rotate(41)"><rect class="camg" x="-4" y="-12" width="28" height="24" rx="4"/>
+      <path fill="#e0e7ff" d="M-4,-10 L-28,-22 L-28,22 L-4,10 z"/></g>
+    <line class="thin" x1="766" y1="240" x2="720" y2="116"/>
+    <g transform="translate(712,104) rotate(248)"><rect class="camg" x="-4" y="-12" width="28" height="24" rx="4"/>
+      <path fill="#e0e7ff" d="M-4,-10 L-28,-22 L-28,22 L-4,10 z"/></g>
+    <line class="thin" x1="766" y1="240" x2="634" y2="268"/>
+    <g transform="translate(622,270) rotate(168)"><rect class="camg" x="-4" y="-12" width="28" height="24" rx="4"/>
+      <path fill="#e0e7ff" d="M-4,-10 L-28,-22 L-28,22 L-4,10 z"/></g>
+  </g>
+
+  <text class="note" x="588" y="398">평면상 반경 = standoff · cos(el)</text>
+  <text class="lbl"  x="588" y="428" fill="#059669" font-weight="700">az 는 보는 면을 바꾸지 않는다.</text>
+  <text class="note" x="588" y="448">턴테이블이 한 바퀴 돌아 어차피 전면을 보기 때문.</text>
+  <text class="note" x="588" y="464">IK 가 풀리고 충돌 안 나는 방위를 찾는 용도일 뿐이다.</text>
+</svg>

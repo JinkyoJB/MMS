@@ -9,11 +9,16 @@
 #     · 로그    output/debug/testset/_logs/<물체>.log
 #   마지막에 요약표를 찍는다.
 #
+#   GUI 에서는 preview 가 끝나고 **장애물 등록 결과를 보여주며 잠깐 멈춘다**:
+#     파랑 = preview 동안 걸어둔 보호 원기둥(가정치, r=원판반경)
+#     주황 = 실제로 등록된 회전체 — 충돌 게이트가 보는 바로 그 점군
+#
 #   사용:
-#     bash scripts/sim/preview_testset.sh                 # 9종, GUI
+#     bash scripts/sim/preview_testset.sh                 # 9종, GUI, 10초 멈춤
 #     bash scripts/sim/preview_testset.sh --headless      # 9종, 창 없이(빠름)
 #     bash scripts/sim/preview_testset.sh mug drill       # 이름에 그 글자가 든 것만
-#     bash scripts/sim/preview_testset.sh --headless mug  # 섞어 써도 된다
+#     bash scripts/sim/preview_testset.sh --pause 30      # 더 오래 보기
+#     bash scripts/sim/preview_testset.sh --pause 0       # 안 멈추고 쭉
 #
 #   ⚠ GUI 는 한 종당 Isaac 창을 새로 띄웠다 닫는다(기동만 ~40초). 9종이면
 #     10분쯤 걸린다. 숫자만 볼 거면 --headless 가 낫다.
@@ -32,40 +37,74 @@ mkdir -p "$LOGS"
 
 # ── GUI/headless ────────────────────────────────────────────────────────
 HEADLESS=0
+PAUSE=10            # GUI 에서 장애물 등록 결과를 보여주며 멈추는 초
 ARGS=()
+want_pause=0
 for a in "$@"; do
+  if [ $want_pause -eq 1 ]; then PAUSE=$a; want_pause=0; continue; fi
   case "$a" in
     --headless|-H) HEADLESS=1 ;;
     --gui|-g)      HEADLESS=0 ;;
+    --pause|-p)    want_pause=1 ;;
     *)             ARGS+=("$a") ;;
   esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
+[ "$HEADLESS" = "1" ] && PAUSE=0            # 볼 창이 없다
+VIZ=$([ "$HEADLESS" = "1" ] && echo 0 || echo 1)
 if [ "$HEADLESS" = "1" ]; then
   echo "모드: headless (창 없음 — 스냅샷·요약표만)"
 else
   echo "모드: GUI — 물체마다 Isaac 창이 뜬다. 기동만 ~40초씩 걸린다"
-  echo "      (숫자만 볼 거면 --headless)"
+  echo "      preview 후 ${PAUSE}초 멈춰 장애물 등록 결과를 보여준다"
+  echo "        파랑 = 보호 원기둥(가정치) · 주황 = 실제 등록된 회전체"
+  echo "      (숫자만 볼 거면 --headless, 시간 조절은 --pause N)"
 fi
 
 shopt -s nullglob
+
+# 콘솔에 **실시간**으로 흘릴 줄. Isaac 기동 로그(수백 줄)는 버리고 진행 단계만
+# 남긴다. 전체 로그는 파일에 그대로 쌓이므로 나중에 다 볼 수 있다.
+#   ⚠ 예전에는 출력을 통째로 파일로만 보내서(`> log 2>&1`) 물체당 ~75초 동안
+#     콘솔이 완전히 조용했다 — 지금 어느 단계인지, 멎은 건지 알 수가 없었다.
+KEEP='^\[(stage|main|lookaround|collision|IsaacWorld)\]|^\[isaac_scan\]|^\[p1plan\]|Traceback|Error:|✘'
+DROP='Warning|\[ext:|deprecat|Carpet_Cream'
+
+# 대상 목록 먼저 세어 둔다 (진행 n/N 표시용)
+TARGETS=()
 for f in "$SCENES"/v2r_*.usd; do
   n=$(basename "$f" .usd); n=${n#v2r_}
   if [ $# -gt 0 ]; then
     hit=0; for pat in "$@"; do case "$n" in *"$pat"*) hit=1;; esac; done
     [ $hit -eq 1 ] || continue
   fi
-  echo "── $n ──────────────────────────────────────────"
+  TARGETS+=("$f")
+done
+N=${#TARGETS[@]}
+[ "$N" -gt 0 ] || { echo "✘ 대상 없음 (이름 필터를 확인할 것)"; exit 1; }
+echo "대상 $N 종"
+
+i=0
+for f in "${TARGETS[@]}"; do
+  i=$((i+1))
+  n=$(basename "$f" .usd); n=${n#v2r_}
+  t0=$SECONDS
+  echo
+  echo "══════ [$i/$N] $n ══════════════════════════════════════"
+  echo "   Isaac 기동 중… (창이 뜰 때까지 ~40초, 로그는 $LOGS/$n.log)"
   env -u PYTHONPATH \
     MMS_BACKEND=isaac MMS_ISAAC_HEADLESS=$HEADLESS \
     MMS_SIM_STAGE_UNTIL=preview \
     MMS_DEBUG_VIEW=1 MMS_DEBUG_DIR="$OUT/$n" \
+    MMS_SIM_VIZ=$VIZ MMS_SIM_PAUSE=$PAUSE \
     MMS_COLLISION_LAYOUT=v2_real_260917 \
     MMS_SIM_USD="$f" \
-    MMS_SIM_OBJECT_PRIM=/World/ScanTarget/TestObject \
-    $ISAAC -u main_artec.py --no-prompt > "$LOGS/$n.log" 2>&1 < /dev/null
-  grep -hE "객체=|계획용 preview|밴드 [0-9]개|단일|자세 el=" "$LOGS/$n.log" \
-    | sed 's/^\[[a-z_]*\] */    /' | head -8
+    $ISAAC -u main_artec.py --no-prompt 2>&1 < /dev/null \
+    | tee "$LOGS/$n.log" \
+    | grep --line-buffered -aE "$KEEP" \
+    | grep --line-buffered -avE "$DROP"
+  rc=${PIPESTATUS[0]}
+  echo "   └ [$i/$N] $n  $((SECONDS-t0))초  (종료코드 $rc)"
 done
 
 echo
