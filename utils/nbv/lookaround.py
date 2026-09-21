@@ -136,6 +136,12 @@ MIN_PLAN_PTS: int = 100
 #  "못 본 쪽" 을 "없는 면" 으로 오독하지 않는다(`collect_planning_points` 주석).
 PREVIEW_THETAS = (0.0, math.pi / 2, math.pi, 3 * math.pi / 2)
 
+#: 물체 상단을 **이미 안 뒤** 그 위를 겨눌 때의 거리탐침 횟수.
+#  높이 스윕은 `tz = 관측 상단 + rise_m` 로 설계상 물체 위를 겨눈다 — 거기가 비는
+#  것은 "거리가 틀렸다" 가 아니라 "물체가 끝났다" 는 신호다. 앞 높이에서 창중앙에
+#  맞춰 검증된 거리를 그대로 쓰므로 한 번만 확인하면 충분하다.
+ABOVE_TOP_DIST_TRIES = 1
+
 
 @dataclass
 class ViewPose:
@@ -800,6 +806,7 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
         d_steps = preview_grid(dof)
     d_cur = float(np.clip(preview_start_distance(dof), d_lo, d_hi))
     acc = []
+    theta_of = []        # acc[i] 가 어느 턴테이블 각에서 왔나 (진단용)
     n_cap = n_move = 0
     for theta in thetas:
         # ★ 회전 성공 여부를 **확인한다.** 실패했는데 그대로 찍으면 다른 방위의
@@ -819,7 +826,18 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
         for _ in range(max_heights):
             if adaptive:
                 d, d_anchor, n_blind = d_cur, d_cur, 0
-                for _k in range(max_dist_tries):
+                # ★ **"물체가 없다" 와 "거리가 틀렸다" 를 구분한다.**
+                #   거리탐침은 "점이 없다 → 가까운지 먼지 모른다" 를 전제로 양쪽을
+                #   벌려 본다. 그런데 두 번째 높이부터는 이미 물체 상단을 알고
+                #   (`prev_top`), 조준을 **일부러 그 위 `rise_m`** 로 올린 참이다.
+                #   거기가 비는 것은 정상이지 거리 문제가 아니다. 게다가 거리는
+                #   앞 높이에서 "창중앙에 맞다" 고 검증된 값을 그대로 쓴다.
+                #   그걸 구분 못 해 매 높이마다 6회를 헛돌았다 — 실측 2026-09-21:
+                #   **29 이동 중 4회만 유효**(가까운 220·260mm 에서도 0점이었다).
+                #   상단을 아는 뒤에는 한 번만 확인하고 물러난다.
+                _tries = (max_dist_tries if not np.isfinite(prev_top)
+                          else ABOVE_TOP_DIST_TRIES)
+                for _k in range(_tries):
                     got = preview_at(float(tz), float(d)); n_move += 1
                     pts, cam, legacy = _unpack_preview(got)
                     if legacy:              # 콜백이 점군만 준다 → 고정 격자로
@@ -840,6 +858,7 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
                     useful = n_pts >= min_pts
                     if useful:
                         acc.append(rot_about_axis(pts, axis_pt, axis_dir, -theta))
+                        theta_of.append(float(theta))
                         n_cap += 1
                     if not useful:
                         # ★ 쓸 만한 반환이 없다 = **방향을 모른다.** 가까이·멀리를
@@ -854,13 +873,13 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
                                 log(f"  d={d*1000:.0f}mm pts={n_pts} — {_why}, "
                                     f"탐색범위({d_lo*1000:.0f}~{d_hi*1000:.0f}mm) 소진")
                             break
-                        if _k == max_dist_tries - 1:
+                        if _k == _tries - 1:
                             # ★ 예산이 끝났다 — **가지도 않을 탐침을 찍지 않는다.**
                             #   "460mm 탐침" 을 찍어놓고 안 가면, 로그만 보고
                             #   "거기도 봤는데 없더라" 로 잘못 읽는다.
                             if log:
                                 log(f"  d={d*1000:.0f}mm pts={n_pts} — {_why}, "
-                                    f"시도 {max_dist_tries}회 소진 "
+                                    f"시도 {_tries}회 소진 "
                                     f"(다음 후보 {d_try*1000:.0f}mm — 안 감)")
                             break
                         if log:
@@ -903,6 +922,7 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
                     # 실루엣으로 받아들일 이유는 없다.
                     if pts is not None and len(pts) >= min_pts:
                         acc.append(rot_about_axis(pts, axis_pt, axis_dir, -theta))
+                        theta_of.append(float(theta))
                         n_cap += 1
                     elif log and pts is not None and len(pts):
                         log(f"  d={d*1000:.0f}mm pts={len(pts)}점뿐 "
@@ -918,7 +938,135 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
     if log:
         log(f"계획용 preview {len(pts)}pt ({n_cap} 유효 / {n_move} 이동"
             + (", 적응적" if adaptive else ", 고정격자") + ")")
+        _log_theta_merge(acc, theta_of, axis_pt, axis_dir, up_sign, log)
+    # ★ **방향별 원본**을 남긴다 (역회전 전). 병합본만 있으면 "합쳐진 게 맞나" 를
+    #   사후에 못 따진다 — 방향별로 갈라야 부호·정합을 검증할 수 있다.
+    collect_planning_points.last_patches = [
+        (float(t), np.asarray(P, float).copy()) for t, P in zip(theta_of, acc)]
     return pts
+
+
+def _log_theta_merge(acc, theta_of, axis_pt, axis_dir, up_sign, log) -> None:
+    """방향별 점군이 **물체 프레임에서 겹치는지** 찍는다.
+
+    왜 필요한가 — 턴테이블을 4방향 돌려 찍고 `rot_about_axis(−θ)` 로 되돌리는데,
+    그 역회전의 **부호나 축 방향이 틀리면** 점군이 겹치지 않고 방위별로 흩어진다.
+    그래도 점 수·높이·반경은 그럴듯하게 나와서 로그만 봐서는 멀쩡해 보인다
+    (2026-09-21: 눕힌 병인데 bbox 가 x·y 양축 ±125mm 로 대칭이라 의심이 갔다).
+
+    겹치면 방위 히스토그램이 서로 **같은 구간**을 채우고, 안 겹치면 방향마다
+    다른 사분면을 채운다 — 그 차이를 직접 센다.
+    """
+    if len(acc) < 2:
+        return
+    s = float(np.sign(up_sign)) or 1.0
+    up = s * np.asarray(axis_dir, float)
+    a = np.array([1.0, 0.0, 0.0])
+    if abs(float(a @ up)) > 0.9:
+        a = np.array([0.0, 1.0, 0.0])
+    u = np.cross(a, up); u /= np.linalg.norm(u)
+    v = np.cross(up, u)
+
+    # 판별식 = **패치 중심의 방위각.**
+    #
+    #  카메라는 고정이고 턴테이블이 물체를 θ 만큼 돌린다. 그래서 각 캡처는 그때
+    #  카메라를 향한 면 = 물체프레임 방위 −θ 의 면이다. 역회전이 맞으면 네 패치가
+    #  물체프레임에서 **90°씩 벌어져** 물체를 둘러싼다. 역회전이 안 먹으면 전부
+    #  카메라 쪽 한 방위에 겹쳐 쌓인다 — 물체의 **한쪽만** 본 셈이 된다.
+    #
+    #  ⚠ 주축(최대분산 방향)으로 보면 안 된다(2026-09-21 시행착오):
+    #    ① 180° 회전은 주축을 mod 180 에서 안 바꿔 0°/180° 비교가 무의미하고
+    #    ② 각 방향은 **부분 패치**라 길쭉함이 들쭉날쭉해 주축이 불안정하다.
+    #    중심 방위각은 패치가 짧아도 안정적이다.
+    rows = []
+    for P, th in zip(acc, theta_of):
+        w = np.asarray(P, float) - np.asarray(axis_pt, float)
+        if len(w) < 30:
+            continue
+        cx, cy = float(np.mean(w @ u)), float(np.mean(w @ v))
+        rows.append((th, len(P), np.degrees(math.atan2(cy, cx)) % 360.0,
+                     float(np.hypot(cx, cy)) * 1000.0))
+    if len(rows) < 2:
+        return
+    log("방향별 패치 중심 방위 (물체프레임):")
+    for th, n, ang, rad in rows:
+        log(f"    θ={math.degrees(th):+4.0f}°  {n:6,}pt  중심방위 {ang:5.1f}°  "
+            f"중심반경 {rad:4.1f}mm")
+    if max(r[3] for r in rows) < 8.0:
+        log("    (패치 중심이 모두 축 근처 — 방위가 불분명해 판별 불가)")
+        return
+
+    # ★ **원형 통계**로 본다. 방위는 각도라 선형 min/max(ptp)로는 못 잰다 —
+    #   359° 와 1° 는 2° 차이인데 선형으로는 358° 로 나온다(2026-09-21 오판).
+    #   결과벡터 길이 R: 한쪽에 몰리면 1, 고르게 둘러싸면 0 에 가깝다.
+    def _R(angles_deg):
+        a = np.radians(np.asarray(angles_deg, float))
+        return float(np.hypot(np.mean(np.cos(a)), np.mean(np.sin(a))))
+
+    # ⚠ 이 지표로 **판별되는 것과 안 되는 것**을 분명히 해 둔다 (2026-09-21 검증):
+    #   · 판별됨 — 역회전을 **아예 안 한** 경우. 그때는 네 패치가 카메라 쪽 한
+    #     방위에 겹쳐 쌓여 R≈1 이 된다.
+    #   · 판별 **안 됨** — 역회전 **부호**가 반대인 경우. 보이는 면은 항상
+    #     카메라 쪽(월드 방위≈0)이고 역회전하면 −θ 로 가므로, 물체가 어느 쪽으로
+    #     돌든 저장 방위는 똑같이 −θ 다. 부호 오류는 방위가 아니라 **패치의
+    #     내용**(어느 면이 거기 놓이나)을 바꾼다 → 점군 자체를 봐야 한다.
+    R = _R([r[2] for r in rows])
+    log(f"    방위 집중도 R={R:.2f}  (0=고르게 둘러쌈 · 1=한쪽에 몰림)")
+    if R >= 0.5:
+        log("    → ⚠ 네 패치가 한쪽에 몰렸다 — **회전이 반영되지 않았다.** "
+            "물체의 한쪽만 본 셈이라 반대쪽은 '면이 없다' 로 읽힌다")
+        return
+    log("    → 회전이 점군에 반영됐다 (네 방향이 서로 다른 면을 덮는다)")
+
+    # ★ **부호는 '어느 쪽이 더 일관된 강체를 만드나' 로 가른다.**
+    #   방위 분포로는 못 가른다(보이는 면은 늘 카메라 쪽이라 저장 방위가 같다).
+    #   대신 **패치끼리 겹치는 영역에서 서로 붙는지**를 본다 — 부호가 맞으면 같은
+    #   표면이 겹쳐 최근접거리가 작고, 틀리면 다른 면이 포개져 커진다.
+    #   현재(−θ)와 반대부호(추가로 +2θ)를 같은 잣대로 재서 더 작은 쪽을 고른다.
+    try:
+        _log_sign_check(acc, theta_of, axis_pt, axis_dir, log)
+    except Exception as e:                                   # noqa: BLE001
+        log(f"    (부호 교차검증 생략: {type(e).__name__})")
+
+
+def _log_sign_check(acc, theta_of, axis_pt, axis_dir, log) -> None:
+    """현재 부호 vs 반대 부호 — 어느 쪽이 패치를 더 잘 겹치게 하나.
+
+    지표 = 서로 다른 방향 패치 사이의 **양방향 최근접거리 중앙값**. 같은 물체
+    표면이면 작고, 엉뚱한 면끼리 포개지면 크다. 물체가 회전대칭이면 둘이 비슷해
+    판별이 안 되므로 그때는 그렇다고 말한다.
+    """
+    from scipy.spatial import cKDTree
+    if len(acc) < 2:
+        return
+
+    def _score(P_list):
+        ds = []
+        for i in range(len(P_list)):
+            for j in range(i + 1, len(P_list)):
+                A, B = P_list[i], P_list[j]
+                if len(A) < 50 or len(B) < 50:
+                    continue
+                a = np.median(cKDTree(B).query(A)[0])
+                b = np.median(cKDTree(A).query(B)[0])
+                ds.append(0.5 * (a + b))
+        return float(np.median(ds)) * 1000.0 if ds else float("nan")
+
+    cur = list(acc)
+    alt = [rot_about_axis(P, axis_pt, axis_dir, 2.0 * t)
+           for P, t in zip(acc, theta_of)]
+    s_cur, s_alt = _score(cur), _score(alt)
+    if not np.isfinite(s_cur) or not np.isfinite(s_alt):
+        return
+    log(f"    부호 교차검증 — 패치 간 최근접거리 중앙값: "
+        f"현재(−θ) {s_cur:.1f}mm · 반대(+θ) {s_alt:.1f}mm")
+    if abs(s_cur - s_alt) < 0.15 * max(s_cur, s_alt):
+        log("      → 두 부호가 비슷하다 (물체가 회전대칭에 가까워 판별 불가)")
+    elif s_cur < s_alt:
+        log("      → 현재 부호가 맞다")
+    else:
+        log("      → ⚠ **반대 부호가 더 잘 맞는다.** collect_planning_points 의 "
+            "`rot_about_axis(..., -theta)` 를 `+theta` 로 바꿔야 한다")
 
 
 def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,

@@ -267,6 +267,48 @@ def _print_timeline() -> None:
     print("[stage] ────────────────────────────────────────────────────────")
 
 
+def _run_flip(backend) -> None:
+    """flip 단계 — 뒤집기마다: home 복귀(사람이 물체를 만진다) → 뒤집기 프롬프트 →
+    **preview → 밴드 계획**(backend 가 `plan_flip_poses` 를 주면) → 밴드 캡처.
+
+    뒤집힌 물체는 새 형상이라 lookaround 와 같은 계획을 다시 탄다. 계획이 없거나
+    실패하면 예전 동작(home 고정 AT_CURRENT 전회전)으로 폴백. sim 처럼
+    `plan_flip_poses` 가 없는 backend 도 그 폴백을 탄다.
+    """
+    n_flip = 0
+    plan_fn = getattr(backend, "plan_flip_poses", None)
+    while True:
+        backend.go_home()                       # 뒤집기 전 — 로봇을 물체에서 치운다
+        if not backend.next_flip():             # 외부에서 물체 뒤집기 안내
+            break
+        n_flip += 1
+        poses = None
+        if plan_fn is not None:
+            print(f"[stage]   → flip #{n_flip}: preview → 밴드 계획 (뒤집힌 물체 = 새 형상)")
+            _t0 = _time.perf_counter()
+            try:
+                poses = plan_fn()
+            except Exception as e:                              # noqa: BLE001
+                print(f"[stage]   ⚠ flip 계획 실패({e}) — home 고정 캡처")
+                poses = None
+            _mark("flip", f"#{n_flip} 계획", _time.perf_counter() - _t0)
+        _t0 = _time.perf_counter()
+        if poses and len(poses) > 1 and hasattr(backend, "capture_bands"):
+            print(f"[stage]   → flip #{n_flip}: 밴드 {len(poses)}개를 한 scan 으로 캡처")
+            _fok = backend.capture_bands(poses, stage="flip")
+        elif poses:
+            print(f"[stage]   → flip #{n_flip}: 단일 자세 캡처")
+            _fok = backend.capture_rotation(poses[0], "flip (바닥면)", stage="flip")
+        else:
+            print(f"[stage]   → flip #{n_flip}: home 고정 캡처")
+            _fok = backend.capture_rotation(AT_CURRENT, "flip (바닥면)", stage="flip")
+        _mark("flip", f"#{n_flip}", _time.perf_counter() - _t0)
+        if not _fok:
+            break
+        _flip_extra_passes(backend, n_flip)
+    print(f"[stage]   → flip {n_flip}회 완료")
+
+
 def _flip_extra_passes(backend, n_flip: int) -> None:
     """flip 면 패스 뒤 **추가 관측 자세**(테두리 등) — backend 가 `flip_extra_poses()` 로
     돌려주는 q 마다 전회전 한 번. 없으면 no-op. 근거: `utils/nbv/flip_policy` 테두리 패스 주석."""
@@ -353,18 +395,7 @@ def run_scan_stages(backend: ScanBackend) -> Any:
             _run_nbv(backend)
         if runs_stage(backend.stage_until, "flip") and backend.supports_flip():
             _step(4, "flip", "외부 flip → 바닥면 수집")
-            backend.go_home()
-            n_flip = 0
-            while backend.next_flip():
-                n_flip += 1
-                print(f"[stage]   → flip #{n_flip} 캡처")
-                _t0 = _time.perf_counter()
-                _fok = backend.capture_rotation(AT_CURRENT, "flip (바닥면)", stage="flip")
-                _mark("flip", f"#{n_flip}", _time.perf_counter() - _t0)
-                if not _fok:
-                    break
-                _flip_extra_passes(backend, n_flip)
-            print(f"[stage]   → flip {n_flip}회 완료")
+            _run_flip(backend)
         _step("F", "마무리", "모델 확정 (finalize)")
         return _finalize_timed(backend)
     # ★ 밴드 하나가 실패해도 **중단하지 않는다**. 도달 못 한 밴드는 lookaround 의 실패가
@@ -410,18 +441,7 @@ def run_scan_stages(backend: ScanBackend) -> Any:
     # ── flip — 외부 flip 후 윗면(바닥면) 수집 ────────────────────────
     if runs_stage(backend.stage_until, "flip") and backend.supports_flip():
         _step(4, "flip", "외부 flip → 바닥면 수집")
-        backend.go_home()                       # flip 은 로봇 고정 전제
-        n_flip = 0
-        while backend.next_flip():               # 외부에서 물체 뒤집기 안내
-            n_flip += 1
-            print(f"[stage]   → flip #{n_flip} 캡처")
-            _t0 = _time.perf_counter()
-            _fok = backend.capture_rotation(AT_CURRENT, "flip (바닥면)", stage="flip")
-            _mark("flip", f"#{n_flip}", _time.perf_counter() - _t0)
-            if not _fok:
-                break
-            _flip_extra_passes(backend, n_flip)
-        print(f"[stage]   → flip {n_flip}회 완료")
+        _run_flip(backend)
     elif runs_stage(backend.stage_until, "flip"):
         print("[stage] flip 건너뜀 (backend 미지원)")
     else:

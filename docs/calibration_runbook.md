@@ -156,10 +156,9 @@ $env:PYTHONIOENCODING="utf-8"
 ### 한 번에 (권장)
 
 ```powershell
-python scripts\artec\calibrate.py                  # 1→2→3 순서대로
+python scripts\artec\calibrate.py                  # 1→2→3→4 순서대로
 python scripts\artec\calibrate.py --from 2         # intrinsic 건너뛰고
 python scripts\artec\calibrate.py --only 3         # 턴테이블만
-python scripts\artec\calibrate.py --no-via-home    # 자세마다 home 왕복 안 함 (3배 빠름)
 ```
 
 `calibrate.py` 는 **자체 로직이 없다.** 순서대로 부르고, 실패하면 거기서 멈춘다.
@@ -169,14 +168,24 @@ python scripts\artec\calibrate.py --no-via-home    # 자세마다 home 왕복 �
 |---|---|---|
 | `--from N` | 1 | N 단계부터 |
 | `--only N` | — | N 단계만 |
-| `--no-via-home` | **꺼짐** | 1·2단계에서 자세마다 home 을 경유하지 않는다 |
+| `--via-home` | **꺼짐** | 1·2단계에서 자세마다 home 을 경유한다 (느리다) |
 | `--skip-aim` | 꺼짐 | 시작 시 수동 조준 안내를 건너뛴다 |
 
-> **`--no-via-home` 은 기본이 아니다.** 켜면 1·2단계 이동량이 4230° → 1208° 로
-> 줄어 **7.1분 → 2.0분** 이 된다(20자세, 10 deg/s 기준). 기본이 아닌 이유는
-> `home→자세` 만 충돌 검사된 옛 자세 목록에서는 **자세↔자세 경로가 미검증**이기
-> 때문이다. 2026-09-16 이후 `gen_calib_poses.py` 가 만든 목록은 순서 최적화와
-> 자세 간 경로 검사를 거치므로 **안전하게 켤 수 있다.**
+> **home 경유는 기본이 꺼져 있다** (2026-09-21 뒤집음). 경유하면 1·2단계 이동량이
+> 1208° → 4230° 로 늘어 **2.0분 → 7.1분** 이 된다(20자세, 10 deg/s 기준).
+>
+> 안전 근거는 **자세 목록이 경로 검사를 거쳤다는 것**이다. `gen_calib_poses.py` 가
+> 자세↔자세 경로를 충돌 게이트로 확인하고 이동거리 최소 순서로 재배열하며,
+> 그 사실을 yaml 에 `path_checked: true` 로 남긴다. `calibrate.py` 는 그 표식을
+> 보고 자동으로 정하므로 **보통 인자를 줄 필요가 없다**:
+>
+> ```
+> [poses] 경로 검사 완료 (2026-09-21, 자세간 28.4°) — home 경유 생략
+> [poses] 경로 검사 표식 없음 — home 을 경유한다 (느림)          ← 옛 목록이면
+> ```
+>
+> 검사 당시 레이아웃이 지금과 다르면(`ACTIVE_LAYOUT.txt`) 검사 결과가 무효이므로
+> 역시 경유한다. 즉 **빠른 쪽이 기본이되, 근거가 없으면 안전한 쪽으로 떨어진다.**
 
 ### 한 단계만
 
@@ -198,21 +207,21 @@ python scripts\artec\calibrate.py --only 2 -- --poses config\calibration\artec_c
 
 ### 자주 쓰는 인자 — 단계별
 
-> ⚠ **`--no-via-home` 과 `--no-home` 은 다른 인자다.** 이름이 비슷해서 헷갈린다.
+> ⚠ **`--via-home` 과 `--no-home` 은 다른 인자다.** 이름이 비슷해서 헷갈린다.
 >
 > | 인자 | 있는 곳 | 뜻 |
 > |---|---|---|
-> | `--no-via-home` | 1·2단계 (`calibrate.py`) | 자세를 순회할 때 **매번 home 을 경유하지 않는다** |
+> | `--via-home` | 1·2단계 (`calibrate.py`) | 자세를 순회할 때 **매번 home 을 경유한다** (기본 꺼짐) |
 > | `--no-home` | 3단계 (`turntable_calib.py`) | 시작할 때 **아무 데도 안 간다** |
 >
-> 3단계는 자세 순회가 없어서 `--no-via-home` 이 없고,
+> 3단계는 자세 순회가 없어서 `--via-home` 이 없고,
 > 1·2단계는 시작 위치 개념이 없어서 `--no-home` 이 없다.
 
 **① intrinsic / ② hand-eye** (둘 다 자세 목록을 순회한다)
 
 | 인자 | 기본 | 뜻 |
 |---|---|---|
-| `--no-via-home` | 꺼짐 | home 왕복 생략 (위 설명 참고) |
+| `--via-home` | 꺼짐 | home 왕복 **추가** (기본은 생략 — 위 설명 참고) |
 | `--poses PATH` | `artec_calibration_poses.yaml` | 자세 목록 |
 | `--board NAME` | `spider_dense` | 보드 프리셋 |
 | `--square-mm V` | 프리셋값 | 인쇄 실측으로 보정 |
@@ -224,7 +233,7 @@ python scripts\artec\calibrate.py --only 2 -- --poses config\calibration\artec_c
 |---|---|---|
 | — | **기록된 rim 자세로 이동** | `artec_rim_pose.yaml` 이 있으면 그 자세로 간다 |
 | `--force-home` | — | 기록된 자세 대신 **home** 으로 |
-| `--no-home` | — | **아무 데도 안 간다** — 지금 자세 그대로 캡처 (`--no-via-home` 아님) |
+| `--no-home` | — | **아무 데도 안 간다** — 지금 자세 그대로 캡처 (`--via-home` 과 다름) |
 | `--save-pose` | — | 지금 자세를 rim 시작 자세로 기록하고 진행 |
 | `--sensitivity V` | 0.9 | 재구성 민감도. 흰 상판은 기본 0.5 로는 정점이 거의 안 나온다 |
 | `--range-mm N F` | 170 330 | 스캔 깊이 범위. 좁히면 배경 노이즈가 준다 |
@@ -311,7 +320,7 @@ python scripts\artec\gen_calib_poses.py --hint-xy 0.838 -0.022 --write   # ③ �
 | `--write` | 꺼짐 | 저장 (없으면 미리보기만) |
 
 저장 시 자세를 **이동거리 최소 순서로 재배열**하고 자세↔자세 경로를 충돌 검사한다
-— 그래서 `--no-via-home` 을 안전하게 쓸 수 있다.
+— 그래서 home 경유 생략이 안전하고, 그게 기본이다.
 
 **충돌 셀 모델**(`collision.md` §6)에서 턴테이블 원판을 찾아 그 위 반구에 자세를
 깔고, 해석 IK + 충돌 게이트로 거른다. sim 이 쓰는 생성기와 **같은 코드**다.

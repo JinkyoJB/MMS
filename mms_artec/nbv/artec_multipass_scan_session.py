@@ -73,6 +73,7 @@ from utils.transforms import pose_mat_to_6d
 from utils.nbv import lookaround as _p1_const
 from utils.nbv import nbv_planner as _nbvp   # sim·real 공용 수렴·회계·IK 예산 상수
 from utils.nbv.nbv_debug_dump import NbvDebugDump as _NbvDebugDump   # 반복마다 겨냥·수집 기록
+from utils.nbv.event_log import log_event as _ev      # run 이벤트(JSONL) — lost/병합 분석용
 from utils.nbv.scan_stage_controller import (run_scan_stages, AT_CURRENT,
                                              runs_stage as _runs_stage)
 
@@ -215,7 +216,7 @@ class ArtecMultiPassScanSessionSettings:
     #    `adaptive_min_preview_verts`(1500)를 못 넘으면 preview 가 조용히 실패해
     #    플래너가 "점 부족" 으로 포기한다. 올릴수록 노이즈도 섞이므로 계획용으로만 쓴다.
     preview_sensitivity: Optional[float] = 0.9
-    adaptive_robot_speed_deg_s: float = 30.0   # 2026-08-19: 15→30 (2배)
+    adaptive_robot_speed_deg_s: float = 15.0   # 2026-08-19: 15→30, 2026-09-21: 실물 안전상 15 로 복귀
     #: 밴드 사이 이동 속도. **녹화 중** 움직이므로 느려야 SLAM 이 따라온다.
     #  (밴드를 한 IScan 에 담는 구조 — 2026-09-16)
     band_move_speed_deg_s: float = 8.0
@@ -343,7 +344,9 @@ class ArtecMultiPassScanSessionSettings:
     nbv_coverage_tau: float = _nbvp.CONV_COVERAGE_TAU              # 수렴: 각도 커버리지 ≥ τ (공용)
     nbv_coverage_dirs: int = 64
     nbv_coverage_parallel_deg: float = 40.0
-    nbv_robot_speed_deg_s: float = 24.0     # NBV 로봇 이동 속도 (2026-08-19: 12→24, 2배)
+    #: NBV 로봇 이동 속도. 2026-08-19 에 12→24 로 올렸다가 2026-09-21 실물에서
+    #  "예상치 못한 움직임에 대응할 수 없다" 로 10 으로 내림. `--speed-scale` 로 배율.
+    nbv_robot_speed_deg_s: float = 10.0
     nbv_sweep_deg: float = 15.0             # 캡처 시 턴테이블 ±스윕 (overlap)
     nbv_theta_assist: bool = False          # True=턴테이블 회전 보조(θ planner). 기본 robot-only.
     nbv_theta_n_samples: int = 72           # θ assist 그리드
@@ -402,6 +405,9 @@ class ArtecMultiPassScanResult:
     # Hint ICP refine 진단 (hint_icp_refine_mode=True 일 때 채워짐).
     # 각 entry = (scan_index, T_init, T_measured, fitness, inlier_rmse_mm).
     icp_refine_log: List[tuple] = field(default_factory=list)
+    #: preview 단계 산출 — 점군(B)·턴테이블 축·밴드 플랜. `--until preview` 는
+    #  캡처를 안 해 `model` 이 비므로, 결과를 눈으로 보려면 이쪽이 필요하다.
+    preview_result: Optional[dict] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -437,6 +443,11 @@ class _RunState:
     n_recovery_succeeded: int = 0
     next_T_BC_pending: Optional[np.ndarray] = None
     last_scan_theta0: float = 0.0        # 직전 스캔 시작 시점 turntable 논리각 (rad)
+    #: 밴드 회계 — 콘솔은 'pass' 가 아니라 **밴드**로 말한다. pass 는 내부
+    #  재시도 카운터일 뿐이라 사용자에게 의미가 없다 (2026-09-21 요청).
+    bands_done: int = 0                  # 전회전을 끝낸 밴드 (누적)
+    bands_total: int = 0                 # 계획된 밴드 (누적)
+    merge_method: str = "none"           # 직전 병합이 쓴 정렬: none|hint|camera|greg|icp
     #: lookaround 밴드 관절해 목록. 설정되면 **한 IScan 안에서** 밴드마다 전회전한다.
     #  첫 밴드는 호출자가 미리 이동시켜 두고, 2번째부터 세션이 콜백으로 옮긴다.
     band_poses: Optional[list] = None
@@ -1130,11 +1141,169 @@ class ArtecMultiPassScanSession:
             pass
         return 0.0
 
+    def _R_obj_B(self, theta0: float, tag: str = "merge") -> np.ndarray:
+        """스캔 시작 시 turntable 논리각 θ0 만큼 돌아간 물체를 논리 0° 로 되돌리는
+        base 프레임 4×4 (축 통과점 기준 회전). θ0≈0 이면 항등."""
+        R_obj = np.eye(4)
+        tt = getattr(self.mms, "turntable_transform", None)
+        if abs(float(theta0)) > 1e-6 and tt is not None:
+            p_ax = np.asarray(tt.axis_point_B, float)
+            R3 = self._rot_about_axis(np.asarray(tt.axis_dir_B, float),
+                                      -float(theta0))
+            R_obj[:3, :3] = R3
+            R_obj[:3, 3] = p_ax - R3 @ p_ax
+            print(f"  [{tag}] 병합 보정: 물체 회전 θ0={np.degrees(theta0):.1f}° 포함")
+        return R_obj
+
+    def _S_m(self):
+        """스캐너3D→Color 변환 S (m). 미캐시면 None."""
+        S_mm = getattr(self, "_T_scan_color", None)
+        if S_mm is None:
+            return None
+        S_m = np.asarray(S_mm, float).copy()
+        S_m[:3, 3] /= 1000.0
+        return S_m
+
+    def _flip_unflip_B(self, R_phys: np.ndarray, T_BC_new: np.ndarray,
+                       theta0: float, c_pass_W_mm: np.ndarray,
+                       c_master_W_mm: np.ndarray) -> np.ndarray:
+        """사람이 뒤집은 물체를 **base 프레임에서** 원래 자세로 되돌리는 4×4 (m).
+
+        회전은 `R_phys⁻¹`(설정된 뒤집기 각의 역), 평행이동은 **무게중심 피벗** —
+        이번 스캔의 무게중심(B)이 master 무게중심(B)으로 가도록 잡는다. 사람이
+        뒤집으며 물체를 옮겨 놓는 것(수 cm)은 회전 힌트만으로는 못 잡기 때문이다
+        (예전 scan-world 판 `Translate(c_master)·R⁻¹·Translate(−c_pass)` 와 같은
+        발상을 B 로 옮긴 것 — 밴드 캡처의 카메라 이동 보정과 **합성**하려면 둘 다
+        B 에서 표현돼야 한다).
+        """
+        S_m = self._S_m()
+        if S_m is None:
+            S_m = np.eye(4)
+        T_CB_master = (self._st.master_T_CB if self._st.master_T_CB is not None
+                       else np.linalg.inv(self._T_BC))
+        A_new = self._R_obj_B(theta0, tag="flip") @ np.linalg.inv(T_BC_new) @ S_m
+        c_pass_B = (A_new @ np.r_[np.asarray(c_pass_W_mm, float) / 1000.0, 1.0])[:3]
+        c_master_B = (T_CB_master @ S_m
+                      @ np.r_[np.asarray(c_master_W_mm, float) / 1000.0, 1.0])[:3]
+        R_inv = np.linalg.inv(np.asarray(R_phys, float))[:3, :3]
+        T = np.eye(4)
+        T[:3, :3] = R_inv
+        T[:3, 3] = c_master_B - R_inv @ c_pass_B
+        return T
+
+    def _flip_global_refine(self, sub_model, T_BC_new, theta0: float,
+                            T_hint_B: np.ndarray):
+        """flip 스캔을 master 에 맞추는 변환을 **힌트 대신** 구한다.
+        반환 (frame, T, method):
+            ("W", T_pre_mm, "img")   텍스처 특징점 매칭 — 스캔월드→master월드 직접
+            ("B", T_extra_B, "greg") FGR·FPFH 합의 (base 프레임, 카메라 이동과 합성)
+            ("B", 힌트, "hint(...)") 둘 다 실패
+
+        순서가 왜 이런가 — 회전대칭 물체는 기하 정합이 높은 fitness 로 틀린 답을 내고,
+        텍스처(라벨)만이 앞뒤·뒤집힘을 구분한다(벤치마크 2026-06-11: image_match 가
+        수평축 flip 을 유일하게 찾음). 힌트(설정 각 + 무게중심 피벗)는 사람 손회전
+        오차와 부분 스캔의 무게중심 가정 때문에 틀릴 수 있고, 틀리면 후처리 GlobalReg
+        도 건너뛰어(hints_applied) 굳는다 — 2026-09-21 run_162322 정합 실패.
+        """
+        # ── 1순위: 텍스처 특징점 (프레임 원본 사진 — Texturize 불필요) ────────
+        try:
+            from utils.nbv import image_match as _im
+            T_m, n_inl, info = _im.register_models(
+                sub_model, self._st.master_model,
+                log=lambda m: print(f"  [flip] {m}"))
+            if T_m is not None:
+                T_mm = np.asarray(T_m, float).copy()
+                T_mm[:3, 3] *= 1000.0
+                print(f"  [flip] ✓ 텍스처 정합 채택 (inlier {n_inl})")
+                return "W", T_mm, "img"
+            print(f"  [flip] 텍스처 정합 불가({info.get('reason', '?')}) — 기하 전역 정합으로")
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  [flip] ⚠ 텍스처 정합 예외({type(e).__name__}: {e}) — 기하 전역 정합으로")
+        # ── 2순위: 기하 전역 정합 합의 ─────────────────────────────────────
+        try:
+            from utils.nbv.global_registration import register_consensus
+            T_CB_new = np.linalg.inv(np.asarray(T_BC_new, float))
+            sub_pcd = self._master_to_pcd_B(
+                sub_model, T_CB_new, voxel_mm=self.s.nbv_master_voxel_mm,
+                T_sc_mm=getattr(self, "_T_scan_color", None))
+            mp = self._master_pts_B_m(80_000)
+            if sub_pcd is None or len(sub_pcd.points) < 500 or len(mp) < 500:
+                print("  [flip] 전역 정합 — 점 부족, 힌트 사용")
+                return "B", T_hint_B, "hint(점 부족)"
+            S = np.asarray(sub_pcd.points, float) / 1000.0
+            R_obj = self._R_obj_B(theta0, tag="flip-greg")
+            S = S @ R_obj[:3, :3].T + R_obj[:3, 3]          # 논리 0° 기준으로
+            T, info = register_consensus(S, mp, log=lambda m: print(f"  [flip] {m}"))
+            if T is None:
+                print(f"  [flip] 전역 정합 불합의({info.get('reason', '?')}) — 힌트 사용")
+                return "B", T_hint_B, "hint(greg 불합의)"
+            T = np.asarray(T, float)
+            c = np.r_[S.mean(0), 1.0]
+            d_c = float(np.linalg.norm((T @ c)[:3] - (np.asarray(T_hint_B) @ c)[:3])) * 1000.0
+            dR, _ = self._axis_angle(T[:3, :3].T @ np.asarray(T_hint_B)[:3, :3])
+            print(f"  [flip] ✓ 기하 전역 정합 채택 (ΔR 힌트대비 {dR:.1f}°, 무게중심 이동차 {d_c:.0f}mm)")
+            return "B", T, "greg"
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  [flip] ⚠ 전역 정합 예외({type(e).__name__}: {e}) — 힌트 사용")
+            return "B", T_hint_B, "hint(예외)"
+
+    def _dump_scan_raw(self, model, T_pre_mm, stage: str, **extra) -> None:
+        """원시 IScan 점(스캔 월드, mm, 색) + 적용 T_pre 를 npz 로 남긴다 —
+        `output/scans/<RUN_TS>/scanNN_<stage>_poseK.npz`. 정합을 SDK 없이 오프라인에서
+        다시 돌리기 위한 것. master 월드 = scan00 (T_pre 항등). 실패는 무시."""
+        try:
+            from pathlib import Path as _P
+            tag = os.environ.get("MMS_RUN_TS") or time.strftime("%Y%m%d_%H%M%S")
+            d = _P(__file__).resolve().parents[2] / "output" / "scans" / tag
+            d.mkdir(parents=True, exist_ok=True)
+            pts, cols = [], []
+            for si in range(model.scan_count()):
+                scan = model.get_scan(si)
+                n = scan.frame_count()
+                for i in range(0, n, max(1, n // 60)):
+                    fr = scan.get_frame(i)
+                    v = fr.vertices()
+                    if v is None or len(v) == 0:
+                        continue
+                    T = np.asarray(scan.get_frame_transformation(i), float)
+                    pts.append(np.asarray(v, float) @ T[:3, :3].T + T[:3, 3])
+                    c = self._frame_vertex_colors(fr)
+                    cols.append(np.asarray(c) if c is not None and len(c) == len(v)
+                                else np.zeros((len(v), 3), np.uint8))
+            if not pts:
+                return
+            P = np.vstack(pts).astype(np.float32)
+            C = np.vstack(cols)
+            if len(P) > 400_000:
+                idx = np.random.default_rng(0).choice(len(P), 400_000, replace=False)
+                P, C = P[idx], C[idx]
+            st = self._st
+            f = d / f"scan{st.master_model.scan_count():02d}_{stage}_pose{st.pose_idx}.npz"
+            meta = {k: np.asarray(v) for k, v in extra.items() if v is not None}
+            np.savez_compressed(
+                f, pts_W_mm=P, colors=C,
+                T_pre_mm=np.asarray(T_pre_mm if T_pre_mm is not None else np.eye(4), float),
+                stage=stage, pose_idx=int(st.pose_idx),
+                master_T_CB=np.asarray(st.master_T_CB if st.master_T_CB is not None else np.eye(4), float),
+                T_BC_new=np.asarray(st.next_T_BC_pending if st.next_T_BC_pending is not None
+                                    else (self._T_BC if self._T_BC is not None else np.eye(4)), float),
+                T_scan_color_mm=np.asarray(getattr(self, "_T_scan_color", None)
+                                           if getattr(self, "_T_scan_color", None) is not None
+                                           else np.eye(4), float),
+                **meta)
+            print(f"  [scan-dump] {f.relative_to(d.parents[2])} ({len(P):,}pt)")
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  [scan-dump] ⚠ 실패({type(e).__name__}: {e})")
+
     def _compose_T_pre_W_mm(self, T_BC_new: np.ndarray, theta0: float,
-                            tag: str = "merge") -> np.ndarray:
+                            tag: str = "merge", T_extra_B=None) -> np.ndarray:
         """sub scan-world → master scan-world 변환 (SDK mm 단위).
 
-            T_pre = S⁻¹ · T_BC_master · R_B(axis, −θ0) · T_CB_new · S
+            T_pre = S⁻¹ · T_BC_master · [T_extra_B] · R_B(axis, −θ0) · T_CB_new · S
+
+        `T_extra_B` — base 프레임에서 물체에 추가로 가할 변환(선택). flip 밴드
+        캡처가 "사람이 뒤집은 것 되돌리기"(`_flip_unflip_B`)를 여기로 넣는다 —
+        카메라 이동 보정과 뒤집기 힌트가 **한 식**으로 합쳐진다.
 
         구성요소 세 가지가 **모두** 필요하다 (2026-09-16 실물에서 각각 사고):
           · 카메라 이동 (T_BC_master·T_CB_new): 로봇이 움직인 만큼 — master 기준은
@@ -1149,20 +1318,11 @@ class ArtecMultiPassScanSession:
         """
         _T_BC_master = (np.linalg.inv(self._st.master_T_CB)
                         if self._st.master_T_CB is not None else self._T_BC)
-        R_obj = np.eye(4)
-        tt = getattr(self.mms, "turntable_transform", None)
-        if abs(float(theta0)) > 1e-6 and tt is not None:
-            p_ax = np.asarray(tt.axis_point_B, float)
-            R3 = self._rot_about_axis(np.asarray(tt.axis_dir_B, float),
-                                      -float(theta0))
-            R_obj[:3, :3] = R3
-            R_obj[:3, 3] = p_ax - R3 @ p_ax
-            print(f"  [{tag}] 병합 보정: 물체 회전 θ0={np.degrees(theta0):.1f}° 포함")
-        T_core = _T_BC_master @ R_obj @ np.linalg.inv(T_BC_new)   # B 경유 (m)
-        S_mm = getattr(self, "_T_scan_color", None)
-        if S_mm is not None:
-            S_m = np.asarray(S_mm, float).copy()
-            S_m[:3, 3] /= 1000.0                            # mm → m
+        R_obj = self._R_obj_B(theta0, tag=tag)
+        T_x = np.eye(4) if T_extra_B is None else np.asarray(T_extra_B, float)
+        T_core = _T_BC_master @ T_x @ R_obj @ np.linalg.inv(T_BC_new)   # B 경유 (m)
+        S_m = self._S_m()
+        if S_m is not None:
             T_pre = np.linalg.inv(S_m) @ T_core @ S_m
         else:
             print(f"  [{tag}] ⚠ 스캐너3D→Color 미캐시 — S 켤레 없이 병합 (오차 가능)")
@@ -1537,7 +1697,7 @@ class ArtecMultiPassScanSession:
         st = self._st
         if s.prompt_before_first_pass:
             self._print_pose_hint_for_user(st.pose_idx)
-            print("  [Enter] 회전 시작 / [q]+Enter 종료")
+            print("  [Enter] 회전 시작    [q] 종료    (키 하나만)")
             if self._wait_user_quit():
                 st.user_quit = True
                 st.aborted_reason = "사용자 종료 (첫 pass 전)"
@@ -1772,6 +1932,39 @@ class ArtecMultiPassScanSession:
         self._band_seed = np.asarray(q_seed, float).copy()
         self._band_axis_xy = np.asarray(axis_xy, float).copy()
         self._band_sensor = sensor_model
+        # ★ preview 결과를 **보관**한다. `--until preview` 는 캡처를 안 하므로
+        #   모델이 비어 있어 기존 결과 창이 보여줄 것이 없다. 무엇을 보고
+        #   밴드를 그렇게 정했는지 눈으로 확인할 수 있어야 한다
+        #   ("모션은 맞는데 preview 가 잘 됐는지 모르겠다" — 2026-09-21).
+        # ★ 점군을 **파일로도 남긴다.** 창을 닫으면 사라져서 "왜 이렇게 나왔나"
+        #   를 나중에 못 따진다. 좌표계 문제는 눈보다 숫자로 재야 갈린다.
+        try:
+            import datetime as _dt
+            from pathlib import Path as _Path
+            _o = _Path(__file__).resolve().parents[2] / "output" / "debug"
+            _o.mkdir(parents=True, exist_ok=True)
+            _f = _o / f"preview_points_{_dt.datetime.now():%H%M%S}.npz"
+            _extra = {}
+            for _i, (_t, _P) in enumerate(
+                    getattr(p1.collect_planning_points, "last_patches", []) or []):
+                _extra[f"patch{_i}_theta"] = np.asarray([_t], float)
+                _extra[f"patch{_i}_pts"] = _P          # 역회전 **후** (물체프레임)
+            np.savez_compressed(_f, points_B=np.asarray(pts, float),
+                                axis_pt_B=np.asarray(axis_pt, float),
+                                axis_dir_B=np.asarray(axis_dir, float),
+                                up_sign=float(up_sign), **_extra)
+            print(f"  [p1plan] preview 점군 저장 → {_f.relative_to(_o.parents[1])}")
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [p1plan] ⚠ preview 점군 저장 실패({type(e).__name__})")
+        self.preview_result = {
+            "points_B": np.asarray(pts, float).copy(),
+            "axis_pt_B": np.asarray(axis_pt, float).copy(),
+            "axis_dir_B": np.asarray(axis_dir, float).copy(),
+            "up_sign": float(up_sign),
+            "plan": plan,
+            "view_poses": list(vps or []),
+            "note": plan.note,
+        }
         return qs
 
     def _snap_preview(self, tz: float, d: float, azd: float, n_raw: int) -> None:
@@ -1894,6 +2087,12 @@ class ArtecMultiPassScanSession:
         seed = getattr(self, "_band_seed", None)
         if axis_xy is None or seed is None:
             return None
+        # ★ seed 는 **지금 관절각** — 계획 seed 로 풀면 다른 IK 분기가 나와 녹화 중
+        #   큰 관절 이동이 생길 수 있다. 소보간 경로로 도착한 뒤엔 특히 그렇다.
+        try:
+            seed = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        except Exception:                                       # noqa: BLE001
+            pass
         tgt = np.array([axis_xy[0], axis_xy[1], vp.target_z], float)
         qn = self._axis_view_q(tgt, vp.el_deg, vp.az_deg, float(d_new), seed)
         if qn is None:
@@ -1904,6 +2103,57 @@ class ArtecMultiPassScanSession:
             if not ok:
                 return None
         return qn
+
+    def _band_vp_of(self, q):
+        for _q, _vp in getattr(self, "_band_pairs", ()):
+            if _q is q:
+                return _vp
+        return None
+
+    def _band_path(self, q_from, q_to, step_m: float = 0.005,
+                   alpha_from: float = 0.0, seed=None):
+        """밴드 A→B 를 **카메라 조준을 유지한 채** 잘게 나눈 관절해 목록 [(q, α)].
+
+        관절공간 직선보간(예전 `move_robot_fn(q_to)` 한 방)은 두 IK 해 사이에서
+        카메라가 물체를 벗어나거나 프레임 간 변화가 커질 수 있고, Artec SDK 는 한번
+        잃으면 되찾지 않는다 — 2026-09-21 여섯 run 모두 밴드 전환 직후 lost, 어느
+        기하 지표와도 상관 없음(비결정 = 경로 의존). 그래서 (el, az, tz, 축거리)를
+        α 로 선형보간하고 각 스텝을 직전 해를 seed 로 다시 푼다: 카메라 이동이
+        `step_m` 씩이라 손으로 천천히 옮기는 것과 같다.
+        `alpha_from` 부터 시작(relocalization 후 재전진), 마지막은 α=1.
+        IK·충돌 실패 스텝은 건너뛴다. 맥락이 없으면 None → 호출자가 예전 방식.
+        """
+        vp_a, vp_b = self._band_vp_of(q_from), self._band_vp_of(q_to)
+        axis_xy = getattr(self, "_band_axis_xy", None)
+        if vp_a is None or vp_b is None or axis_xy is None:
+            return None
+        up = -1.0 if float(self._view_up_B()[2]) < 0 else +1.0
+
+        def _cam(vp_el, d, tz):                       # 카메라 위치 근사 (수평, z)
+            e = np.radians(vp_el)
+            return np.array([d * np.cos(e), tz + up * d * np.sin(e)])
+
+        pa = (float(vp_a.el_deg), float(vp_a.az_deg), float(vp_a.target_z), float(vp_a.standoff))
+        pb = (float(vp_b.el_deg), float(vp_b.az_deg), float(vp_b.target_z), float(vp_b.standoff))
+        dist = float(np.linalg.norm(_cam(pa[0], pa[3], pa[2]) - _cam(pb[0], pb[3], pb[2])))
+        # 방위 변화도 카메라를 옮긴다 — 호 길이로 더한다.
+        dist += abs(np.radians(pb[1] - pa[1])) * pb[3] * np.cos(np.radians(pb[0]))
+        n = max(1, int(np.ceil(dist * (1.0 - alpha_from) / max(step_m, 1e-3))))
+        alphas = alpha_from + (1.0 - alpha_from) * (np.arange(1, n + 1) / n)
+        cm = self._collision_gate()
+        q_seed = np.asarray(seed if seed is not None else q_from, float)
+        out = []
+        for a in alphas:
+            el, az, tz, d = (pa[i] + a * (pb[i] - pa[i]) for i in range(4))
+            tgt = np.array([axis_xy[0], axis_xy[1], tz], float)
+            q = self._axis_view_q(tgt, el, az, d, q_seed)
+            if q is None:
+                continue
+            if cm is not None and not cm.is_pose_safe(q)[0]:
+                continue
+            out.append((np.asarray(q, float), float(a)))
+            q_seed = np.asarray(q, float)
+        return out
 
     def _band_standoff_of(self, q_cur):
         """이 밴드의 계획 축거리 (m). 맥락이 없으면 None."""
@@ -1928,12 +2178,34 @@ class ArtecMultiPassScanSession:
         return AT_CURRENT
 
     def go_home(self) -> None:
-        # nbv→flip 전환 등 — NBV 로 움직인 robot 을 home 복귀 (flip 는 robot 고정).
+        # nbv→flip 전환 등 — NBV 로 움직인 robot 을 home 복귀. flip 은 사람이 물체에
+        # 손을 대므로 **뒤집기마다** 먼저 home 으로 물러난다.
         try:
             self.robot.go_home(sensor="artec", confirm=False)
             print("  [stage] robot home 복귀")
         except Exception as e:
             print(f"  [stage] ⚠ go_home 실패({e}) — 자세 확인 필요")
+
+    def plan_flip_poses(self):
+        """뒤집힌 물체는 **새 형상**이다 — lookaround 와 같은 preview → 밴드 계획을
+        다시 돌려 자세 목록(q)을 준다. 실패하면 None → 컨트롤러가 home 고정 캡처.
+
+        예전(2026-09-21 이전) flip 은 `go_home` 후 AT_CURRENT 한 자세 전회전이라
+        거리도 높이도 적응하지 않았다("눈으로 보기엔 home 고정" — 사용자 지적).
+        정합은 `capture_bands` 가 카메라 이동 보정을 예약하고 `_do_one_rotation`
+        이 뒤집기 되돌리기와 합성한다(`_flip_unflip_B`).
+        """
+        if not self.s.lookaround_planner_enabled:
+            return None
+        try:
+            qs = self._pick_lookaround_planner()
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [flip] ⚠ preview/밴드 계획 예외({type(e).__name__}: {e}) — home 고정")
+            return None
+        if qs:
+            print(f"  [flip] ✓ 뒤집힌 물체 밴드 자세 {len(qs)}개 확정")
+            return list(qs)
+        return None
 
     def capture_bands(self, poses, stage: str = "lookaround") -> bool:
         """lookaround 밴드 전체를 **한 IScan** 으로 캡처한다.
@@ -1954,11 +2226,17 @@ class ArtecMultiPassScanSession:
         if code != 0:
             print(f"  [p1plan] ✘ 첫 밴드 이동 실패(code={code})")
             return False
-        self._recapture_T_BC("p1plan")          # master 기준 = 첫 밴드
+        if self._T_BC is not None and st.master_model.scan_count() > 0:
+            # master 가 이미 있다(flip 밴드 캡처) — 첫 밴드는 master 기준이 아니라
+            # 카메라 이동 보정 대상이다(`capture_rotation` lookaround 경로와 같은 규약).
+            st.next_T_BC_pending = self._recapture_T_BC("p1plan", return_only=True)
+            print("  [band hint] 카메라 이동 보정 예약 (master 프레임으로 정렬)")
+        else:
+            self._recapture_T_BC("p1plan")      # master 기준 = 첫 밴드
         st.band_poses = qs
         try:
             while st.n_pass < self.s.max_passes:
-                status = self._do_one_rotation(st)
+                status = self._do_one_rotation(st, stage)
                 if status == _ROT_ABORT:
                     return False
                 if status == _ROT_OK:
@@ -1986,6 +2264,7 @@ class ArtecMultiPassScanSession:
                            f"(stage_until={self.stage_until} — NBV 보강 없음)")
                     print(f"  [p1plan] 밴드 부분 성공 {n_done}/{n_band} "
                           f"— 재시도 없이 {nxt}")
+                    _ev("band_partial", stage=stage, done=n_done, total=n_band, next=nxt[:20])
                     for _r in getattr(res, "band_reasons", []) or []:
                         print(f"    · {_r}")
                     return True
@@ -2014,7 +2293,7 @@ class ArtecMultiPassScanSession:
             camera-motion T_pre 병합 (_capture_nbv_pose). False=캡처 실패.
         """
         st = self._st
-        if stage == "lookaround" and pose is not AT_CURRENT:
+        if stage in ("lookaround", "flip") and pose is not AT_CURRENT:
             # lookaround 플래너가 고른 자세(밴드면 대역마다 1회). 로봇을 그 자세로
             # 옮긴 뒤부터는 AT_CURRENT 와 완전히 같은 경로 — streaming + cleanup +
             # hint + master 병합 + tracking-lost recovery.
@@ -2044,7 +2323,7 @@ class ArtecMultiPassScanSession:
             pose = AT_CURRENT
         if pose is AT_CURRENT:
             while st.n_pass < self.s.max_passes:
-                status = self._do_one_rotation(st)
+                status = self._do_one_rotation(st, stage)
                 if status == _ROT_ABORT:
                     return False
                 if status == _ROT_RETRY:
@@ -2069,6 +2348,13 @@ class ArtecMultiPassScanSession:
             st.icp_refine_log.append(
                 (st.master_model.scan_count(), T_pre.copy(), T_ref.copy(), fit, rmse))
             T_apply = T_ref
+        self._dump_scan_raw(sub.model, T_apply, "nbv", T_pre_kin=T_pre,
+                            tracking_lost=bool(getattr(sub, "tracking_lost", False)),
+                            n_frames=int(getattr(sub, "n_frames", 0)))
+        _ev("merge", stage="nbv", pose_idx=st.pose_idx,
+            method=("icp" if T_apply is not T_pre else "camera"),
+            n_scans_before=st.master_model.scan_count(),
+            tracking_lost=bool(getattr(sub, "tracking_lost", False)))
         n = self._merge_into_master(sub.model, st.master_model, T_apply)
         # 겨냥·수집·정합 기록 — B 프레임 점: sub scan-world 점을 T_pre(기구학) / T_apply(정합) 로
         try:
@@ -2118,8 +2404,8 @@ class ArtecMultiPassScanSession:
             for i in range(st.master_model.scan_count())
         )
 
-        print(f"\n═══ Multi-pass 종료 ═══")
-        print(f"  passes              : {st.n_pass}")
+        print(f"\n═══ 스캔 종료 ═══")
+        print(f"  밴드 완주           : {st.bands_done}/{st.bands_total}")
         print(f"  master scan_count   : {st.master_model.scan_count()}")
         print(f"  master total frames : {n_total_frames}")
         print(f"  user_quit           : {st.user_quit}")
@@ -2143,6 +2429,7 @@ class ArtecMultiPassScanSession:
             n_recovery_succeeded=st.n_recovery_succeeded,
             recorded_hints=st.recorded_hints,
             icp_refine_log=st.icp_refine_log,
+            preview_result=getattr(self, "preview_result", None),
         )
 
     # ── lookaround ─────────────────────────────────────────────────────────
@@ -2164,8 +2451,8 @@ class ArtecMultiPassScanSession:
         if not s.prompt_between_passes:
             st.aborted_reason = "single-pass mode (no inter-pass prompt)"
             return False
-        print(f"\n  ✓ Pass {st.n_pass} (flip {st.pose_idx}) 완료 "
-              f"— frames={st.last_n_frames}")
+        print(f"\n  ✓ 뒤집기 {st.pose_idx}번째 수집 완료 "
+              f"— 밴드 {st.bands_done}/{st.bands_total} · frames={st.last_n_frames}")
         next_pose = st.pose_idx + 1
         # 세장형 물체 권고 — sim 과 같은 정책(utils/nbv/flip_policy). 실제 뒤집기는
         # 사람이 하므로 **안내만** 한다: 설정된 pose 목록에 90°(눕히기)가 없다면
@@ -2177,28 +2464,40 @@ class ArtecMultiPassScanSession:
             if len(angles) > 1:
                 print(f"  ★ 세장형 물체(종횡비 {aspect:.1f}) — 권장 순서: "
                       + " → ".join(describe_flip(a) for a in angles))
-        if next_pose < len(s.pose_physical_rotations):
-            print(f"  → 다음 pose ({next_pose}) 자세로 아이템 회전 후 [Enter]")
+        # ★ 뒤집기마다 **따로** 묻는다 — "90° 할래?" → [n] 이면 "180° 할래?" 로.
+        #   예전 [n] 은 남은 뒤집기 전부 건너뛰기였다(2026-09-21 요청으로 변경).
+        n_flips = max(0, len(s.pose_physical_rotations) - 1)   # pose 0 = 원래 자세
+        while next_pose < len(s.pose_physical_rotations):
+            print(f"\n  ── 뒤집기 {next_pose}/{n_flips} — 할까? ──")
             self._print_pose_hint_for_user(next_pose)
-        else:
-            print(f"  → 추가 pass 진행하려면 [Enter] (모든 정의된 pose 완료)")
-        print(f"    남은 flip 건너뛰기 [n]+Enter / 종료 [q]+Enter")
-        if self._wait_user_quit():
-            st.user_quit = True
-            st.aborted_reason = "사용자 종료 (정상 완료 후)"
-            return False
-        st.pose_idx += 1                        # 정상 완료 시만 advance
-        return True
+            print("  [Enter] 이렇게 뒤집어 놓았다, 계속    [n] 이 뒤집기는 건너뛴다    "
+                  "[q] 종료    (키 하나만 누르면 된다)")
+            key = self._read_key("nq")
+            if key == "q":
+                st.user_quit = True
+                st.aborted_reason = "사용자 종료 (뒤집기 프롬프트)"
+                return False
+            if key == "n":
+                print(f"  → 뒤집기 {next_pose} 건너뜀")
+                next_pose += 1
+                continue
+            st.pose_idx = next_pose             # 이 자세의 힌트(R_phys)로 정합
+            return True
+        st.aborted_reason = st.aborted_reason or f"정의된 뒤집기 {n_flips}회 소진"
+        print(f"  → 더 할 뒤집기가 없다 — 마무리로")
+        return False
 
     # ── 회전 1회 (lookaround·flip 공유) ───────────────────────────────────────
 
-    def _do_one_rotation(self, st: "_RunState") -> str:
+    def _do_one_rotation(self, st: "_RunState", stage: str = "lookaround") -> str:
         """회전 1회: streaming → cleanup → hint → merge → viewer → master_center,
         그리고 tracking-lost recovery. lookaround·flip 이 공유한다.
 
         Returns _ROT_OK(정상), _ROT_RETRY(같은 pose 재시도), _ROT_ABORT(중단).
         """
         s = self.s
+        # 배너가 어느 단계의 캡처인지 말하게 한다 (lookaround / flip).
+        s.streaming_settings.stage_label = str(stage)
         self._print_pass_banner(st.n_pass + 1, s.max_passes, st.pose_idx)
         # ★ master IModel 의 좌표계는 **첫 회전의 녹화 시작 시점** 카메라 프레임이다.
         #   그 T_CB 를 여기서 고정한다. 이후 밴드 이동·NBV 자세마다 `self._T_CB` 가
@@ -2210,7 +2509,7 @@ class ArtecMultiPassScanSession:
         if st.live_viewer is not None:
             try:
                 st.live_viewer.new_pass(
-                    f"Pass {st.n_pass + 1} (flip {st.pose_idx})")
+                    f"scan {st.n_pass + 1} (뒤집기 {st.pose_idx})")
             except Exception:
                 pass
 
@@ -2241,6 +2540,8 @@ class ArtecMultiPassScanSession:
                 retarget_fn=(self._band_retarget if st.band_poses else None),
                 standoff_of=(self._band_standoff_of if st.band_poses else None),
                 scan_range=self._scanning_range_m(),
+                # ★ 밴드 전환은 조준 유지 소보간 + lost 시 되돌아가기(relocalization).
+                band_path_fn=(self._band_path if st.band_poses else None),
             )
             # ★ 스캔 시작 시점의 turntable 논리각 — clearpos 를 건너뛰는 경우
             #   (recovery safe-back) 물체가 이 각만큼 돌아간 채 찍히므로, 병합
@@ -2256,6 +2557,8 @@ class ArtecMultiPassScanSession:
         st.pass_results.append(sub_result)
         st.n_pass += 1
         st.last_n_frames = sub_result.n_frames
+        st.bands_done += int(getattr(sub_result, "n_bands_done", 0) or 0)
+        st.bands_total += int(getattr(sub_result, "n_bands", 0) or 0)
 
         # ── Pass cleanup: SerialReg + OutlierRemoval ───────────────
         # 멀티패스 끝까지 기다리지 말고 회전마다 즉시 정합/이상점 제거.
@@ -2275,9 +2578,9 @@ class ArtecMultiPassScanSession:
                     cleaned,
                 )
                 sub_result.model = cleaned
-                print(f"\n  [pass cleanup] SerialReg + OutlierRemoval 완료")
+                print(f"\n  [정리] SerialReg + OutlierRemoval 완료")
             except Exception as e:
-                print(f"\n  [pass cleanup] ⚠ 실패 "
+                print(f"\n  [정리] ⚠ 실패 "
                       f"({type(e).__name__}: {e}) — raw IScan 사용")
 
         # ── Pose hint 계산 (centroid-aware + base-frame aware) ─────
@@ -2287,24 +2590,55 @@ class ArtecMultiPassScanSession:
         #    객체 centroid 를 pivot 으로 회전 → camera 원점 기준 30cm
         #    translation 오류 제거.
         T_pre = None
+        st.merge_method = "none"
 
         # Recovery override: 직전 회전에서 robot 이 움직였다면 camera-motion
         # 만 보정 (object 회전 무관, pose_idx 그대로). 다른 R_phys hint 보다 우선.
         #   x_W_master = T_BC_master @ T_CB_new @ x_W_new
         #              = T_BC_master @ inv(T_BC_new) @ x_W_new
         # SDK frame_transformation 은 mm 라 translation 만 m→mm scale.
+        R_phys = (s.pose_physical_rotations[st.pose_idx]
+                  if st.pose_idx < len(s.pose_physical_rotations) else None)
+        _is_flip = (R_phys is not None
+                    and not np.allclose(R_phys, np.eye(4), atol=1e-9))
         if st.next_T_BC_pending is not None:
             # ★ 공통 헬퍼(`_compose_T_pre_W_mm`) — master 스냅샷 기준 + 물체 회전
             #   θ0(clearpos 를 건너뛴 recovery 는 safe-back 각에서 시작) + S 켤레.
             #   예전 공식(self._T_BC @ inv(pending))은 recovery 가 self._T_BC 를
             #   덮어써 T_pre ≈ I 로 무효였고, θ0·S 도 빠져 있었다.
+            # ★ flip 밴드 캡처(2026-09-21)는 **카메라 이동 + 뒤집기 되돌리기**가
+            #   동시에 필요하다. 예전엔 둘 중 하나만 걸렸다(이동 보정이 있으면
+            #   뒤집기 힌트를 건너뜀) — flip 이 home 고정이었을 때는 문제가 없었지만
+            #   flip 도 preview→밴드 계획으로 로봇이 움직이면서 필요해졌다.
             if st.master_T_CB is None and self._T_BC is None:
                 print(f"  [recovery hint] ⚠ T_BC_master 미설정 — override skip")
             else:
                 try:
-                    T_pre = self._compose_T_pre_W_mm(
-                        st.next_T_BC_pending, st.last_scan_theta0,
-                        tag="camera-motion")
+                    T_unflip = None
+                    st.merge_method = "camera"
+                    if _is_flip:
+                        c_pass = self._compute_model_centroid(sub_result.model)
+                        c_ref = (st.master_center if st.master_center is not None
+                                 else c_pass)
+                        T_unflip = self._flip_unflip_B(
+                            R_phys, st.next_T_BC_pending, st.last_scan_theta0,
+                            c_pass, c_ref)
+                        st.hints_applied = True
+                        print(f"\n  [hint flip {st.pose_idx}] 뒤집기 되돌리기(B) "
+                              f"+ 카메라 이동 보정 합성 (힌트)")
+                        # ★ 힌트는 초기값일 뿐 — 텍스처 매칭 → 기하 전역 정합 순으로 교체.
+                        _fr, _T, st.merge_method = self._flip_global_refine(
+                            sub_result.model, st.next_T_BC_pending,
+                            st.last_scan_theta0, T_unflip)
+                        if _fr == "W":
+                            T_pre = np.asarray(_T, float)      # 스캔월드→master월드 (mm) 직접
+                            T_unflip = None
+                        else:
+                            T_unflip = _T
+                    if T_pre is None:
+                        T_pre = self._compose_T_pre_W_mm(
+                            st.next_T_BC_pending, st.last_scan_theta0,
+                            tag="camera-motion", T_extra_B=T_unflip)
                     print(f"\n  [camera-motion] 이동 보정 적용 "
                           f"(Δtrans = ({T_pre[0,3]:+.1f}, "
                           f"{T_pre[1,3]:+.1f}, {T_pre[2,3]:+.1f}) mm) "
@@ -2313,9 +2647,7 @@ class ArtecMultiPassScanSession:
                     print(f"  [recovery hint] ⚠ inv 실패 ({e}) — override skip")
             st.next_T_BC_pending = None
 
-        R_phys = (s.pose_physical_rotations[st.pose_idx]
-                  if st.pose_idx < len(s.pose_physical_rotations) else None)
-        if T_pre is None and R_phys is not None and not np.allclose(R_phys, np.eye(4), atol=1e-9):
+        if T_pre is None and _is_flip:
             try:
                 R_phys_inv_B = np.linalg.inv(R_phys)[:3, :3]
             except np.linalg.LinAlgError:
@@ -2337,6 +2669,7 @@ class ArtecMultiPassScanSession:
                 T_pre[:3, :3] = R_phys_inv_W
                 T_pre[:3, 3] = c_ref - R_phys_inv_W @ c_pass
                 st.hints_applied = True
+                st.merge_method = "hint"
                 print(f"\n  [hint flip {st.pose_idx}] frame={frame_tag}")
                 print(f"  [hint flip {st.pose_idx}] c_pass = ({c_pass[0]:+.1f}, "
                       f"{c_pass[1]:+.1f}, {c_pass[2]:+.1f}) mm")
@@ -2350,6 +2683,17 @@ class ArtecMultiPassScanSession:
         # frame_transformations 에 박지 않고 recorded_hints 에 기록만 (병합
         # 비교용). 같은 raw scan 데이터로 후처리 단계에서 hint on/off 를
         # swap 가능.
+        # ★ 원시 스캔 덤프 — 정합을 **오프라인에서 다시 돌릴 수 있게** 스캔 월드 점과
+        #   적용 T_pre 를 남긴다 (2026-09-21: flip 정합이 나빴는데 재현할 데이터가 없었다).
+        self._dump_scan_raw(sub_result.model, T_pre, stage,
+                            theta0=st.last_scan_theta0,
+                            R_phys=(R_phys if _is_flip else None),
+                            tracking_lost=bool(sub_result.tracking_lost),
+                            n_frames=int(sub_result.n_frames))
+        _ev("merge", stage=stage, pose_idx=st.pose_idx,
+            method=getattr(st, "merge_method", "hint" if T_pre is not None else "none"),
+            n_scans_before=st.master_model.scan_count(),
+            tracking_lost=bool(sub_result.tracking_lost))
         if T_pre is not None and not s.apply_hints_to_frame_transformations:
             idx_before = st.master_model.scan_count()
             n_added = self._merge_into_master(
@@ -2382,8 +2726,11 @@ class ArtecMultiPassScanSession:
             n_added = self._merge_into_master(
                 sub_result.model, st.master_model, T_pre_to_apply,
             )
-        print(f"\n  [pass {st.n_pass} / flip {st.pose_idx}] {n_added} scan(s) → master "
-              f"(total scans={st.master_model.scan_count()})")
+        _nb_done = int(getattr(sub_result, "n_bands_done", 0) or 0)
+        _nb_all = int(getattr(sub_result, "n_bands", 0) or 0)
+        print(f"\n  [병합] 밴드 {_nb_done}/{_nb_all} → master "
+              f"(누적 scan {st.master_model.scan_count()} · "
+              f"밴드 {st.bands_done}/{st.bands_total})")
 
         # Viewer 를 cleaned master_model 로 재구성 — 회전 중 누적된 raw
         # 점들 (정합 전 위치) 을 cleanup + T_pre 적용된 점들로 교체.
@@ -2433,6 +2780,9 @@ class ArtecMultiPassScanSession:
                 ok, T_BC_new = self._attempt_recovery(
                     sub_result, st.master_model, st.recovery_retry_count,
                 )
+                _ev("recovery", stage=stage, attempt=st.recovery_retry_count + 1,
+                    ok=bool(ok), pose_changed=(T_BC_new is not None),
+                    reason=str(sub_result.loss_reason)[:80])
                 if ok:
                     st.recovery_retry_count += 1
                     st.n_recovery_attempts += 1
@@ -2461,8 +2811,8 @@ class ArtecMultiPassScanSession:
                 )
                 print(f"  ⚠ {st.aborted_reason}")
                 return _ROT_ABORT
-            print(f"\n  ⚠ Pass {st.n_pass} tracking lost: {sub_result.loss_reason}")
-            print(f"  → 같은 flip (flip {st.pose_idx}) 그대로 두고 [Enter] 재시도 / [q]+Enter 종료")
+            print(f"\n  ⚠ tracking lost: {sub_result.loss_reason}")
+            print(f"  → 물체는 그대로 두고  [Enter] 재시도    [q] 종료    (키 하나만)")
             if self._wait_user_quit():
                 st.user_quit = True
                 st.aborted_reason = "사용자 종료 (lost 직후)"
@@ -2473,6 +2823,10 @@ class ArtecMultiPassScanSession:
             return _ROT_RETRY       # 같은 pose 재시도
 
         # 정상 완료 — recovery 카운터 reset.
+        _ev("rotation_ok", stage=stage, pose_idx=st.pose_idx,
+            after_recovery=int(st.recovery_retry_count),
+            bands_done=int(getattr(sub_result, "n_bands_done", 0) or 0),
+            n_bands=int(getattr(sub_result, "n_bands", 1) or 1))
         if st.recovery_retry_count > 0:
             st.n_recovery_succeeded += 1
             print(f"\n  ✓ recovery 후 정상 완료 — retry 카운터 reset "
@@ -2873,6 +3227,13 @@ class ArtecMultiPassScanSession:
         from utils.control.theta_planner import DEFAULT_JOINT_WEIGHTS
         from utils.collision.robot_collision import swept_pose_collision
         from utils.nbv.nbv_planner import NbvPlanner
+        # ★ **함수 머리에서** 임포트한다. 아래 `roll_order` 가 `_vp` 를 참조하는데,
+        #   예전엔 이 임포트가 ② gap 겨냥 절(節) 안에 있었다. ① 축-고도각 경로가
+        #   먼저 타면 `roll_order` 호출 시점에 `_vp` 가 아직 바인딩되지 않아
+        #   NameError 로 파이프라인이 죽었다 (2026-09-21 실물, nbv 진입 직후).
+        #   함수 지역 임포트를 중간에 두면 그 앞에서 쓰는 클로저가 조용히 깨진다.
+        from utils.robot import view_pose as _vp
+        from utils.robot import xarm7_kinematics as _kin
 
         tt = getattr(self.mms, "turntable_transform", None)
         T_BF0 = getattr(tt, "T_BF0", None) if tt is not None else None
@@ -2889,15 +3250,21 @@ class ArtecMultiPassScanSession:
         #   225−97 = 128mm 로 Spider 근접한계(170mm) 안쪽이라 데이터가 안 나온다.
         #   (같은 상수가 `plan_frontier`/`nbv_pose_from_candidate` 에는 표면 거리로
         #    넘어가고 있었다 — 한 값이 두 뜻으로 쓰이던 것을 갈랐다.)
-        _r_obj = float(np.max(np.linalg.norm(
-            verts[:, :2] - np.asarray(axis_xy_B, float)[None, :], axis=1))) if len(verts) else 0.0
+        #   ★ 반경은 **preview 점군**에서 잰다(p95). master 메시로 재면 안 된다 —
+        #     2026-09-21 실물(run_145013): preview 는 r p95=67mm 로 깨끗했는데
+        #     master 메시는 nbv 진입 시점에 이미 폭 326mm(p95 142mm → standoff
+        #     367mm), 이후 정합 없이 붙는 nbv 패치가 쌓이며 421mm·높이 380mm 까지
+        #     부풀었다. 190mm 병이 그럴 수 없다 — 메시는 반경 측정원으로 못 쓴다.
+        #     preview 가 없을 때만 메시로 폴백하되, 디스크면 10mm 위의 점만 센다.
+        _r_obj, _r_src = self._object_radius_m(axis_xy_B, verts)
         standoff = _axis_standoff(_r_obj, self.s.nbv_distance_mm / 1000.0)
         # ★ 조준점을 **찍는다**. 이 한 줄이 없어서 단위/프레임 오류(mm 를 m 로,
         #   현재 T_CB 를 마스터 T_CB 로)가 "허공을 스캔" 으로만 드러났다.
         #   디스크 상단 z 와 나란히 보이면 바로 이상을 알 수 있다.
         _disc_z = float(np.asarray(tt.axis_point_B, float)[2])
         print(f"  [nbv] 조준 target=({look_target[0]:+.3f}, {look_target[1]:+.3f}, "
-              f"{look_target[2]:+.3f})m  standoff={standoff*1000:.0f}mm  "
+              f"{look_target[2]:+.3f})m  standoff={standoff*1000:.0f}mm "
+              f"(표면 {self.s.nbv_distance_mm:.0f} + 반경 {_r_obj*1000:.0f}, {_r_src})  "
               f"| 디스크상단 z={_disc_z:+.3f}m  메시 z={verts[:, 2].min():+.3f}"
               f"..{verts[:, 2].max():+.3f}m")
 
@@ -2975,8 +3342,7 @@ class ArtecMultiPassScanSession:
         #    (gap 정보가 '법선 고도각 중앙값' 하나로 압축). 손잡이·컵 내벽 같은
         #    국소 결손은 원리적으로 못 겨냥한다 → 표면점 p 를 정면으로 본다.
         #    2026-09-10: sim 에만 있던 경로를 real 에 배선. 규약만 OpenCV 로 바뀐다.
-        from utils.robot import view_pose as _vp
-        from utils.robot import xarm7_kinematics as _kin
+        #    (`_vp`·`_kin` 은 함수 머리에서 임포트한다 — 위 주석 참조.)
 
         # ★ 물체 근접 가드는 **공용** `plan_frontier(obj_pts=, eye_clear_m=)` 가
         #   건다(2026-09-18 공용화). 근거는 "충돌 world 에 대상물이 없어서" 가
@@ -3200,12 +3566,15 @@ class ArtecMultiPassScanSession:
         orig_sweep = st.sweep_rad
         st.reset_to_zero_first = False                     # 현재 위치 유지
         st.sweep_rad = sweep_rad                           # gap 겨냥 = 부분 스윕
+        orig_label = st.stage_label
+        st.stage_label = "nbv"                             # 배너가 단계를 말하게
         try:
             sub = ArtecStreamingScanSession(
                 self.mms, self.robot, self.turntable, st).run()
         finally:
             st.reset_to_zero_first = orig_reset
             st.sweep_rad = orig_sweep
+            st.stage_label = orig_label
         return sub, T_pre
 
     # ── nbv (NBV hole-fill) 프리미티브 — 수렴 루프는 공용 컨트롤러 소유 ──
@@ -3223,21 +3592,69 @@ class ArtecMultiPassScanSession:
         """
         return []
 
+    def _master_pts_B_m(self, max_points: int = 80_000):
+        """master 의 등록 scan 점 → **B 프레임, m**. 없으면 빈 배열.
+
+        ★ 반드시 `_build_master_mesh_B` 와 **같은 변환**을 탄다 — 마스터 프레임의
+          `master_T_CB` + 스캐너3D→Color `S`. 예전에는 여기(기지면 필터)와 신규복셀
+          회계가 `master_points_in_base_frame(model, self._T_CB)` 를 썼다: **현재
+          자세**의 T_CB 에 S 도 없어서 점군이 물체에서 ~600mm 떨어진 허공에 놓였다
+          (2026-09-21 run_145013: nbv-dbg master 가 축에서 r≈590mm, 디스크 위
+          300mm). 그 결과 gap 후보가 전부 '기지면부족' 으로 기각돼 매 반복이
+          폴백 스윕으로 빠졌고, 신규복셀 판정도 무의미했다.
+        """
+        try:
+            st = self._st
+            if st.master_model is None or st.master_model.scan_count() == 0:
+                return np.zeros((0, 3), float)
+            T_CB = st.master_T_CB if st.master_T_CB is not None else self._T_CB
+            pcd = self._master_to_pcd_B(
+                st.master_model, T_CB, voxel_mm=self.s.nbv_master_voxel_mm,
+                T_sc_mm=getattr(self, "_T_scan_color", None))
+            if pcd is None or len(pcd.points) == 0:
+                return np.zeros((0, 3), float)
+            P = np.asarray(pcd.points, float) / 1000.0
+            if len(P) > max_points:
+                P = P[np.random.default_rng(0).choice(len(P), max_points, replace=False)]
+            return P
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  [nbv] ⚠ master 점 추출 실패({e})")
+            return np.zeros((0, 3), float)
+
     def _known_surface_pts_m(self, mesh):
         """gap 겨냥 필터용 **기지 면** 점군 (B, m). master 의 등록 scan 점을 쓰고,
-        변환이 없으면 메시 정점으로 폴백 — dry 회계와 같은 우선순위."""
-        try:
-            T_CB = getattr(self, "_T_CB", None)
-            if T_CB is None and getattr(self, "_T_BC", None) is not None:
-                T_CB = np.linalg.inv(self._T_BC)
-            if T_CB is not None and self._st.master_model.scan_count() > 0:
-                from mms_artec.nbv.recovery_pose_selector import master_points_in_base_frame
-                mp = master_points_in_base_frame(self._st.master_model, T_CB, max_points=80_000)
-                if len(mp):
-                    return np.asarray(mp, float) / 1000.0
-        except Exception as e:                                   # noqa: BLE001
-            print(f"  [nbv] ⚠ master 점 추출 실패({e}) — 메시 정점으로 대체")
-        return np.asarray(mesh.vertices, float)
+        못 꺼내면 메시 정점으로 폴백 — dry 회계와 같은 우선순위."""
+        mp = self._master_pts_B_m(80_000)
+        return mp if len(mp) else np.asarray(mesh.vertices, float)
+
+    def _object_radius_m(self, axis_xy_B, mesh_verts):
+        """축거리 계산용 **물체 반경** (m, p95) 과 출처 문자열.
+
+        1순위 preview 점군(`preview_result["points_B"]`) — 물체만 담겨 깨끗하다.
+        2순위 메시 정점 — 디스크면에서 10mm 이상 떠 있는 점만(디스크·바닥 제외).
+        둘 다 없으면 0 (표면거리 = 축거리, 예전 동작).
+        """
+        tt = getattr(self.mms, "turntable_transform", None)
+        disc_z = float(np.asarray(tt.axis_point_B, float)[2]) if tt is not None else None
+        up = -1.0 if float(self._view_up_B()[2]) < 0 else +1.0
+        ax = np.asarray(axis_xy_B, float)[None, :]
+
+        def _p95(P):
+            P = np.asarray(P, float)
+            if disc_z is not None and len(P):
+                P = P[up * (P[:, 2] - disc_z) > 0.010]         # 디스크면 10mm 위만
+            if len(P) < 30:
+                return None
+            return float(np.percentile(np.linalg.norm(P[:, :2] - ax, axis=1), 95))
+
+        pv = getattr(self, "preview_result", None) or {}
+        r = _p95(pv.get("points_B", np.zeros((0, 3))))
+        if r is not None:
+            return r, "preview"
+        r = _p95(mesh_verts)
+        if r is not None:
+            return r, "메시(폴백)"
+        return 0.0, "없음"
 
     def _gap_kw(self) -> dict:
         s = self.s
@@ -3288,15 +3705,9 @@ class ArtecMultiPassScanSession:
                 from utils.nbv.flip_policy import dims_from_points
                 self._obj_dims = dims_from_points(v)
                 src, pts_m = "메시정점(폴백)", v
-                T_CB = getattr(self, "_T_CB", None)
-                if T_CB is None and getattr(self, "_T_BC", None) is not None:
-                    T_CB = np.linalg.inv(self._T_BC)
-                if T_CB is not None and self._st.master_model.scan_count() > 0:
-                    from mms_artec.nbv.recovery_pose_selector import master_points_in_base_frame
-                    mp = master_points_in_base_frame(self._st.master_model, T_CB,
-                                                     max_points=60_000)
-                    if len(mp):
-                        src, pts_m = "master scan 점", np.asarray(mp, float) / 1000.0
+                mp = self._master_pts_B_m(60_000)       # 마스터 프레임 + S (메시와 동일)
+                if len(mp):
+                    src, pts_m = "master scan 점", mp
                 new_frac, self._conv_vox = _nbvp.new_voxel_frac(
                     pts_m, getattr(self, "_conv_vox", None), _nbvp.CONV_VOX_M)
                 if new_frac is not None:
@@ -3520,23 +3931,13 @@ class ArtecMultiPassScanSession:
                   f"inverse 계산 실패 — hint 무시")
             return None
 
-    def _print_pose_hint_for_user(self, pose_idx: int) -> None:
-        """현재 pose 에 대해 사용자가 어떤 자세로 두어야 하는지 출력."""
-        rots = self.s.pose_physical_rotations
-        if not rots or pose_idx >= len(rots) or rots[pose_idx] is None:
-            print(f"  [flip {pose_idx}] hint 미정 — canonical 자세로 두기")
-            return
-        R3 = rots[pose_idx][:3, :3]
-        # Rotation 행렬에서 axis-angle 추출 (Rodrigues' formula 역계산)
-        cos_t = (np.trace(R3) - 1.0) / 2.0
-        cos_t = float(np.clip(cos_t, -1.0, 1.0))
+    @staticmethod
+    def _axis_angle(R3: np.ndarray):
+        """회전행렬 → (각 deg, 단위축). Rodrigues 역계산; 180° 근처는 (R+I)/2 로 축 복원."""
+        cos_t = float(np.clip((np.trace(R3) - 1.0) / 2.0, -1.0, 1.0))
         angle_deg = float(np.degrees(np.arccos(cos_t)))
-
         if abs(angle_deg) < 0.1:
-            print(f"  [flip {pose_idx}] canonical 자세 (회전 0°)")
-            return
-
-        # 축 추출: 180° 근처는 sin_t≈0 singularity. (R+I)/2 의 대각 원소로 axis 복원.
+            return 0.0, np.zeros(3)
         if abs(180.0 - angle_deg) < 1.0:
             M = (R3 + np.eye(3)) / 2.0
             diag = np.diag(M)
@@ -3546,35 +3947,101 @@ class ArtecMultiPassScanSession:
             for j in range(3):
                 if j != i:
                     ax[j] = M[i, j] / ax[i] if ax[i] > 1e-9 else 0.0
-            n = float(np.linalg.norm(ax))
-            if n > 1e-9:
-                ax = ax / n
         else:
             sin_t = np.sin(np.radians(angle_deg))
-            ax = np.array([
-                R3[2, 1] - R3[1, 2],
-                R3[0, 2] - R3[2, 0],
-                R3[1, 0] - R3[0, 1],
-            ]) / (2.0 * sin_t)
+            ax = np.array([R3[2, 1] - R3[1, 2],
+                           R3[0, 2] - R3[2, 0],
+                           R3[1, 0] - R3[0, 1]]) / (2.0 * sin_t)
+        n = float(np.linalg.norm(ax))
+        return angle_deg, (ax / n if n > 1e-9 else ax)
 
-        print(f"  [flip {pose_idx}] 객체 회전 ≈ {angle_deg:.0f}° "
-              f"around axis ({ax[0]:+.2f}, {ax[1]:+.2f}, {ax[2]:+.2f})")
+    def _print_pose_hint_for_user(self, pose_idx: int) -> None:
+        """이 뒤집기에서 물체를 어떻게 놓아야 하는지 안내.
+
+        ★ `pose_physical_rotations[k]` 는 **원래 자세(pose 0) 기준 절대 회전**이고
+          정합 힌트로 그대로 쓰인다(`R_phys`). 그래서 사용자는 이 값을 **따라야**
+          한다 — 마음대로 다른 각으로 돌리면 힌트가 틀려 flip 패스가 어긋난다.
+          2/2 에서 "180°" 만 찍으면 "지금 자세에서 180°" 로 읽히므로(2026-09-21
+          질문) 직전 자세 대비 **추가로 돌릴 각**도 같이 찍는다.
+        """
+        rots = self.s.pose_physical_rotations
+        if not rots or pose_idx >= len(rots) or rots[pose_idx] is None:
+            print(f"  안내 미정 — 원래 자세 그대로 둔다")
+            return
+        angle_deg, ax = self._axis_angle(rots[pose_idx][:3, :3])
+        if angle_deg < 0.1:
+            print(f"  원래 자세 그대로 둔다 (회전 0°)")
+            return
+        from utils.nbv.flip_policy import describe_flip
+        # 축을 사람 말로: 턴테이블 회전축(수직)과 나란하면 '수직축', 아니면 '수평축'.
+        tt = getattr(self.mms, "turntable_transform", None)
+        ad = getattr(tt, "axis_dir_B", None) if tt is not None else None
+        vertical = ad is not None and abs(float(np.dot(ax, np.asarray(ad, float)))) > 0.9
+        ax_word = "수직축(턴테이블 축)" if vertical else "수평축"
+        print(f"  ★ 원래 자세 기준 {angle_deg:.0f}° — {describe_flip(angle_deg)}")
+        print(f"    회전축: base ({ax[0]:+.2f}, {ax[1]:+.2f}, {ax[2]:+.2f}) = {ax_word}")
+        # 직전 자세에서 추가로 돌릴 각 (같은 축이면 단순 차, 아니면 상대회전의 각).
+        prev = rots[pose_idx - 1] if pose_idx >= 1 and rots[pose_idx - 1] is not None else None
+        if prev is not None:
+            d_deg, _ = self._axis_angle(prev[:3, :3].T @ rots[pose_idx][:3, :3])
+            if d_deg > 0.1 and abs(d_deg - angle_deg) > 0.1:
+                print(f"    지금 자세에서는 같은 축으로 {d_deg:.0f}° **더** 돌리면 된다")
+        print(f"    (이 각이 정합 힌트다 — 다른 각으로 놓으면 정합이 어긋난다)")
 
     @staticmethod
     def _print_pass_banner(idx: int, total: int, pose_idx: int) -> None:
-        bar = "═" * 46
-        print(f"\n╔{bar}╗")
-        print(f"║   Multi-pass scan — Pass {idx} / max {total:<3} (flip {pose_idx})    ║")
-        print(f"╚{bar}╝")
+        """재시도·뒤집기처럼 **기본이 아닐 때만** 한 줄로 알린다.
+
+        예전엔 매 회전마다 3줄짜리 박스로 `Multi-pass scan — Pass 1 / max 8
+        (flip 0)` 을 찍었다. 바로 위 `[stage] ═══ [2] lookaround ═══` 과 바로 아래
+        `Artec Streaming lookaround` 가 이미 단계를 말하는데 그 사이에 끼어
+        중복이었고, 옛 용어(`Multi-pass`/`Pass`)에 `(flip 0)` 까지 붙어 **flip
+        단계로 오해**를 샀다 — 실제로는 flip *인덱스*(0 = 안 뒤집은 원래 자세)다
+        (2026-09-21 사용자 혼동).
+
+        첫 시도·원래 자세(idx=1, pose_idx=0)는 아무것도 안 찍는다 — 그게 기본이라
+        알릴 것이 없다.
+        """
+        # `idx` 는 누적 scan 번호라 "재시도" 가 아니다 — flip 첫 캡처가 '재시도 2/8'
+        # 로 찍혔다(2026-09-21 run_150720). 뒤집기 번호만 말한다.
+        if pose_idx <= 0:
+            return
+        print(f"\n  ── 뒤집기 {pose_idx}번째 수집 (scan {idx}/{total}) ──")
 
     @staticmethod
-    def _wait_user_quit() -> bool:
-        """Return True if user typed 'q' or 'n' (case-insensitive), else False.
+    def _read_key(allowed: str = "q") -> str:
+        """콘솔에서 **키 하나**를 읽는다 — Enter 면 "", `allowed` 의 글자면 그 글자.
 
-        'n' = "이 단계는 여기까지" — flip 프롬프트에서 q 와 같은 효과지만
-        (남은 flip 건너뛰고 finalize 로), 의도를 분명히 하려고 따로 받는다."""
+        Windows 콘솔은 msvcrt 로 받아 **Enter 가 필요 없다**. 다른 키는 무시하고
+        계속 기다린다. 콘솔이 아니거나(파이프·리다이렉트) msvcrt 가 없으면
+        `input()` 폴백 — 그때는 Enter 가 필요하다.
+        예전 `[n]+Enter / [q]+Enter` 는 "n 을 누르고 Enter" 인지 "n 또는 Enter"
+        인지 읽히지 않았다(2026-09-21 사용자 피드백)."""
+        import sys as _sys
+        try:
+            import msvcrt
+            if _sys.stdin is not None and _sys.stdin.isatty():
+                while msvcrt.kbhit():               # 밀린 키 버림 (nbv 중 누른 n 등)
+                    msvcrt.getwch()
+                while True:
+                    ch = msvcrt.getwch()
+                    if ch in ("\r", "\n"):
+                        print()
+                        return ""
+                    if ch.lower() in allowed:
+                        print(ch.lower())
+                        return ch.lower()
+        except ImportError:
+            pass
+        except Exception:                           # noqa: BLE001 — 콘솔 이상 시 폴백
+            pass
         try:
             inp = input("  >> ").strip().lower()
         except EOFError:
-            return False
-        return inp in ("q", "n")
+            return ""
+        return inp[:1] if inp[:1] in allowed else ""
+
+    @classmethod
+    def _wait_user_quit(cls) -> bool:
+        """[Enter] 계속 / [q] 종료 — q 면 True."""
+        return cls._read_key("q") == "q"

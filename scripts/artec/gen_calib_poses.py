@@ -63,29 +63,44 @@ AZIS_DEG = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
 #  roll 다양성은 AX=ZB 가 잘 풀리는 데 그 자체로 도움이 된다.
 ROLLS_DEG = (-45.0, -20.0, 0.0, 20.0, 45.0, 70.0, 90.0, 110.0)
 DIST_JITTER = (-0.02, 0.0, 0.02)
-#: 조준 오차에 대한 **여유**로 정한 값이지 스캔 거리가 아니다.
+#: 카메라-보드 거리 (m). **조준 여유와 초점 품질의 맞교환**이다.
 #
-# ⚠ 2026-09-16 정정 — 이 표의 가로/세로가 **뒤집혀 있었다.**
-#   옛 주석은 "hfov 30° / vfov 22.62°" 로 가로가 넓다고 봤지만,
-#   `artec_intrinsic.yaml` 의 실측 K(fx 2489 / fy 2456, 960×1280)로 계산하면
-#   **가로(960축) 21.8° · 세로(1280축) 29.2°** 로 정반대다.
+#     standoff   화각(가로×세로)    보드 84×60mm 중심 이탈 허용   Spider 초점
+#       230mm     88 × 117mm            2mm                최적대역 안
+#       250mm     96 × 130mm            6mm                최적대역 경계 ← 기본
+#       270mm    104 × 138mm           10mm                대역 밖·양호
+#       320mm    123 × 167mm           20mm                흐림
+#       340mm    131 × 173mm           24mm                **작동거리 초과**
 #
-#     standoff   실제 화각(가로×세로)   보드 84×60mm 기준 중심 이탈 허용(한쪽)
-#                                        긴변을 가로에    긴변을 세로에(roll 90°)
-#       250mm        96 × 130mm             6mm              23mm
-#       320mm       123 × 167mm            20mm              42mm   ← 기본값
-#       350mm       135 × 182mm            26mm              49mm
+#   (화각은 실측 K 기준 가로 21.6° · 세로 28.6°. 2026-09-16 이전 주석은 이
+#    가로/세로가 뒤집혀 있었다 — `artec_intrinsic.yaml` 로 다시 계산한 값이다.)
 #
-# 2026-09-15 실측 조준 계통 오차 **32mm**(구 T_EC 회전 8.6°). 이 값이
-# 2026-09-16 재측정에서도 (+32, +24)mm 로 그대로 남아 있었다 —
-# 250→320mm 로 올린 대책이 안 먹힌 건 **넓어진 축이 이미 남아돌던 세로**였기
-# 때문이다.
+# ⚠ 2026-09-21 — **0.32 → 0.28 로 내렸다.**
+#   0.32 는 조준 오차 여유를 벌려고 고른 값이었다(2026-09-15 계통 오차 32mm,
+#   구 T_EC 회전 8.6°). 그런데 `DIST_JITTER` 가 붙으면 300/320/**340**mm 가
+#   되고, Spider 작동거리 상한이 330mm 라 **절반이 범위 밖**이었다. 실측 결과:
 #
-# 다만 roll 을 90° 로 고정해 세로 여유를 쓰려는 시도는 **실패했다**(위 ROLLS_DEG
-# 주석). 계통 오차는 roll 이 아니라 `--from-view` 로 잡는다 — 같은 T_EC 로
-# 검출하고 같은 T_EC 로 겨누므로 오차가 1차 상쇄된다. 보드를 100→84mm 로
-# 줄인 것(`spider_dense`)은 가로 여유를 11.7 → 19.5mm 로 넓히므로 유효하다.
-STANDOFF_M = 0.32
+#       20자세 중 작동거리 초과 10개 · 최적대역(200~250mm) 안 0개
+#       → 초점 밖이라 3D 재구성 실패 (`reconstructAndTexturizeMesh 0x80070803`)
+#         verts 5~169개, capture 실패 5 · 검출 실패 1 → intrinsic 산출 불가
+#
+#   여유가 필요 없어진 이유는 `--from-view` 다. 같은 `T_EC` 로 검출하고 같은
+#   `T_EC` 로 겨누므로 계통 오차가 1차 상쇄된다 — 생성된 자세의 광축 이탈각이
+#   실측 **0.0°** 였다. 조준이 맞으니 거리를 초점에 맞추는 것이 옳다.
+#
+#   왜 최적대역(200~250mm)까지 안 내리나 — **FOV 게이트가 자세를 걷어낸다.**
+#   가까울수록 보드가 화면을 꽉 채워 조금만 비뚤어도 잘린다(실측 유효 자세:
+#   0.32→108 · 0.28→42 · 0.25→**19** · 0.23→9). 20자세를 뽑으려면 0.28 이 한계다.
+#   같은 로그의 거리별 성적이 0.28 을 뒷받침한다 (지터 포함 260/280/300mm):
+#
+#       300mm  verts 8,901 / 18,333 / 14,989   → 전부 양호
+#       320mm  verts 16 ~ 10,498               → 들쭉날쭉
+#       340mm  대부분 실패                      → 작동거리 밖
+#
+#   더 가까이 가려면 **보드를 줄여야 한다**(`spider_dense` 는 84×60mm).
+#   셀 모델 기준(`--from-cell`)은 보드를 원판 한복판에 정확히 놓았을 때만
+#   맞으므로 조준 여유가 더 필요하다 — 그때는 `--standoff 0.30` 을 줄 것.
+STANDOFF_M = 0.28
 
 
 def find_disc(npz: Path, hint_xy=None, band=(0.55, 1.05)):
@@ -289,6 +304,15 @@ def make_fov_gate(T_EC, center_B, normal_B, spec, margin_px: float = 40.0):
     return fits
 
 
+def _layout_tag() -> str:
+    """경로 검사에 쓴 셀 레이아웃 별칭 — 레이아웃이 바뀌면 검사 결과도 무효다."""
+    try:
+        return (_ROOT / "utils" / "collision" / "data" / "ACTIVE_LAYOUT.txt"
+                ).read_text(encoding="utf-8").strip() or "?"
+    except OSError:
+        return "?"
+
+
 def order_poses(kept, cm, home_q):
     """자세를 **이동거리 최소 순서**로 재배열하고, 자세↔자세 경로를 검사한다.
 
@@ -444,17 +468,17 @@ def main() -> int:
         print(f"[gen] {args.max_poses}개로 솎음")
 
     # ★ 이동거리 최소 순서로 재배열 + 자세↔자세 경로 검사.
-    #   이게 통과하면 `--no-via-home` 으로 home 왕복을 없애도 안전하다.
+    #   이게 통과해야 home 왕복 없이 이어서 가도 안전하다 (아래 path_checked).
     kept, n_unreach = order_poses(kept, cm, HOME)
     if n_unreach:
         print(f"[gen] 자세간 경로 미확보로 {n_unreach}개 제외")
     kept = [(f"hemi_{i:02d}", ee, q) for i, (_n, ee, q) in enumerate(kept)]
+    steps = [float(np.abs(np.radians(kept[i + 1][2]) - np.radians(kept[i][2])).max())
+             for i in range(len(kept) - 1)]
     if kept:
-        steps = [float(np.abs(np.radians(kept[i + 1][2]) - np.radians(kept[i][2])).max())
-                 for i in range(len(kept) - 1)]
         print(f"[gen] 순서 최적화 — 자세간 최대관절이동 "
               f"중앙값 {np.degrees(np.median(steps)) if steps else 0:.0f}°  "
-              f"(home 경유 없이 이어서 갈 수 있다 → --no-via-home)")
+              f"(경로 검사 완료 — home 경유 없이 이어서 간다)")
     if len(kept) < 12:
         print("  ⚠ 12개 미만 — hand-eye 가 잘 안 풀린다. standoff·기준점을 바꿔 볼 것")
 
@@ -479,9 +503,24 @@ def main() -> int:
     #   나왔다 — 즉 여기서 검증한 자세와 로봇이 실제로 가는 자세가 달랐다.
     #   joints 키가 있으면 `_run_scripted` 가 그대로 set_servo_angle 한다.
     #   ee_pose 는 참고용으로 같이 남긴다(사람이 읽기 위해).
+    # ★ **경로 검사를 거쳤다는 사실을 남긴다.** `order_poses` 가 자세↔자세 경로를
+    #   충돌 게이트로 확인하고 미확보분을 제외했으므로, 이 목록은 home 을 경유하지
+    #   않고 이어서 가도 안전하다. 소비자(intrinsic/hand_eye)가 그걸 알아야
+    #   home 경유 생략(기본)을 써도 되는지 스스로 판단할 수 있다. 표식이 없으면
+    #   옛 목록(경로 무검사)일 수 있으므로 안전하게 home 을 경유한다.
+    import datetime as _dt
+    meta = {
+        "path_checked": True,
+        "generated": _dt.date.today().isoformat(),
+        "layout": _layout_tag(),
+        "max_step_deg": (round(float(np.degrees(np.median(steps))), 1)
+                         if steps else None),
+    }
     out.write_text(yaml.dump(
-        {"poses": [{"name": n, "joints": q, "ee_pose": ee} for n, ee, q in kept]},
-        default_flow_style=None, allow_unicode=True), encoding="utf-8")
+        {**meta,
+         "poses": [{"name": n, "joints": q, "ee_pose": ee} for n, ee, q in kept]},
+        default_flow_style=None, allow_unicode=True, sort_keys=False),
+        encoding="utf-8")
     print(f"[gen] 저장: {out}  ({len(kept)} 자세)")
     return 0
 

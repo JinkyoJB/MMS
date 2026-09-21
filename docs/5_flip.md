@@ -17,8 +17,15 @@
 env -u PYTHONPATH $MMS_PYTHON main_artec.py         # real (BACKEND="real", stage_until=3)
 ```
 
-로봇은 nbv 에서 움직인 자세를 `go_home` 으로 되돌린 뒤 **home 에 고정**된다. 회전은
-사람이 하고 로봇은 그 자리에서 턴테이블 한 바퀴를 찍는다.
+뒤집기마다 로봇은 먼저 `go_home` 으로 물러난다(사람이 물체를 만지는 동안). 프롬프트는
+**뒤집기 하나씩** 묻는다 — `[Enter]` 뒤집었다, `[n]` 이 뒤집기는 건너뛰고 다음 각을
+묻는다, `[q]` 종료 (키 하나, Enter 불필요). 90° 를 건너뛰고 180° 만 하려면 첫 물음에
+`n`, 두 번째에 `Enter`.
+
+뒤집힌 물체는 **새 형상**이므로 real 은 lookaround 와 같은 preview → 밴드 계획을 다시
+돌려(`plan_flip_poses`) 밴드 자세로 캡처한다 — 거리·높이가 뒤집힌 물체에 맞춰진다
+(2026-09-21 이전에는 home 고정 한 자세였다). 계획이 실패하면 home 고정으로 폴백. sim 은
+아직 home 고정이다.
 
 ### 어떤 자세로 뒤집나
 
@@ -109,8 +116,43 @@ tracking-lost 로 recovery 가 로봇을 새 자세로 보낸 경우다. **물�
 T_pre = T_BC_master · inv(T_BC_recovery)      (translation 은 m→mm 로 ×1000)
 ```
 
-카메라가 옮긴 만큼만 데이터를 반대로 옮기면 물체는 제자리다. 이게 적용되면 그 iteration
-의 R_phys hint 는 무시한다 — 둘 다 적용하면 중복 보정이다.
+카메라가 옮긴 만큼만 데이터를 반대로 옮기면 물체는 제자리다. recovery 처럼 **물체가 안
+돈** 경우엔 그 iteration 의 R_phys hint 를 무시한다 — 둘 다 적용하면 중복 보정이다.
+
+### ④ flip 밴드 캡처 — ② 와 ③ 의 합성 (2026-09-21)
+
+flip 도 preview → 밴드 계획으로 로봇이 움직이므로 **카메라 이동과 뒤집기가 동시에**
+있다. 둘을 base 프레임에서 한 식으로 합친다:
+
+```
+T_pre = S⁻¹ · T_BC_master · T_unflip_B · R_B(axis, −θ0) · T_CB_new · S
+T_unflip_B : 회전 R_phys⁻¹, 평행이동 = c_master_B − R_phys⁻¹·c_pass_B  (무게중심 피벗)
+```
+
+`_flip_unflip_B` + `_compose_T_pre_W_mm(T_extra_B=…)`. 합성 검증(합성 점군, θ0=0/37°):
+오차 0.000mm, 카메라 보정만 하면 145mm 어긋남.
+
+**힌트는 초기값일 뿐이다.** 사람 손회전 오차와 부분 스캔의 무게중심 가정 때문에 힌트가
+틀리면 후처리 GlobalReg 도 건너뛰어(`hints_applied`) 그대로 굳는다(2026-09-21
+run_162322: 180° flip 정합 실패). 그래서 `_flip_global_refine` 이 순서대로 시도한다:
+
+1. **텍스처 특징점 매칭** (`utils/nbv/image_match.py`) — 프레임 원본 사진(`frame.image()`
+   + `uv()`)에서 RootSIFT → 3D 대응 → RANSAC rigid. **후처리 Texturize 와 무관**하다
+   (스캔 중 `capture_texture=ALWAYS` 로 저장된 사진을 쓴다). 회전대칭 물체의 앞뒤·뒤집힘을
+   유일하게 구분한 방법(벤치마크 2026-06-11). 스캔월드→master월드를 직접 준다.
+   게이트 inlier ≥ 40. 합성 검증: 170° 뒤집힘+이동 → 0.08°/0.3mm.
+2. **기하 전역 정합 합의** (`global_registration.register_consensus`, FGR·FPFH + ICP) —
+   base 프레임에서 `T_unflip_B` 를 교체.
+3. 둘 다 실패면 힌트.
+
+콘솔 `[flip] …` 과 이벤트 로그 `merge.method`(img|greg|hint|camera)에 어느 쪽을 썼는지 남는다.
+
+### 원시 스캔 덤프 — 정합을 오프라인에서 다시 돌리려면
+
+병합마다 `output/scans/<RUN_TS>/scanNN_<stage>_poseK.npz` 에 그 IScan 의 점(스캔 월드
+mm, 색)·적용 `T_pre_mm`·`master_T_CB`·`T_BC_new`·`T_scan_color_mm`·`R_phys` 를 남긴다.
+master 월드 = scan00(T_pre 항등). SDK 없이 numpy/open3d 만으로 정합을 재현할 수 있다.
+SDK 프로젝트째 남기려면 `--sproj`(IScan 별로 보존, 저장 ~47s).
 
 ---
 

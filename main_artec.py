@@ -19,6 +19,8 @@ from utils.nbv.scan_stage_controller import (
 
 # 모든 output 파일에 같은 타임스탬프(_YYYYMMDD_HHMMSS) 붙여 run 별 구분.
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+# 세션·스트리밍 모듈이 run 별 산출물(이벤트 로그·원시 스캔 덤프)을 같은 태그로 묶는다.
+os.environ.setdefault("MMS_RUN_TS", RUN_TS)
 
 
 # ── 콘솔 로그 → 파일 tee ──────────────────────────────────────────────

@@ -11,7 +11,9 @@ library_path = os.path.join(current_dir, "Eziservo_x64")
 
 if library_path not in sys.path:
     sys.path.append(library_path)
-    os.chdir(current_dir) 
+# ⚠ 여기서 os.chdir 하지 않는다. DLL 은 절대경로로 로드되므로(FAS_EziMOTIONPlusE_
+#   Internal.dll_path) 필요 없고, 프로세스 cwd 를 utils/turntable 로 바꿔 놓으면
+#   이후 상대경로 출력(nbv 디버그 덤프 등)이 전부 여기 밑에 쌓인다(2026-09-21).
 
 try:
     from FAS_EziMOTIONPlusE import *

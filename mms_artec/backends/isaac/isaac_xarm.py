@@ -43,6 +43,7 @@ from utils.robot import xarm7_kinematics as kin
 #     와 같아야 sim 이 실물을 미러링한다.
 #     실측 셀(`v2_real_260917`)에서: 충돌여유 +51.5mm · sigma_min 0.147 ·
 #     계획 격자 **12/12** 에 충돌-free 경로 (v3 용으로 뽑았던 값은 11/12).
+#     ※ 이 수치는 2026-09-21 이전 home 값 기준이다. 현재 값은 아래 주석 참조.
 #
 #     ⚠ 구 v3 씬(`v3_scene.usd`)을 돌릴 때는 이 값이 맞지 않는다. 그 씬은
 #       턴테이블이 로봇 base 바로 아래라 기하가 전혀 다르다.
@@ -52,8 +53,13 @@ from utils.robot import xarm7_kinematics as kin
 _HOME_ENV = os.environ.get("MMS_SIM_HOME_DEG", "").strip()
 HOME_JOINTS_DEG = {
     "phoxi": [0.0, -30.0, 0.0, 60.0, 0.0, 90.0, 0.0],
+    # ★ 2026-09-21 — 실물 home 변경에 맞춰 같이 옮겼다 (J2 −18.4→−6.98 · J6 60→35.53).
+    #   근거는 `utils/robot/xarm_interface.py` 의 HOME_JOINTS_DEG 주석 참조:
+    #   턴테이블을 319mm 가 아니라 260mm 에서 봐 Spider 최적대역에 들어간다.
+    #   실측 셀(`v2_real_260917`)에서 충돌여유 자가 74mm · 환경 136mm ·
+    #   sigma_min 0.120 (옛 값은 환경 90mm · 0.147).
     "artec": ([float(v) for v in _HOME_ENV.split(",")] if _HOME_ENV
-              else [0.0, -18.4, 0.0, 70.6, 0.0, 60.0, -45.0]),
+              else [0.0, -6.98, 0.0, 70.6, 0.0, 35.53, -45.0]),
 }
 
 

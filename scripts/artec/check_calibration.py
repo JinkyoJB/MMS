@@ -134,33 +134,86 @@ def check_turntable() -> None:
     M = np.asarray(d["T_B_F0"]["matrix"], float)
     R_bf, t_bf = M[:3, :3], M[:3, 3]
     o = -R_bf.T @ t_bf                      # F 원점을 base 로
+    axis = R_bf[2] / (np.linalg.norm(R_bf[2]) + 1e-12)      # F 의 +z 를 base 로
     print(f"\n  원점(base) = [{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}] m   "
           f"거리 {np.linalg.norm(o):.3f} m")
-    _cross_check_cell(o)
+    _cross_check_cell(o, axis, float(d.get("rim_radius_mm", 121.5)) / 1000.0)
 
 
-def _cross_check_cell(t_bf0: np.ndarray) -> None:
-    """★ 충돌 캐시(실측 셀)에 정말 그 자리에 턴테이블이 있는가.
+#: 충돌 여유 (m) — `CollisionModel(env_margin_m=0.025)` 와 같은 값.
+ENV_MARGIN_M = 0.025
+#: **게이트 사각 비율** 임계 (%). 캘리브된 원판면 중 충돌 캐시에 여유 안쪽
+#  물체가 없는 면적 비율 = "실제 턴테이블인데 게이트가 못 보는 부분".
+#
+#  왜 거리(mm)가 아니라 이 비율인가 — 원판은 지름 243mm 평면이라 옆으로 50mm
+#  밀려도 대부분의 점은 여전히 원판 위 어딘가에 가깝다. 거리 중앙값·p90 은
+#  거의 안 변해서 옆이동을 못 잡는다(실측: 50mm 이동에 p90 13→17mm).
+#  사각 비율은 밀린 쪽 초승달 부분을 직접 세므로 단조 증가한다
+#  (0mm→0.0% · 30mm→0.1% · 50mm→4.0% · 80mm→15.8% · 120mm→35.9%).
+CELL_BLIND_OK, CELL_BLIND_WARN = 1.0, 8.0
 
-    캘리브가 엉뚱한 곳을 가리키면 여기서 걸린다 — 두 독립 출처의 교차검증이다.
+
+def _cross_check_cell(o: np.ndarray, axis: np.ndarray, r_rim: float) -> None:
+    """★ 충돌 캐시가 **캘리브된 자리에** 턴테이블을 두고 있는가.
+
+    캘리브가 말하는 원판면(상면 + 측벽)을 해석적으로 샘플링해, 그 점들이 캐시
+    점군에서 얼마나 떨어져 있는지 잰다. "근처에 점이 몇 개 있나" 세는 것보다
+    **어긋난 양을 mm 로** 주므로, 재빌드가 필요한지 바로 판단할 수 있다.
+
+    왜 중요한가 — 캘리브는 yaml 만 쓰고 캐시는 USD 를 구워서 만든다. 턴테이블을
+    옮기거나 재캘리브하면 둘이 갈라지는데, 로봇이 실제로 피하는 것은 **캐시** 다.
     """
     npz = _ROOT / "utils" / "collision" / "data" / "cell_env.npz"
     if not npz.exists():
         say(WARN, "충돌 캐시 없음 — 교차검증 생략"); return
     active = (_ROOT / "utils" / "collision" / "data" / "ACTIVE_LAYOUT.txt")
     tag = active.read_text(encoding="utf-8").strip() if active.exists() else "?"
+
+    # 축에 수직인 정규직교 기저
+    a = np.array([1.0, 0.0, 0.0])
+    if abs(float(a @ axis)) > 0.9:
+        a = np.array([0.0, 1.0, 0.0])
+    u = np.cross(a, axis); u /= np.linalg.norm(u)
+    v = np.cross(axis, u)
+
+    rng = np.random.default_rng(0)
+    th = rng.uniform(0, 2 * np.pi, 4000)
+    rr = r_rim * np.sqrt(rng.uniform(0, 1, 4000))           # 상면 (균일 면적)
+    top = o + np.outer(rr * np.cos(th), u) + np.outer(rr * np.sin(th), v)
+    th = rng.uniform(0, 2 * np.pi, 2000)
+    ss = rng.uniform(0.0, 0.02, 2000)                        # 측벽 20mm
+    side = (o + r_rim * (np.outer(np.cos(th), u) + np.outer(np.sin(th), v))
+            + np.outer(ss, axis))
+    S = np.vstack([top, side])
+
     E = np.asarray(np.load(npz)["env"], float)
-    d = np.linalg.norm(E - t_bf0, axis=1)
-    near = int((d < 0.15).sum())
-    print(f"  교차검증 — 활성 레이아웃 '{tag}' 에서 이 좌표 15cm 안의 셀 점: {near:,}개")
-    if near > 5000:
-        say(OK, "그 자리에 구조물이 있다 — 캘리브와 셀 모델이 일치")
-    elif near > 0:
-        say(WARN, f"점이 {near}개뿐 — 위치가 조금 어긋났거나 원판이 캐시에 없다")
+    near = E[np.linalg.norm(E - o, axis=1) < 0.45]
+    if len(near) < 100:
+        say(FAIL, f"활성 레이아웃 '{tag}' 에 그 자리 구조물이 없다 ({len(near)}점)",
+            "T_B_F0 와 셀 모델 중 하나가 틀렸다 — "
+            "scripts/collision/rebuild_from_calib.py")
+        return
+    from scipy.spatial import cKDTree
+    dist = cKDTree(near).query(S)[0]
+    blind = float((dist > ENV_MARGIN_M).mean() * 100.0)
+    p99 = float(np.percentile(dist, 99) * 1000.0)
+    print(f"  교차검증 — 활성 레이아웃 '{tag}' 기준 "
+          f"게이트 사각 {blind:.1f}% · 원판면 어긋남 p99 {p99:.0f}mm")
+    if blind < CELL_BLIND_OK:
+        say(OK, "충돌 캐시가 캘리브된 턴테이블을 덮고 있다")
+    elif blind < CELL_BLIND_WARN:
+        say(WARN, f"턴테이블 {blind:.0f}% 가 게이트에 안 보인다 — 캐시 재빌드 권장",
+            "scripts/collision/rebuild_from_calib.py")
     else:
-        say(FAIL, "그 자리에 아무것도 없다",
-            "T_B_F0 와 셀 모델 중 하나가 틀렸다. docs/collision.md §6 · "
-            "docs/calibration_runbook.md §5 참고")
+        say(FAIL, f"턴테이블 {blind:.0f}% 가 게이트에 안 보인다 — 그쪽으로 지나가도 안 막힌다",
+            "로봇을 움직이기 전에: scripts/collision/rebuild_from_calib.py")
+
+    # 재빌드를 못 돌린 표식이 남아 있으면 반드시 짚는다.
+    mark = _ROOT / "utils" / "collision" / "data" / "STALE_COLLISION.txt"
+    if mark.exists():
+        first = mark.read_text(encoding="utf-8").strip().splitlines()
+        say(WARN, "충돌 모델 재빌드 미완료 표식이 남아 있다",
+            " / ".join(first[:2]))
 
 
 def main() -> int:

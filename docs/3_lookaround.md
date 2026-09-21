@@ -437,6 +437,38 @@ sim 검증은 `sim_harness/MMS_ext_lookaround_recovery1.py`(빗나가게 조준 
 `recovery2.py`(el 을 낮춰 윗면 grazing → lost) 두 개다. 둘 다 safe-back → 자세 재탐색 →
 재개로 5면을 완성한다.
 
+### 이벤트 로그 — 언제 잃었고, 뭘 했고, 됐나 (2026-09-21)
+
+판단이 일어나는 자리마다 `output/events_<RUN_TS>.jsonl` 에 한 줄씩 남긴다
+(`utils/nbv/event_log.py`): `lost`(stage·band·θ·프레임·사유), `band_move`(스텝·잃은 α·
+되찾은 α·outcome ok/relocalized/failed), `band_partial`, `recovery`(시도·성공·자세 변경),
+`rotation_ok`, `merge`(method). 집계:
+
+```bash
+python scripts/artec/lost_report.py            # 최근 5 run
+python scripts/artec/lost_report.py -n 20
+```
+
+run 162322 실측(수동 집계): 밴드 전환 중 lost 는 **α≈0.45~0.7 에서 스텝 크기와 무관하게**
+재현됐고(5mm→2.5→1.2mm 모두), 되돌아가면 되찾고 다시 가면 같은 자리에서 잃는다. 이동이
+아니라 **그 높이의 시야**(라벨 없는 매끈한 원통면 → HYBRID 추적이 기하·텍스처 모두 잃음)가
+원인으로 보인다. 첫 전환(디스크 가장자리가 보이는 높이)만 살았다.
+
+### 밴드 전환 — 조준 유지 소보간 + 되돌아가기 (2026-09-21)
+
+실물 여섯 run 이 **전부 밴드 전환 직후 θ=0° 에서** lost 였다(회전 중은 0회). 이동 거리·
+고도각·fill 과 무관해 경로 의존으로 봤다: 예전엔 다음 밴드 관절해로 **한 방** 이동(1.2s
+블로킹)했고, SDK 스트리밍은 한번 잃으면 마지막 키프레임과 겹치는 시야로 돌아가기 전엔
+재정합하지 않는다.
+
+지금은 `(el, az, tz, 축거리)` 를 α 로 보간해 **5mm 스텝**마다 IK 를 다시 풀고
+(`_band_path`), 스텝마다 폴링해 `regErr` 를 찍는다(`_band_transition`). 스텝 뒤 연속
+reg<0 ≥ 3 이면 그 자리에서 멈추고, 되찾을 때까지 **왔던 스텝을 되돌아간** 뒤 그 α 부터
+스텝을 반으로 줄여 재전진(최대 2회). 끝내 못 찾으면 예전처럼 목표로 가고 lost 처리
+(부분 성공 → nbv). 오프라인 IK 검증: band1→2 는 8스텝(≤4.6mm), 뚜껑 자세 전환은
+32스텝(관절 직선보간이면 직선에서 24mm 이탈). 실기 확인 항목: 스텝 로그에서 **어느 α
+에서 끊기는지**가 처음으로 데이터로 남는다.
+
 ---
 
 ## 8. 라이브 뷰어와 sim 검증
@@ -444,7 +476,23 @@ sim 검증은 `sim_harness/MMS_ext_lookaround_recovery1.py`(빗나가게 조준 
 **라이브 뷰어**(real 전용)는 누적 좌표로 **SDK 정합행렬 `FrameEvent.transformation`만**
 쓴다. θ·yaml·hand-eye 가 개입하지 않으므로 화면이 곧 SLAM 결과 그 자체다. 필터도 SDK 가
 IScan 에 넣는 기준(`reg_err ≥ 0`)과 똑같이만 건다 — 자체 기준으로 더 거르면 거울이
-아니게 된다. 표시는 별도 터미널의 Filament 뷰어(`mms_artec/nbv/live_scan_viewer.py`).
+아니게 된다.
+
+**터미널 두 개로 나뉜다.** 이 PC 에서 라이브 점군이 실제로 렌더된 유일한 구성이
+"사용자가 직접 띄운 Filament 프로세스" 였기 때문이다(자식 프로세스로 띄우면 창이
+반짝 떴다 죽는다 — `live_scan_viewer.py` 헤더 참조).
+
+```powershell
+# 터미널 A — 스캔 (파이프라인이 output/_live_latest.npy 로 스냅샷을 쓴다)
+python main_artec.py --until lookaround
+
+# 터미널 B — 뷰어 (그 스냅샷을 tail 하며 렌더)
+python scripts\artec\live_scan_view.py
+```
+
+> ⚠ `mms_artec/nbv/live_scan_viewer.py` 는 **뷰어가 아니라 파이프라인 쪽 모듈**이다
+> (스냅샷을 쓰는 쪽, Open3D 를 안 만진다). `__main__` 이 없어서 실행해도 아무 일도
+> 일어나지 않는다. 띄울 것은 **`scripts/artec/live_scan_view.py`** 다.
 
 **sim 검증**에는 SLAM 이 없다. 대신 GT θ 와 회전축으로 누적한다.
 

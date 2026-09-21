@@ -872,6 +872,39 @@ def main():
             if rms_mm > WARN_RESIDUAL:
                 print(f"⚠ residual 큼 ({rms_mm:.1f} > {WARN_RESIDUAL}mm) — 점 다시 찍기 권장")
 
+            # ★ **호 길이**를 잰다. 잔차·반경은 점들끼리의 일관성만 말해주고,
+            #   중심이 얼마나 믿을 만한지는 **원주를 얼마나 덮었나**가 정한다.
+            #   짧은 호에 원을 맞추면 중심이 호의 이등분선 방향으로 미끄러진다.
+            _e1 = np.array([1.0, 0.0, 0.0])
+            _e1 = _e1 - np.dot(_e1, normal) * normal
+            _e1 /= np.linalg.norm(_e1)
+            _e2 = np.cross(normal, _e1)
+            _w = pts_B - center_mm
+            _a = np.sort(np.degrees(np.arctan2(_w @ _e2, _w @ _e1)) % 360.0)
+            _gap = np.max(np.diff(np.r_[_a, _a[0] + 360.0]))
+            _span = 360.0 - _gap
+            print(f"      호 길이        = {_span:.0f}°  (점 {len(pts_B)}개)")
+            if _span < 120.0:
+                print(f"⚠ 호가 짧다 ({_span:.0f}° < 120°) — 중심이 미끄러질 수 있다. "
+                      f"원주를 더 넓게 찍을 것")
+
+            # ★ rim 점을 **남긴다.** 지금까지는 결과(T_B_F0)만 저장돼, 나중에
+            #   "이 중심이 왜 이렇게 나왔나" 를 따질 근거가 없었다 (2026-09-21:
+            #   preview 가 추정한 축과 50mm 어긋났는데 원인을 못 밝혔다).
+            try:
+                _dbg = _PROJECT_ROOT / "output" / "debug"
+                _dbg.mkdir(parents=True, exist_ok=True)
+                import datetime as _dtm
+                _rp = _dbg / f"rim_points_{_dtm.datetime.now():%H%M%S}.npz"
+                np.savez_compressed(
+                    _rp, pts_B_mm=pts_B, pts_C_mm=pts_C,
+                    pixels=np.asarray(picker.pixels, float),
+                    T_CB=T_CB, T_EB=T_EB, center_mm=center_mm, normal=normal,
+                    radius_mm=radius_mm, rms_mm=rms_mm, arc_span_deg=_span)
+                print(f"      rim 점 저장    → {_rp.relative_to(_PROJECT_ROOT)}")
+            except Exception as _e:                              # noqa: BLE001
+                print(f"      ⚠ rim 점 저장 실패({type(_e).__name__})")
+
             # 공유 코어로 T_B_F0 구성 (축 퇴화 처리 포함). center 는 m 로 넘긴다.
             T_BF0 = build_T_B_F0(center_mm / 1000.0, normal)
 

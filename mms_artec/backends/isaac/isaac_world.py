@@ -140,10 +140,20 @@ class IsaacWorld:
 
         # ── 1. SimulationApp 먼저 (이후 isaac/pxr import 가능) ────────────────
         from isaacsim import SimulationApp
-        self._sim_app = SimulationApp({
+        _app_cfg = {
             "headless": bool(headless),
             "width": 1280, "height": 720,
-        })
+        }
+        # ★ 렌더 진단 스위치(2026-09-21, Windows 노트북 RTX 5070 + Isaac 5.1 첫 기동):
+        #   instanceable 프림(Frame 69/78 · xarm7 16/21)만 뷰포트에 안 그려지고
+        #   인스턴스 0 인 턴테이블·툴·대상물은 그려졌다. Isaac 5.x 기본 Fabric Scene
+        #   Delegate(FSD) 경로가 의심돼 끌 수 있게 둔다. 파이프라인(물리·센서)엔 무관.
+        #     MMS_SIM_FSD=0        → --/app/useFabricSceneDelegate=false
+        #     MMS_SIM_DEINSTANCE=1 → 스테이지 로드 후 모든 프림 instanceable 해제
+        if os.environ.get("MMS_SIM_FSD", "1") == "0":
+            _app_cfg["extra_args"] = ["--/app/useFabricSceneDelegate=false"]
+            print("[IsaacWorld] Fabric Scene Delegate OFF (MMS_SIM_FSD=0)")
+        self._sim_app = SimulationApp(_app_cfg)
 
         # ── 2. 나머지 import ─────────────────────────────────────────────────
         import omni.usd
@@ -183,6 +193,14 @@ class IsaacWorld:
                 f"씬 USD 를 열지 못했다: {self.usd_path!r}\n"
                 f"  파일은 있는데 USD 가 못 읽는다 — 손상됐거나 USD 가 아닐 수 있다.\n"
                 f"  `usdview` 로 직접 열어 확인할 것.")
+        if os.environ.get("MMS_SIM_DEINSTANCE", "0") == "1":
+            # 렌더 진단 — instanceable 프림이 안 그려질 때 (위 SimulationApp 주석).
+            _n = 0
+            for _p in self.stage.Traverse():
+                if _p.IsInstanceable():
+                    _p.SetInstanceable(False)
+                    _n += 1
+            print(f"[IsaacWorld] instanceable 해제 {_n}개 (MMS_SIM_DEINSTANCE=1)")
 
         self._widen_joint1_limit()
         self._configure_scanner_camera()

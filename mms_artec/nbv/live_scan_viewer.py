@@ -342,3 +342,22 @@ class LiveScanViewer:
         with open(path, "wb") as f:
             f.write(hdr)
             f.write(rec.tobytes())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ★ 이 파일은 **뷰어가 아니다** — 직접 실행해도 아무 일도 일어나지 않는다.
+#   그래서 실행했을 때 조용히 끝나지 않고 어디로 가야 하는지 알려준다
+#   (2026-09-21: `python mms_artec/nbv/live_scan_viewer.py` 를 뷰어로 알고
+#    실행했는데 아무 반응이 없어 원인을 찾느라 시간을 썼다).
+if __name__ == "__main__":
+    import sys
+    print(__doc__ or "")
+    print("=" * 66)
+    print("  이 파일은 파이프라인 쪽 **스냅샷 writer** 다 (Open3D 를 안 만진다).")
+    print("  화면에 띄우는 뷰어는 따로 있다:")
+    print()
+    print("      python scripts/artec/live_scan_view.py")
+    print()
+    print(f"  (스냅샷: {SNAP_PATH})")
+    print("=" * 66)
+    sys.exit(2)

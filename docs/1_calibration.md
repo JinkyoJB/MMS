@@ -4,7 +4,8 @@
 > 다음 단계는 `3_lookaround.md`.
 > - **Part 1 — Hand-Eye `T_EC`**: 카메라가 로봇 손목(EE)에 어떻게 붙어있나.
 > - **Part 2 — Turntable `T_B_F0`**: 턴테이블이 로봇 base 기준 어디서·어느 축으로 도나.
-> - **Part 3 — 전체 캘리브레이션**: 위 둘을 어떤 **순서**로 돌리나 (`calibrate.py`).
+> - **Part 3 — 전체 캘리브레이션**: 위 둘 + **충돌 모델 반영**을 어떤 **순서**로
+>   돌리나 (`calibrate.py`). **바쁘면 Part 3 만 읽어도 된다.**
 >
 > **결과가 이상하면 맨 뒤 〔부록〕 Troubleshooting 부터 본다** — 규약·단위·자세·충돌·
 > 알려진 문제를 T1~T7 로 모아두었다.
@@ -24,13 +25,12 @@
 | **`T_EC` 를 받아들일까** (sim) | GT 대비 병진·회전 오차 | `t < 5mm` · `r < 2°` | `solve_and_report` → T5 |
 | **`T_EC` 를 받아들일까** (real) | GT 가 없다 → calibrator **잔차** + **point-consistency**(고정점을 여러 자세에서 base 로 변환한 뒤의 산포) | 목표 `< 0.5mm` | 🔬 검증 스크립트 미작성(T7) |
 | **자세 집합이 충분한가** | 병진이 안 풀리는 것은 대개 **회전 다양성 부족**이다 — `t_err` 만 크고 `r_err` 는 작으면 이 경우 | — | T3 |
-| **`T_B_F0` 를 받아들일까** | rim 점을 원으로 피팅한 **잔차 RMS**, 그리고 점이 원주에 고르게 찍혔는가 | 실측 0.12mm / 17점 | `turntable_frame.fit` → §6 |
+| **`T_B_F0` 를 받아들일까** | rim 점을 원으로 피팅한 **잔차 RMS**, 그리고 점이 원주에 고르게 찍혔는가 | 실측 0.19mm / 22점 | `turntable_frame.fit` → §6 |
 | **원점 높이** | 원 피팅은 축과 중심만 준다. 높이는 **표면 평면**으로 따로 확정한다 | — | §7 |
 
-> ⚠ **잔차가 작다고 축 방향이 맞는 것은 아니다.** 점이 원주 한쪽에 몰리면 중심은 잘
-> 잡히고 **평면 법선만 크게 틀어진다.** 현재 `T_B_F0` 의 축이 base z 에서 **9° 기울어**
-> 있는데, 17점이 한쪽에 몰린 결과로 의심된다 — 다음 실물 세션에서 수평계 확인 +
-> 원주 전체에 고르게 재캘리브가 필요하다(`sim_scene.md` §1).
+> **잔차가 작다고 축 방향이 맞는 것은 아니다.** 점이 원주 한쪽에 몰리면 중심은 잘
+> 잡히고 **평면 법선만 크게 틀어진다.** 그러니 rim 점은 원주 **전체에 고르게** 찍을 것.
+> (2026-09-21 재캘리브 후 축 기울기는 base z 에서 **1.4°** 로, 수평에 가깝다.)
 
 ---
 
@@ -408,27 +408,14 @@ Part 1·2 를 **정해진 순서로** 돌린다.
 
 ## 9. 실행 순서
 
-캘리브 스크립트는 **단계별로 하나씩** 있고, `calibrate.py` 가 그것들을 **순서대로 호출**한다.
-
-| 스크립트 | 구하는 값 | 비고 |
-|---|---|---|
-| `make_charuco.py` | — | 보드 PNG 생성 (최초 1회, 실척 인쇄) |
-| `intrinsic_calib.py` | 카메라 **K** | 최초 1회 (렌즈·센서 교체 시 재수행) |
-| `hand_eye_calib.py` | **`T_EC`** | 카메라가 손목에 붙은 관계 |
-| `turntable_calib.py` | **`T_B_F0`** | 턴테이블 축. **`T_EC` 를 입력으로 받는다** |
-| **`calibrate.py`** | — | **단일 진입점.** 위 셋을 0→1→2→3 순서로 호출 |
-
-> `calibrate.py` 는 **자체 로직이 없다.** 하는 일은 세 가지뿐이다 —
-> ① 0단계 수동 조준 안내를 띄우고 ② 정해진 순서로 각 스크립트를 실행하고
-> ③ 한 단계가 실패하면 거기서 멈춘다.
-> 따라서 개별 스크립트를 직접 불러도 결과는 같다. 순서를 안 틀리게 하려는 장치다.
-
 ```bash
 conda activate mms-env && cd "$MMS_ROOT"
 
 env -u PYTHONPATH python scripts/artec/calibrate.py           # 전체
 env -u PYTHONPATH python scripts/artec/calibrate.py --from 2  # 2단계부터
 env -u PYTHONPATH python scripts/artec/calibrate.py --only 3  # 3단계만
+
+env -u PYTHONPATH python scripts/artec/check_calibration.py   # 끝나면 검산
 ```
 
 | 단계 | 내용 | 산출 |
@@ -437,6 +424,76 @@ env -u PYTHONPATH python scripts/artec/calibrate.py --only 3  # 3단계만
 | **1** | intrinsic — 카메라 K (최초 1회) | `artec_intrinsic.yaml` |
 | **2** | **hand-eye — `T_EC`** | `sensor_frames.yaml::T_EC_artec` |
 | **3** | **turntable — `T_B_F0`** | `turntable_frame.yaml` |
+| **4** | **충돌 모델** — `T_B_F0` 를 셀 캐시까지 반영 | `utils/collision/data/cell_env.npz` |
+
+`calibrate.py` 는 **자체 로직이 없다.** 순서대로 각 스크립트를 부르고, 실패하면
+거기서 멈출 뿐이다. 개별 스크립트를 직접 불러도 결과는 같다.
+
+### 4단계가 왜 캘리브에 들어있나
+
+로봇이 실제로 **무엇을 피할지는 yaml 이 아니라 충돌 캐시(`cell_env.npz`)가 정한다.**
+3단계에서 멈추면 **yaml 은 새 값, 캐시는 옛 턴테이블 자리**가 되고, 그 상태로
+움직이면 충돌 게이트가 엉뚱한 자리를 검사한다.
+
+4단계(`rebuild_from_calib.py`)는 캐시 안의 **턴테이블 점 뭉치만** 새 자리로
+옮긴다(강체변환). 테이블·벽은 안 움직였으니 그대로 두는 것이 맞다. **장비도
+Isaac 도 필요 없다.**
+
+```
+[4] 충돌 모델 — 캘리브된 턴테이블 자리 반영
+  캐시 기준 축 (meta) : 원점 [0.7992 0.0053 0.6883]
+  캘리브  축          : 원점 [0.8592 0.0053 0.6883]
+  차이                : 60.0 mm · 축 0.00°
+  턴테이블 점 14,529개 선택
+  게이트 사각: 7.5% → 0.0%
+  ✓ 캐시 갱신
+```
+
+**고치기 전후를 같은 잣대로 재서, 나아지지 않으면 되돌린다.** 충돌 캐시에서
+"고쳤다고 믿었는데 아니었다" 가 가장 위험하기 때문이다.
+
+> **`cell_env.meta.yaml` 이 핵심이다.** 캐시는 그냥 점 뭉치라 "어느 점이
+> 턴테이블인지" 스스로 말해주지 않는다. meta 의 `T_B_F0_at_bake` 가 **캐시를 구울
+> 때의 턴테이블 자리**를 기록하고, 미세조정은 그 값으로 옛 자리를 안다.
+> meta 가 없으면 캐시에서 원판을 찾아 추정하는데 정확도가 떨어진다
+> (실측: 60mm 어긋남을 53mm 로 추정). `bake_layout.py` 가 구울 때마다 적는다.
+
+### 검산 — `check_calibration.py`
+
+```
+교차검증 — 활성 레이아웃 'v2_real_260917' 기준 게이트 사각 0.3% · p99 20mm
+[OK]   충돌 캐시가 캘리브된 턴테이블을 덮고 있다
+```
+
+**게이트 사각 %** = 캘리브된 원판면 중 캐시에 충돌여유(25mm) 안쪽 물체가 없는 면적
+비율 = "실제 턴테이블인데 게이트가 못 보는 부분". 거리(mm)로 재면 옆이동을 못
+잡는다 — 원판이 지름 243mm 평면이라 50mm 밀려도 대부분의 점이 여전히 원판 위
+어딘가에 가깝기 때문이다. 판정 `<1%` OK · `<8%` WARN · 그 이상 FAIL
+(실측: 20mm 이동 OK · 40mm WARN · 60mm 이상 FAIL).
+
+### 하드웨어 레이아웃이 바뀌었으면 — `bake_layout.py`
+
+턴테이블만 틀어진 게 아니라 **셀 형상 자체**가 바뀐 경우다 (테이블·벽·툴스탠드를
+옮겼거나, 로봇 마운트가 바뀌었거나, CAD 를 새로 그렸을 때). 4단계 미세조정으로는
+해결되지 않는다 — USD 를 다시 구워야 한다.
+
+```bash
+# 1) 셀 CAD 를 고쳐 씬을 만든다 (턴테이블은 T_B_F0 자리에 자동 배치된다)
+python scripts/sim/build_scene_v2_real.py --out <새 씬.usd>
+
+# 2) 굽고 활성화 (+ meta 자동 기록)
+python scripts/collision/bake_layout.py --scene <새 씬.usd> --alias v2_real_261015
+
+python scripts/collision/bake_layout.py --list     # 있는 레이아웃 보기
+python scripts/collision/use_layout.py <별칭>      # 갈아끼우기
+```
+
+**Isaac Sim 파이썬 + USD 자산**이 필요하다(USD 를 읽어야 하므로). 현장 PC 에 없으면
+자산 있는 PC 에서 굽고 나온 `cell_env.<별칭>.npz` 파일만 복사해
+`utils/collision/data/layouts/` 에 두고 `use_layout.py <별칭>` 해도 된다.
+
+전제조건이 없어서 4단계를 못 돌렸으면 `STALE_COLLISION.txt` 표식이 남고,
+`check_calibration.py` 가 매번 짚는다 — 모르고 지나갈 수 없게.
 
 > **왜 `T_EC` 가 `T_B_F0` 보다 먼저인가 — 현재 구현 기준이다.**
 > `turntable_calib.py` 는 rim 점을 **base 로 변환한 뒤** 원을 피팅한다

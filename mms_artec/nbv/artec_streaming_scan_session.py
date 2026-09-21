@@ -27,6 +27,7 @@ import numpy as np
 from mms_artec.sensor import artec_base
 from mms_artec.sensor import artec_scanning
 from mms_artec.sensor.artec_client import ArtecClient
+from utils.nbv.event_log import log_event as _ev      # run 이벤트(JSONL) — lost 분석용
 
 if TYPE_CHECKING:
     from mms_artec.system import ArtecMMS as MMS
@@ -49,6 +50,10 @@ class ArtecStreamingScanSessionSettings:
     #   동일(2π/rotation_duration_s)하고 목표각·타임아웃만 구간에 비례한다.
     #   ⚠ sim 실측: 60° 이하로 좁히면 프레임 간 중첩 부족으로 정합이 무너진다.
     sweep_rad: Optional[float] = None
+    #: 이 캡처가 **어느 단계**를 위한 것인지 (배너 표기용). 예전엔 배너가
+    #  "lookaround" 로 박혀 있어, nbv·flip 에서도 lookaround 라고 찍혀 로그만
+    #  보면 지금 어느 단계인지 알 수 없었다 (2026-09-21 실물 혼동).
+    stage_label: str = "lookaround"
 
     # ── 시계열 로그 ───────────────────────────────────────────────────
     # poll cycle 마다 (t, theta, scanning_flag, ...) 기록 → 사후 분석.
@@ -435,6 +440,7 @@ class ArtecStreamingScanSession:
         retarget_fn=None,
         standoff_of=None,
         scan_range=None,
+        band_path_fn=None,
     ):
         self.mms = mms
         self.robot = robot
@@ -454,6 +460,10 @@ class ArtecStreamingScanSession:
         self.retarget_fn = retarget_fn
         self.standoff_of = standoff_of
         self.scan_range = scan_range
+        #: 밴드 전환 경로 `fn(q_from, q_to, step_m, alpha_from, seed) -> [(q, α)]`
+        #  — 카메라 조준을 유지한 소보간. 주면 `_band_transition` 이 스텝마다
+        #  폴링·regErr 감시하고, 잃으면 되돌아가 되찾는다. 없으면 예전 한 방 이동.
+        self.band_path_fn = band_path_fn
         # 선택적 라이브 뷰어 — multipass 가 pass 들 사이에 재사용하라고 넘김.
         # None 이면 모든 viewer 경로 no-op. 절대 스캔을 깨뜨리지 않음.
         self.live_viewer = live_viewer
@@ -479,7 +489,7 @@ class ArtecStreamingScanSession:
             target_fps = max_fps
 
         reg_name = artec_scanning.RegistrationType(s.registration_type).name
-        print(f"\n═══════════════ Artec Streaming lookaround ═══════════════")
+        print(f"\n═══════════════ Artec Streaming {s.stage_label} ═══════════════")
         print(f"  fps                : {target_fps:.1f} / max {max_fps:.1f}")
         print(f"  rotation_duration_s: {s.rotation_duration_s:.1f}")
         print(f"  registration       : {reg_name}")
@@ -624,7 +634,13 @@ class ArtecStreamingScanSession:
                     print(f'  ── band {_bi+1}/{len(bands)} — 로봇 이동 (녹화 유지) ──')
                     try:
                         if self.move_robot_fn is not None and _band_q is not None:
-                            self.move_robot_fn(_band_q)
+                            if self.band_path_fn is not None and bands[_bi - 1] is not None:
+                                self._band_transition(session, tracking,
+                                                      bands[_bi - 1], _band_q, band_i=_bi)
+                            else:
+                                self.move_robot_fn(_band_q)
+                                _ev("band_move", stage=s.stage_label, from_band=_bi,
+                                    to_band=_bi + 1, steps=1, outcome="direct")
                     except Exception as e:
                         print(f'  ⚠ 밴드 이동 실패({e}) — 남은 밴드 중단')
                         break
@@ -758,6 +774,11 @@ class ArtecStreamingScanSession:
                                 if _d_new != _live_d:
                                     _live_d = _d_new
                                     tracking.mark_started()      # 이동 공백 = stall 아님
+                                    # ★ 이동(블로킹) 중 큐에 쌓인 프레임은 이동 전
+                                    #   것이다 — 다음 판정까지 한 주기 더 흘려보내
+                                    #   새 자세의 프레임만 재게 한다.
+                                    _live_since = -int(_live_trk.every)
+                                    _last_ok_v = None
                         if live is not None and live_ok and events:
                             try:
                                 FS = artec_scanning.FrameState
@@ -808,6 +829,10 @@ class ArtecStreamingScanSession:
                         ):
                             end_reason = f"tracking lost: {tracking.last_loss_reason}"
                             print(f"\n  ⚠ {end_reason} — turntable 즉시 정지")
+                            _ev("lost", stage=s.stage_label, band=_bi + 1, n_bands=len(bands),
+                                theta_deg=float(np.degrees(theta_rad)),
+                                frames_ok=int(tracking.frames_ok),
+                                reason=str(tracking.last_loss_reason))
                             break
 
                         # rotation 정상 완료 체크
@@ -969,17 +994,32 @@ class ArtecStreamingScanSession:
         return float(v), True
 
     # ── 거리추종 (el·az·tz 고정 · 축거리만 창 중앙으로) ──────────────────
-    def _latest_frame_ranges_m(self, session, timeout_s: float = 1.5):
+    def _latest_frame_ranges_m(self, session, timeout_s: float = 1.5,
+                               fresh_settle_s: float = 0.0):
         """최근 OK 프레임의 **스캐너 프레임 정점**으로 표면거리 배열(m)을 만든다.
 
         `frame_mesh.vertices()` 는 스캐너 좌표계 mm 라 원점이 곧 카메라다 —
         거리 = 정점의 노름. 좌표변환·hand-eye 가 전혀 끼지 않아, 거리추종이
         캘리브 오차에 오염되지 않는다(이게 이 경로를 고른 이유다).
+
+        `fresh_settle_s` > 0 이면 **큐를 비우고 그 시간 동안 오는 프레임도 버린 뒤**
+        그다음 OK 프레임을 쓴다. 로봇 이동(블로킹) 직후엔 큐가 이동 전 프레임으로
+        차 있어서, 그냥 "첫 묶음의 마지막 OK" 를 쓰면 이동 전 값을 읽는다
+        (2026-09-21 run_150720: 세 번 물러나도 213→218mm — 그 뒤 lost).
         """
         import time as _t
         best = None
         t0 = _t.time()
         FS = artec_scanning.FrameState
+        if fresh_settle_s > 0:
+            t_s = _t.time()
+            while _t.time() - t_s < fresh_settle_s:
+                try:
+                    session.poll_events()               # 이동 전/중 프레임 버림
+                except Exception:                       # noqa: BLE001
+                    break
+                _t.sleep(self.s.poll_interval_s)
+            t0 = _t.time()
         while _t.time() - t0 < timeout_s:
             try:
                 events = session.poll_events()
@@ -1000,6 +1040,120 @@ class ArtecStreamingScanSession:
             return None
         return best / 1000.0                     # mm → m (원점 = 카메라)
 
+    # ── 밴드 전환: 조준 유지 소보간 + relocalization ─────────────────────
+    #  왜 — 2026-09-21 여섯 run 전부 밴드 전환 직후 θ=0° 에서 lost(회전 중은 0회).
+    #  이동 거리·고도각·fill 과 무관해 경로 의존으로 판단. Artec SDK 스트리밍은
+    #  한번 잃으면 마지막 키프레임과 겹치는 시야로 돌아가기 전엔 재정합하지 않는다.
+    BAND_STEP_M = 0.005          # 스텝당 카메라 이동 (m)
+    BAND_STEP_POLL_S = 0.15      # 스텝 후 프레임 폴링 시간 (~2 프레임)
+    BAND_RELOC_TRIES = 2         # 되돌아가기 시도 횟수
+    BAND_RELOC_WAIT_S = 1.5      # 되찾음 판정 대기 (스텝당)
+
+    def _reg_ok(self, tracking) -> bool:
+        """마지막 프레임이 정합됐고 연속 reg<0 가 끊겼는가."""
+        with tracking._lock:
+            return (tracking.last_reg_error >= 0.0
+                    and tracking.consecutive_reg_err == 0)
+
+    BAND_LOST_N = 3              # 스텝 뒤 연속 reg<0 가 이만큼이면 '잃었다' 로 보고 멈춤
+
+    def _wait_reg(self, session, tracking, wait_s: float) -> bool:
+        """정지 상태로 최대 wait_s 동안 폴링하며 정합 회복을 기다린다."""
+        t0 = time.time()
+        while time.time() - t0 < wait_s:
+            session.poll_events()
+            if self._reg_ok(tracking):
+                return True
+            time.sleep(self.s.poll_interval_s)
+        return self._reg_ok(tracking)
+
+    def _walk_path(self, session, tracking, path, tag: str, mode: str = "fwd",
+                   wait_s: float = None) -> int:
+        """`path`=[(q, α)] 를 순서대로 밟는다. 스텝마다 폴링해 regErr 를 찍는다.
+
+        mode="fwd"  : 잃으면(연속 reg<0 ≥ BAND_LOST_N, 잠깐 기다려도 회복 없음)
+                      **그 자리에서 멈추고** 그 인덱스를 돌려준다. 끝까지 가면 -1.
+        mode="back" : 되찾은 스텝에서 멈추고 그 인덱스를 돌려준다. 못 찾으면 -1.
+        """
+        wait_s = self.BAND_STEP_POLL_S if wait_s is None else float(wait_s)
+        n = len(path)
+        for i, (q, a) in enumerate(path):
+            self.move_robot_fn(q)
+            n_ok0 = tracking.frames_ok
+            t0 = time.time()
+            ok_seen = False
+            while time.time() - t0 < wait_s:
+                session.poll_events()
+                if mode == "back" and tracking.frames_ok > n_ok0 and self._reg_ok(tracking):
+                    ok_seen = True
+                    break
+                time.sleep(self.s.poll_interval_s)
+            with tracking._lock:
+                re, ce = tracking.last_reg_error, tracking.consecutive_reg_err
+            print(f"    [{tag}] {i+1}/{n} α={a:.2f}  regErr={re:+.3f}  consec<0={ce}")
+            if mode == "back" and ok_seen:
+                return i
+            if mode == "fwd" and ce >= self.BAND_LOST_N:
+                if self._wait_reg(session, tracking, self.BAND_RELOC_WAIT_S):
+                    continue                      # 잠깐 멈추니 다시 붙었다
+                print(f"    [{tag}] ⚠ α={a:.2f} 에서 정합 끊김 — 여기서 멈춤")
+                return i
+        return -1
+
+    def _band_transition(self, session, tracking, q_from, q_to, band_i: int = 0) -> None:
+        """밴드 q_from → q_to. 소보간 전진, 잃으면 그 자리에서 멈춰 **되돌아가**
+        되찾은 뒤 더 잘게 재전진(최대 BAND_RELOC_TRIES). 끝까지 못 찾으면 목표로
+        가서 나간다(이후 should_stop 이 lost 로 처리 — 밴드 부분 성공 경로).
+        결과는 이벤트 로그 `band_move` 로 남긴다(outcome ok/relocalized/failed)."""
+        step = self.BAND_STEP_M
+        path = self.band_path_fn(q_from, q_to, step)
+        evb = dict(stage=self.s.stage_label, from_band=band_i, to_band=band_i + 1)
+        if not path:
+            print("  [밴드이동] 경로 맥락 없음 — 한 방 이동(예전 방식)")
+            self.move_robot_fn(q_to)
+            _ev("band_move", steps=1, outcome="direct", **evb)
+            return
+        print(f"  [밴드이동] 조준 유지 소보간 {len(path)}스텝 (스텝 {step*1000:.0f}mm)")
+        lost_alpha = None; found_alpha = None
+        for attempt in range(0, self.BAND_RELOC_TRIES + 1):
+            k_lost = self._walk_path(session, tracking, path, "전진" if attempt == 0 else "재전진",
+                                     mode="fwd")
+            if k_lost >= 0 and lost_alpha is None:
+                lost_alpha = float(path[k_lost][1])
+            if k_lost < 0 and self._wait_reg(session, tracking, self.BAND_RELOC_WAIT_S):
+                if attempt > 0:
+                    print(f"  [밴드이동] ✓ 되찾고 도착 (되돌아가기 {attempt}회)")
+                _ev("band_move", steps=len(path), step_mm=step * 1000,
+                    outcome=("ok" if attempt == 0 else "relocalized"), tries=attempt,
+                    lost_alpha=lost_alpha, found_alpha=found_alpha, **evb)
+                return
+            if attempt == self.BAND_RELOC_TRIES:
+                break
+            # 되돌아가기: 잃은 자리(또는 끝)에서 q_from 쪽으로, 되찾을 때까지.
+            k_lost = len(path) - 1 if k_lost < 0 else k_lost
+            with tracking._lock:
+                ce = tracking.consecutive_reg_err
+            print(f"  [밴드이동] ⚠ 정합 없음 (연속 reg<0 {ce}) — 되돌아가 되찾기 "
+                  f"{attempt+1}/{self.BAND_RELOC_TRIES}")
+            back = [path[j] for j in range(k_lost - 1, -1, -1)] + [(np.asarray(q_from, float), 0.0)]
+            k = self._walk_path(session, tracking, back, "후진", mode="back",
+                                wait_s=self.BAND_RELOC_WAIT_S)
+            if k < 0:
+                print("  [밴드이동] ✘ 직전 밴드 자세까지 돌아가도 정합 없음 — 포기")
+                break
+            a_found = back[k][1]
+            found_alpha = float(a_found)
+            step *= 0.5
+            path = self.band_path_fn(q_from, q_to, step, alpha_from=a_found, seed=back[k][0])
+            if not path:
+                break
+            print(f"  [밴드이동] α={a_found:.2f} 에서 되찾음 — 스텝 {step*1000:.1f}mm 로 재전진 "
+                  f"{len(path)}스텝")
+        print("  [밴드이동] ✘ 되찾기 실패 — 목표 자세로 가서 진행 (이 밴드는 lost 로 처리될 수 있다)")
+        _ev("band_move", steps=len(path), step_mm=step * 1000, outcome="failed",
+            tries=self.BAND_RELOC_TRIES, lost_alpha=lost_alpha, found_alpha=found_alpha, **evb)
+        self.move_robot_fn(q_to)
+
     def _track_standoff(self, session, band_q, band_i: int, n_bands: int):
         """밴드 시작에서 축거리를 작동거리 창 중앙으로 보정하고, **트래커를 돌려준다**.
 
@@ -1014,7 +1168,8 @@ class ArtecStreamingScanSession:
         if (self.retarget_fn is None or self.standoff_of is None
                 or self.move_robot_fn is None or band_q is None):
             return None
-        from utils.nbv.standoff import StandoffTracker, core_mask_camera_frame
+        from utils.nbv.standoff import (StandoffTracker, core_mask_camera_frame,
+                                        TRACK_FRESH_SETTLE_S)
         d0 = self.standoff_of(band_q)
         if d0 is None:
             return None
@@ -1038,16 +1193,23 @@ class ArtecStreamingScanSession:
             if qn is None:
                 return False
             try:
-                self.move_robot_fn(qn)
+                code = self.move_robot_fn(qn)
             except Exception as e:                              # noqa: BLE001
                 print(f"  [거리추종] 이동 실패({e})")
+                return False
+            # 게이트 거부(-1)·드라이버 오류코드는 "안 움직였다" — 거리를 갱신하면 안 된다.
+            if isinstance(code, (int, np.integer)) and int(code) != 0:
+                print(f"  [거리추종] 이동 거부(code={int(code)}) — 유지")
                 return False
             return True
 
         cam0 = np.zeros(3)                       # 스캐너 프레임 원점 = 카메라
         # 회전 전(정지)이라 제한을 유지한 채 여러 번 수렴시킨다 — sim 과 동일.
+        # ★ 매 측정은 **이동 뒤 새 프레임**이어야 한다(`fresh_settle_s`) — 큐에 남은
+        #   이동 전 프레임을 읽으면 같은 값으로 세 번 연속 밀어낸다(run_150720).
         d1 = trk.converge(float(d0),
-                          lambda: (self._latest_frame_ranges_m(session), cam0),
+                          lambda: (self._latest_frame_ranges_m(
+                              session, fresh_settle_s=TRACK_FRESH_SETTLE_S), cam0),
                           _retarget)
         if d1 != d0 and self.s.band_settle_s > 0:
             # 움직였으면 SLAM 이 새 시점에서 다시 정착할 시간을 준다 — 밴드

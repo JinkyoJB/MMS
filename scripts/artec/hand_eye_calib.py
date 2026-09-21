@@ -169,7 +169,7 @@ def _run_scripted(
     sensor: ArtecClient,
     detector: ArtecCharucoDetector,
     calibrator: HandEyeCalibrator,
-    via_home: bool = True,
+    via_home: bool = False,
     sensor_name: str = "artec",
     start_from: int = 0,
 ) -> None:
@@ -273,8 +273,15 @@ def main() -> None:
                              "구조광 flash 는 그대로 — geometry 정상)")
     parser.add_argument("--no-auto-exposure", action="store_true",
                         help="auto exposure 끄기 (기본 on)")
+    # ★ 기본이 **경유 안 함**이다 (2026-09-21 뒤집음). `gen_calib_poses.py` 가
+    #   자세↔자세 경로를 충돌 게이트로 검사하고 이동거리 최소 순서로 재배열하므로
+    #   home 왕복이 불필요해졌다 — 그게 순회 시간의 대부분이었다(3배 이상 차이).
+    #   경로가 보장되지 않는 목록이면 `calibrate.py` 가 `--via-home` 을 붙여준다.
+    parser.add_argument("--via-home", action="store_true",
+                        help="자세 간 home 경유 (느리다). 기본은 경유하지 않음 — "
+                             "경로 검사된 자세 목록 전제")
     parser.add_argument("--no-via-home", action="store_true",
-                        help="자세 간 home 경유 비활성 (기본: 매 이동 전 home 으로 복귀)")
+                        help=argparse.SUPPRESS)      # 옛 플래그 — 이제 기본값이라 무시
     parser.add_argument("--start-from", type=int, default=0,
                         help="scripted 모드에서 N번째 자세부터 시작 (resume 용)")
     parser.add_argument("--intrinsic", type=str, default=str(DEFAULT_INTRINSIC_YAML),
@@ -380,7 +387,7 @@ def main() -> None:
     try:
         _run_scripted(
             poses_yaml, robot, sensor, detector, calibrator,
-            via_home=not args.no_via_home,
+            via_home=bool(args.via_home),
             sensor_name="artec",
             start_from=int(args.start_from),
         )

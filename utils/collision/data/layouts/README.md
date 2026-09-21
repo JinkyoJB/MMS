@@ -1,7 +1,14 @@
 # 충돌 환경 캐시 — 레이아웃 변형
 
+> 여기는 **셀 환경(`cell_env.npz`) 변형본** 보관소다. 캐시 파일이 둘인데 뭐가 뭔지
+> 모르겠으면 먼저 → `../README.md`
+
 `cell_env.npz` 는 코드가 읽는 **활성본** 하나뿐이라, 변형은 여기 쌓아두고
 `scripts/collision/use_layout.py` 로 갈아끼운다. 배경은 `docs/collision.md` §6.
+새로 굽는 법은 `scripts/collision/bake_layout.py`.
+
+⚠ 여기 `*.npz` 는 `.gitignore` 대상이라 **git 으로 따라가지 않는다.** 다른 PC 로
+옮길 때는 파일을 직접 복사할 것.
 
 | 별칭 | 출처 USD | 루트 prim | 로봇 base(world) | 점 수 | 턴테이블 |
 |---|---|---|---|---|---|

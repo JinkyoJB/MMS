@@ -38,6 +38,9 @@ class NbvDebugDump:
             enabled = os.environ.get("MMS_NBV_DEBUG", "1") == "1"
         self.enabled = bool(enabled)
         self.dir = out_dir or os.environ.get("MMS_NBV_DEBUG_DIR", "output/debug/nbv")
+        if not os.path.isabs(self.dir):          # cwd 가 바뀌어도 리포 밑에 쌓이게
+            _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            self.dir = os.path.join(_root, self.dir)
         self.tag = tag or time.strftime("%H%M%S")
         self.k = 0
         self._pending = None

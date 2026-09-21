@@ -15,8 +15,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from utils.robot.xarm_interface import XArmInterface          # noqa: E402
 from utils.robot import xarm7_kinematics as kin               # noqa: E402
-from utils.collision import capsules_from_joints              # noqa: E402
-from utils.collision.robot_collision import self_collision    # noqa: E402
 
 ROBOT_IP = "192.168.1.210"
 
@@ -146,14 +144,15 @@ def precheck(q_target: np.ndarray, *, label: str = "목표 자세") -> bool:
       2. self-collision — 링크끼리 겹치는 자세
       3. 특이점 근접 — sigma_min 이 작으면 그 방향 관절속도가 발산
 
-    ⚠ 2·3 은 **참고용**이다. 둘 다 utils.robot.xarm7_kinematics 의 링크 원점을
-      쓰는데, 그 모델은 sim USD 기반이라 이 실물과 플랜지가 z 약 291mm 어긋난다.
-      자세가 안전하다는 보장으로 받아들이면 안 된다. 1(관절 한계)만 사양 기반이라
-      그대로 신뢰할 수 있다.
+    ⚠ 이건 **자세** 검사일 뿐 **경로** 검사가 아니다. 현재 자세에서 목표까지
+      관절 직선 보간이 무엇을 쓸고 가는지는 `move_joint_safe()` 가 본다.
+      로봇을 움직이는 스크립트는 그쪽을 쓸 것.
 
-    ⚠ 턴테이블·주변 환경과의 충돌은 검사하지 않는다. 그건 CollisionWorld 가
-      필요하고 turntable_frame.yaml 이 재캘리브 대기 상태다 (README §알려진 한계).
-      → 실제 이동 전에 반드시 눈으로 경로를 확인할 것.
+    ※ 2026-09-21 정정 — 옛 주석은 2·3 이 "sim USD 기반이라 플랜지가 z 약
+      291mm 어긋나 참고용" 이라고 했는데, 그 뒤 `scripts/robot/calib_dh.py` 로
+      DH 를 실물 교정했다(`config/calibration/xarm7_dh.yaml`). 현장 실측
+      대조에서 해석 FK 와 컨트롤러 FK 차이는 **1.2mm** 였다 — 모델을 믿어도
+      된다. 환경 충돌도 이제 검사한다(`collision_gate`, 실측 셀 레이아웃).
     """
     q = np.asarray(q_target, dtype=float)[:7]
     ok = True
@@ -172,12 +171,21 @@ def precheck(q_target: np.ndarray, *, label: str = "목표 자세") -> bool:
     else:
         print("  ✓ 관절 한계 이내")
 
-    hits = self_collision(capsules_from_joints(q))
-    if hits:
-        print("  ⚠ (참고) self-collision: " + ", ".join(f"{a}↔{b} ({d*1000:.0f}mm)" for a, b, d in hits))
-        # 모델 불일치 때문에 ok 를 내리지 않는다 — 경고만 한다
+    # 자세 안전성은 **단일 게이트**로 본다 (링크 메시 + 실측 셀 SDF + 특이점).
+    # 옛 캡슐 근사(capsules_from_joints)는 오탐·미탐이 모두 있어 참고도 못 됐다.
+    try:
+        cm = collision_gate(required=False)
+    except Exception:                                    # noqa: BLE001
+        cm = None
+    if cm is None:
+        print("  ⚠ 충돌 게이트 없음 — 자가/환경 충돌 **미검사**")
     else:
-        print("  ✓ (참고) self-collision 없음")
+        s, e, who = cm.clearance(q)
+        safe, why = cm.is_pose_safe(q)
+        print(f"  {'✓' if safe else '✘'} 자세 충돌검사: 자가 {s*1000:.0f}mm · "
+              f"환경 {e*1000:.0f}mm ({who})" + ("" if safe else f"  → {why}"))
+        if not safe:
+            ok = False
 
     s = kin.sigma_min(q)
     if s < SIGMA_MIN_WARN:
@@ -186,6 +194,93 @@ def precheck(q_target: np.ndarray, *, label: str = "목표 자세") -> bool:
         print(f"  ✓ 특이점 여유 (sigma_min={s:.4f})")
 
     return ok
+
+
+def collision_gate(*, required: bool = True):
+    """단일 충돌 게이트 (sim·real 공용 `utils.collision.collision_model`).
+
+    `required=True` 면 게이트를 못 얻었을 때 **None 이 아니라 예외**다 —
+    "게이트가 없으면 무검사로 움직인다" 는 조용한 폴백이 곧 파손이다.
+    (활성 레이아웃은 `utils/collision/data/ACTIVE_LAYOUT.txt` 가 가리킨다.)
+    """
+    from utils.collision import collision_model as _cmod
+    cm = _cmod.get_default()
+    if cm is None and required:
+        raise SystemExit(
+            "✘ 충돌 게이트를 못 열었다 — 무검사 이동은 하지 않는다.\n"
+            "   캐시 생성: scripts/sim/export_link_meshes.py, "
+            "scripts/sim/export_env_mesh.py")
+    return cm
+
+
+def plan_safe_joint_path(q0, q1, cm, *, log=print):
+    """q0 → q1 의 **충돌 없는** 관절 경유점 목록. 불가능하면 None.
+
+    직선(관절 보간)이 통과하면 [q1] 하나, 막히면 우회를 계획한다.
+    `artec_multipass_scan_session._move_robot_to_q` 와 같은 구조 — 실물에서
+    검증된 경로를 스크립트도 그대로 쓴다.
+    """
+    q0 = np.asarray(q0, float)[:7]
+    q1 = np.asarray(q1, float)[:7]
+
+    ok, why, n = cm.is_path_safe(q0, q1)
+    if ok:
+        log(f"  ✓ 직선 경로 안전 (검사 {n}회)")
+        return [q1]
+
+    if why.startswith("start"):
+        log(f"  ✘ **현재 자세**가 이미 충돌/특이점 — {why}")
+        log("     로봇을 수동으로 살짝 빼낸 뒤 다시 시도할 것 "
+            "(웹 UI 수동 모드: http://192.168.1.210:18333)")
+        return None
+    if why.startswith("goal"):
+        log(f"  ✘ **목표 자세**가 충돌/특이점 — {why}")
+        return None
+
+    log(f"  직선 막힘({why}) — 우회 경로 계획 중 …")
+    from utils.control.joint_path_planner import plan_joint_path
+    path = plan_joint_path(
+        q0, q1, lambda a, b: cm.is_path_safe(a, b)[:2],
+        lower=kin.JOINT_LOWER, upper=kin.JOINT_UPPER,
+        step=0.3, max_iter=600, shortcut_iters=60,
+        log=lambda m: log(f"  [plan] {m}"))
+    if path is None:
+        log("  ✘ 우회 경로 없음 — 이동하지 않는다")
+        return None
+    way = [np.asarray(w, float)[:7] for w in path[1:]]
+    log(f"  ✓ 우회 경로 {len(way)}개 경유점")
+    return way
+
+
+def move_joint_safe(robot, q_target, *, speed_deg_s: float,
+                    label: str = "목표 자세", cm=None) -> bool:
+    """충돌 게이트를 거쳐 관절 이동. 경로가 없으면 **움직이지 않고** False.
+
+    ★ `robot.go_home()`/`set_servo_angle()` 직접 호출과의 차이가 이것이다 —
+      그쪽은 현재 자세에서 목표까지 관절을 **직선 보간**하므로, 그 사이에
+      턴테이블·테이블이 있으면 그냥 쓸고 지나간다 (2026-09-21 현장 사고).
+    """
+    q1 = np.asarray(q_target, float)[:7]
+    cm = cm if cm is not None else collision_gate()
+    q0 = np.asarray(robot.get_joint_angles(is_radian=True), float)[:7]
+
+    print(f"\n── {label} 경로 검사 ──")
+    s, e, who = cm.clearance(q0)
+    print(f"  현재 여유: 자가 {s*1000:.0f}mm · 환경 {e*1000:.0f}mm ({who})")
+    way = plan_safe_joint_path(q0, q1, cm)
+    if way is None:
+        return False
+
+    robot.enable_motion()
+    for i, w in enumerate(way, 1):
+        if len(way) > 1:
+            print(f"  → 경유점 {i}/{len(way)}")
+        code = robot.arm.set_servo_angle(
+            angle=w.tolist(), speed=float(speed_deg_s), is_radian=True, wait=True)
+        if code:
+            print(f"  ✘ set_servo_angle 실패 (code={code})")
+            return False
+    return True
 
 
 def confirm(msg: str = "이동") -> bool:

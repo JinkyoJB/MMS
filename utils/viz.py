@@ -134,3 +134,108 @@ def show_composite_mesh(result, title: str = "Artec 스캔 결과",
         pass
     vis.run()
     vis.destroy_window()
+
+
+def show_preview_result(pv: dict, title: str = "preview 결과") -> None:
+    """preview 산출(점군·턴테이블 축·밴드 플랜)을 한 창에 그린다.
+
+    왜 따로 있나 — `--until preview` 는 **캡처를 안 한다.** 모델이 비어 있어
+    `show_composite_mesh` 가 보여줄 것이 없다. 그런데 preview 야말로 눈으로
+    확인해야 하는 단계다: 물체를 제대로 봤는지, 밴드를 왜 그렇게 나눴는지가
+    로그 숫자만으로는 안 보인다 (2026-09-21 실물 요청).
+
+    좌표는 전부 **로봇 base 프레임(m)**. 천장 마운트라 +Z 가 아래이므로 뷰의
+    up 을 −Z 로 잡는다 — 안 그러면 물체가 거꾸로 서 보인다.
+
+    색: 회색=preview 점군 · 파랑=턴테이블 원판 · 청록=회전축 ·
+        주황=밴드 카메라 위치(크기순: 첫 밴드가 크다) · 노랑=밴드 조준선
+    """
+    import open3d as o3d
+
+    P = np.asarray(pv.get("points_B"), float)
+    if P.size == 0:
+        print("[viz] preview 점군이 비었다 — 시각화 skip")
+        return
+    axis_pt = np.asarray(pv["axis_pt_B"], float)
+    axis_dir = np.asarray(pv["axis_dir_B"], float)
+    axis_dir = axis_dir / (np.linalg.norm(axis_dir) + 1e-12)
+    up_sign = float(pv.get("up_sign", 1.0))
+    geoms = []
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(P)
+    pcd.paint_uniform_color([0.45, 0.45, 0.48])
+    geoms.append(pcd)
+
+    # 턴테이블 원판 — 축에 수직으로 눕힌다.
+    disc = o3d.geometry.TriangleMesh.create_cylinder(
+        radius=0.1176, height=0.002, resolution=64)
+    z = np.array([0.0, 0.0, 1.0])
+    v = np.cross(z, axis_dir); s = float(np.linalg.norm(v)); c = float(z @ axis_dir)
+    if s > 1e-9:
+        K = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+        R = np.eye(3) + K + K @ K * ((1 - c) / (s * s))
+    else:
+        R = np.eye(3) if c > 0 else -np.eye(3)
+    disc.rotate(R, center=(0, 0, 0)); disc.translate(axis_pt)
+    disc.paint_uniform_color([0.20, 0.35, 0.80]); disc.compute_vertex_normals()
+    geoms.append(disc)
+
+    # 회전축 — 원판에서 '위'(up_sign) 로 30cm
+    up = -axis_dir if up_sign < 0 else axis_dir
+    ax = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector([axis_pt, axis_pt + up * 0.30]),
+        lines=o3d.utility.Vector2iVector([[0, 1]]))
+    ax.colors = o3d.utility.Vector3dVector([[0.0, 0.8, 0.8]])
+    geoms.append(ax)
+
+    # 밴드 카메라 — eye 위치에 구, 조준점까지 선. 첫 밴드가 가장 크다.
+    vps = pv.get("view_poses") or []
+    for i, vp in enumerate(vps):
+        eye = getattr(vp, "eye_w", None)
+        if eye is None:
+            continue
+        eye = np.asarray(eye, float)
+        # 조준점 = 축 위의 target_z (플래너가 밴드마다 정한 높이).
+        tgt = np.array([axis_pt[0], axis_pt[1],
+                        float(getattr(vp, "target_z", axis_pt[2]))])
+        sp = o3d.geometry.TriangleMesh.create_sphere(
+            radius=max(0.012 - 0.002 * i, 0.005), resolution=12)
+        sp.translate(eye); sp.paint_uniform_color([0.95, 0.55, 0.15])
+        sp.compute_vertex_normals(); geoms.append(sp)
+        ln = o3d.geometry.LineSet(
+            points=o3d.utility.Vector3dVector([eye, tgt]),
+            lines=o3d.utility.Vector2iVector([[0, 1]]))
+        ln.colors = o3d.utility.Vector3dVector([[0.9, 0.85, 0.2]])
+        geoms.append(ln)
+
+    # 콘솔 요약 — 창을 닫아도 남는다.
+    zc = (P - axis_pt) @ up
+    rr = np.linalg.norm((P - axis_pt) - np.outer(zc, up), axis=1)
+    print(f"\n[viz] preview 결과 — {pv.get('note', '')}")
+    print(f"  점군        : {len(P):,}점")
+    print(f"  물체 높이   : {(zc.max() - max(zc.min(), 0.0)) * 1000:.0f} mm "
+          f"(원판 위 {zc.min()*1000:+.0f} ~ {zc.max()*1000:+.0f} mm)")
+    print(f"  최대 반경   : {rr.max()*1000:.0f} mm")
+    print(f"  밴드 자세   : {len(vps)}개")
+    for i, vp in enumerate(vps, 1):
+        print(f"    {i}. el={getattr(vp,'el_deg',0):.0f}°  "
+              f"standoff={getattr(vp,'standoff',0)*1000:.0f}mm  "
+              f"tz={getattr(vp,'target_z',0)*1000:.0f}mm")
+    print("  회색=점군 · 파랑=원판 · 청록=회전축 · 주황=밴드 카메라(첫 밴드가 큼)")
+    print("  Q/ESC 로 닫기.")
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=title, width=1280, height=760)
+    for g in geoms:
+        vis.add_geometry(g)
+    try:
+        ctl = vis.get_view_control()
+        ctl.set_up(list(up))                 # 천장 마운트: '위' 는 −Z
+        ctl.set_front([-0.6, -0.6, 0.0])
+        ctl.set_lookat(list(axis_pt + up * 0.06))
+        ctl.set_zoom(0.55)
+    except Exception:
+        pass
+    vis.run()
+    vis.destroy_window()

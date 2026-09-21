@@ -151,9 +151,16 @@ class CollisionModel:
         self._dyn_voxel = float(sdf_voxel_m)
         self._dyn_pad = float(sdf_pad_m)
         mb = (self.env_sdf.nbytes + sum(v.nbytes for v in self._link_sdf.values())) / 1e6
-        self.log(f"[collision] SDF 준비 — 환경 {tuple(self.env_sdf.shape)} @ "
-                 f"{sdf_voxel_m*1000:.0f}mm, 링크 {len(self._link_sdf)}개 @ "
-                 f"{link_voxel_m*1000:.0f}mm, 총 {mb:.1f}MB")
+        # ★ 로그 실패가 **게이트를 끄면 안 된다.** cp949 콘솔에서 '—' 하나 때문에
+        #   UnicodeEncodeError 가 나면, `get_default` 의 except 가 그걸 삼키고
+        #   None 을 돌려줘 호출부가 **충돌검사 없이** 움직인다 (2026-09-21 실측).
+        #   모델은 이미 다 만들어진 뒤라 로그만 포기하는 게 맞다.
+        try:
+            self.log(f"[collision] SDF 준비 — 환경 {tuple(self.env_sdf.shape)} @ "
+                     f"{sdf_voxel_m*1000:.0f}mm, 링크 {len(self._link_sdf)}개 @ "
+                     f"{link_voxel_m*1000:.0f}mm, 총 {mb:.1f}MB")
+        except Exception:                                # noqa: BLE001
+            pass
 
     def env_distance(self, P):
         return self.env_sdf.query(P)
@@ -324,7 +331,12 @@ def get_default(**kw):
         try:
             _cached[key] = CollisionModel(**kw)
         except Exception as e:                       # noqa: BLE001
-            print(f"[collision] 모델 로드 실패({type(e).__name__}: {e}) — "
-                  f"캐시 생성: scripts/sim/export_link_meshes.py, export_env_mesh.py")
+            # 메시지도 cp949 콘솔에서 터질 수 있다 — 게이트가 없다는 사실 자체를
+            # 못 알리면 더 위험하므로 ASCII 로 한 번 더 시도한다.
+            try:
+                print(f"[collision] 모델 로드 실패({type(e).__name__}: {e}) — "
+                      f"캐시 생성: scripts/sim/export_link_meshes.py, export_env_mesh.py")
+            except Exception:                        # noqa: BLE001
+                print("[collision] model load failed: %s" % type(e).__name__)
             _cached[key] = None
     return _cached[key]

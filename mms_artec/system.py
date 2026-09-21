@@ -421,7 +421,11 @@ class ArtecMMS:
             r = ArtecMultiPassScanSession(self, robot, turntable, s.multipass_settings).run()
             print(f"\n[artec_process] Multi-pass Scan — {r.n_passes} passes, "
                   f"{r.n_total_frames} total frames ({r.model.scan_count()} scan(s))")
-            return r.model, ctx, bool(r.hints_applied)
+            # ★ 스캔 결과를 `ctx` 로 **넘겨준다.** 예전엔 `ctx=None` 이라 세션이
+            #   들고 있던 것(밴드 플랜·preview 점군·recovery 회계)이 여기서 전부
+            #   사라졌다 — `--until preview` 는 모델이 비어 있으므로 그게 유일한
+            #   산출인데 볼 방법이 없었다 (2026-09-21).
+            return r.model, r, bool(r.hints_applied)
 
         from mms_artec.nbv.artec_streaming_scan_session import ArtecStreamingScanSession
         r = ArtecStreamingScanSession(self, robot, turntable, s.streaming_scan_settings).run()
@@ -525,6 +529,19 @@ class ArtecMMS:
         # IsaacScanSession 이 이미 점군/mesh 를 만들었으므로 export 만 한다.
         if self.cfg.backend == "isaac":
             self._export(model, s, tag="sim")
+            return ArtecProcessResult(model=model, ctx=ctx)
+
+        # ── 스캔이 없으면 후처리를 돌리지 않는다 ────────────────────────
+        # `--until preview` 는 계획만 내고 캡처를 안 한다. 그 빈 모델로 SDK
+        # 알고리즘을 부르면 단계마다 ArgumentInvalid(0x80010201) 가 나고
+        # **트레이스백이 세 번** 찍혀, 정상 종료인데 실패처럼 보인다
+        # (2026-09-21 실물). 돌릴 것이 없으면 조용히 건너뛴다.
+        try:
+            _n_scan = int(model.scan_count())
+        except Exception:                                    # noqa: BLE001
+            _n_scan = 0
+        if _n_scan == 0:
+            print("[artec_process] 스캔 0개 — 후처리·export 건너뜀")
             return ArtecProcessResult(model=model, ctx=ctx)
 
         # ── 1-2. Registration ───────────────────────────────────────────
@@ -650,7 +667,10 @@ class ArtecProcessSettings:
 class ArtecProcessResult:
     """artec_process 결과."""
     model: object                                        # ModelHandle (artec_base)
-    ctx:   Optional[object] = None                       # ArtecScanContext (discrete only)
+    #: 스캔 세션 결과 (`ArtecMultiPassScanResult`). 모델에 안 담기는 것들이
+    #  여기 있다 — preview 점군·밴드 플랜·recovery 회계·hint 기록.
+    #  ("discrete only" 였던 옛 주석은 그 경로를 2026-09-16 지우며 무효가 됐다.)
+    ctx:   Optional[object] = None
 
     def composite_mesh_o3d(self):
         """Composite mesh 를 Open3D TriangleMesh 로 변환 (mm → m)."""

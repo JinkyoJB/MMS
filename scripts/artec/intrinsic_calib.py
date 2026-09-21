@@ -65,6 +65,10 @@ DEBUG_DIR       = _PROJECT_ROOT / "debug_intrinsic_artec"
 MOVE_SPEED_DEG  = 10
 SETTLE_TIME_S   = 1.5
 MIN_FRAMES      = 8
+#: 뷰 하나가 캘리브에 기여하려면 있어야 할 ChArUco 코너 수.
+#  7×5 보드의 내부 코너는 24개다. 절반 이하로 떨어지면 보드가 크게 잘렸거나
+#  초점이 나간 것이고, 그런 뷰는 호모그래피가 퇴화해 calibrateCamera 를 죽인다.
+MIN_CORNERS_PER_VIEW = 10
 
 
 # ─── 보드 ─────────────────────────────────────────────────────────────
@@ -124,7 +128,7 @@ def _run_scripted(
     robot: XArmInterface,
     sensor: ArtecClient,
     detector: ArtecCharucoDetector,
-    via_home: bool = True,
+    via_home: bool = False,
     sensor_name: str = "artec",
     start_from: int = 0,
 ):
@@ -235,7 +239,11 @@ def main() -> None:
                         choices=list(BOARD_PRESETS.keys()))
     parser.add_argument("--square-mm", type=float, default=None)
     parser.add_argument("--marker-mm", type=float, default=None)
-    parser.add_argument("--no-via-home", action="store_true")
+    # ★ 기본이 **경유 안 함**이다 (2026-09-21 뒤집음) — 근거는 hand_eye_calib 참조.
+    parser.add_argument("--via-home", action="store_true",
+                        help="자세 간 home 경유 (느리다). 기본은 경유하지 않음")
+    parser.add_argument("--no-via-home", action="store_true",
+                        help=argparse.SUPPRESS)      # 옛 플래그 — 이제 기본값
     parser.add_argument("--start-from", type=int, default=0)
     parser.add_argument("--no-texture-flash", action="store_true")
     parser.add_argument("--fix-k3", action="store_true", default=True,
@@ -290,7 +298,7 @@ def main() -> None:
     try:
         corners, ids, img_sz = _run_scripted(
             poses_yaml, robot, sensor, detector,
-            via_home=not args.no_via_home,
+            via_home=bool(args.via_home),
             start_from=int(args.start_from),
         )
     finally:
@@ -306,19 +314,39 @@ def main() -> None:
     print("\ncalibrateCamera 실행...")
     obj_pts_list: List[np.ndarray] = []
     img_pts_list: List[np.ndarray] = []
+    n_thin = 0
     for c, ids_arr in zip(corners, ids):
         try:
             obj_pts, img_pts = detector.board.matchImagePoints(c, ids_arr)
         except Exception as e:
             print(f"  matchImagePoints 실패: {e}")
             continue
-        if obj_pts is None or img_pts is None or len(obj_pts) < 4:
+        if obj_pts is None or img_pts is None:
+            continue
+        # ★ **코너가 적은 뷰는 버린다.** OpenCV 최소 요구(4점)만 걸러서는
+        #   부족하다 — `initIntrinsicParams2D` 가 뷰마다 호모그래피를 푸는데,
+        #   점이 적으면 거의 일직선이라 퇴화해서 다음으로 죽는다:
+        #       Assertion failed: matH0.size() == Size(3,3)
+        #   메시지에 원인이 안 드러나 추적이 어렵다(2026-09-21 실측: 코너
+        #   5~7개짜리 뷰 3개가 섞여 14프레임을 모으고도 산출 실패).
+        if len(obj_pts) < MIN_CORNERS_PER_VIEW:
+            n_thin += 1
             continue
         obj_pts_list.append(np.asarray(obj_pts, dtype=np.float32).reshape(-1, 1, 3))
         img_pts_list.append(np.asarray(img_pts, dtype=np.float32).reshape(-1, 1, 2))
+    if n_thin:
+        print(f"  코너 {MIN_CORNERS_PER_VIEW}개 미만인 뷰 {n_thin}개 제외 "
+              f"(호모그래피 퇴화 방지)")
 
     if len(obj_pts_list) < MIN_FRAMES:
         print(f"⚠ 매칭 후 frame {len(obj_pts_list)} < {MIN_FRAMES} — 종료")
+        if n_thin:
+            print(f"   코너 부족으로 {n_thin}개가 빠졌다 — 보드가 잘리거나 "
+                  f"초점이 나갔다는 뜻이다.")
+            print(f"   debug_intrinsic_artec/ 의 이미지를 확인하고, 흐릿하면 "
+                  f"카메라-보드 거리를 Spider 최적대역(200~250mm)으로 줄일 것:")
+            print(f"     python scripts/artec/gen_calib_poses.py --from-view "
+                  f"--standoff 0.25 --write")
         return 1
 
     flags = 0

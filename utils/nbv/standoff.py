@@ -141,6 +141,11 @@ def core_mask_camera_frame(pts_cam, half_deg: float = None):
     h = math.radians(TRACK_CORE_HALF_DEG if half_deg is None else float(half_deg))
     return np.abs(np.arctan2(P[:, 1], np.maximum(P[:, 2], 1e-9))) <= h
 TRACK_TOL_M: float = float(os.environ.get("MMS_STANDOFF_TOL_MM", "0.0")) / 1000.0
+#: 재겨냥 이동 **뒤** 표면거리를 다시 재기 전에 버리는 시간 (s). 로봇 이동이
+#  블로킹이라 그동안 SDK 큐에 쌓인 프레임은 전부 **이동 전** 것이다 — 그걸 재면
+#  "안 움직였다" 로 읽혀 같은 방향으로 또 민다. 2026-09-21 run_150720: 25mm 씩
+#  세 번 물러났는데 측정은 213→214→218mm, 직후 tracking lost.
+TRACK_FRESH_SETTLE_S: float = float(os.environ.get("MMS_STANDOFF_FRESH_S", "0.4"))
 
 
 def window_center(dof) -> float:
