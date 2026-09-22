@@ -202,7 +202,10 @@ class XArmInterface:
             input("\nEnter 누르면 이동...")
 
         self.enable_motion()
-        self.arm.set_servo_angle(angle=ik_joints_rad.tolist(), speed=speed,
+        # ★ xArm SDK: is_radian=True 이면 speed/mvacc 도 rad/s·rad/s² 로 해석한다 — deg 값을 그대로 넘기면 π rad/s(180°/s)로 클램프돼 설정과 무관하게 최고속이 된다(2026-09-22 발견).
+        self.arm.set_servo_angle(angle=ik_joints_rad.tolist(),
+                                 speed=float(np.radians(speed)),
+                                 mvacc=float(np.radians(speed * 4.0)),
                                  is_radian=True, wait=True)
 
         pose_after = self.get_pose(is_radian=True)

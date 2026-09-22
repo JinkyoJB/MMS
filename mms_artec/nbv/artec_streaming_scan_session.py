@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -416,6 +417,13 @@ class ArtecStreamingScanResult:
     n_bands: int = 1                   # 계획된 밴드 수
     n_bands_done: int = 0              # 전회전을 끝낸 밴드 수
     band_reasons: List[str] = field(default_factory=list)
+    #: 밴드별 거리추종 실측 [(축거리 d, 표면거리 p) m] — 완주한 밴드만. r_eff = d − p 가
+    #  "축거리 = 표면거리 + 반경" 의 그 반경이다. nbv 축거리가 preview p95 반경(과대)
+    #  대신 이걸 쓴다(2026-09-22 run_162620: preview 92mm vs 실측 ~25mm → nbv 빈 캡처 2회).
+    band_standoff_m: List[tuple] = field(default_factory=list)
+    #: lost 로 끝났을 때 IScan **꼬리**의 미정합 프레임 수 (ignore_registration_errors=True 라
+    #  reg<0 프레임도 scan 에 들어간다). 병합 전에 잘라내라고 알려 준다.
+    n_tail_lost: int = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -475,9 +483,14 @@ class ArtecStreamingScanSession:
 
     # ── Entry ──────────────────────────────────────────────────────────
 
+    _run_seq = 0          # 프로세스 안 세션 번호 — 디버그 이미지가 IScan 마다 덮어쓰지 않게
+
     def run(self) -> ArtecStreamingScanResult:
         s = self.s
         scanner = self.mms.sensor._scanner
+        ArtecStreamingScanSession._run_seq += 1
+        self._dbg_seq = ArtecStreamingScanSession._run_seq
+        from utils.nbv.standoff import TRACK_MIN_PTS as _TRK_MIN_PTS
 
         # 1. FPS
         max_fps = float(scanner.max_fps())
@@ -622,6 +635,10 @@ class ArtecStreamingScanSession:
         n_bands_done = 0               # 전회전을 끝낸 밴드 수
         tt_ctrl = None
         model = None
+        _live_d = 0.0                  # 직전 밴드의 추종 축거리 (전환 시작점)
+        _live_trk = None
+        _next_d0 = None                # 전환이 넘겨준 다음 밴드 시작 축거리 (보정 반영)
+        band_standoff_m: List[tuple] = []
         if len(bands) > 1:
             print(f'  밴드 {len(bands)}개를 한 IScan 에서 연속 스캔한다')
         try:                                    # outer — session.stop() 보장
@@ -635,8 +652,9 @@ class ArtecStreamingScanSession:
                     try:
                         if self.move_robot_fn is not None and _band_q is not None:
                             if self.band_path_fn is not None and bands[_bi - 1] is not None:
-                                self._band_transition(session, tracking,
-                                                      bands[_bi - 1], _band_q, band_i=_bi)
+                                _next_d0 = self._band_transition(
+                                    session, tracking, bands[_bi - 1], _band_q, band_i=_bi,
+                                    standoff_from=(float(_live_d) if _live_trk is not None else None))
                             else:
                                 self.move_robot_fn(_band_q)
                                 _ev("band_move", stage=s.stage_label, from_band=_bi,
@@ -667,11 +685,14 @@ class ArtecStreamingScanSession:
                 #   표면거리를 재서 축거리만 고친다. 회전 중이 아니라 여기서 하는
                 #   이유: 밴드 경계는 이미 로봇이 움직이고 settle 하는 자리라
                 #   추가 위험이 0 이다(회전+이동이 겹치면 SLAM 이 흔들린다).
-                _live = self._track_standoff(session, _band_q, _bi, len(bands))
+                _live = self._track_standoff(session, tracking, _band_q, _bi, len(bands),
+                                             d0_override=_next_d0)
+                _next_d0 = None
                 # 회전 중 거리추종(live) 상태 — 트래커·현재 축거리·재겨냥 콜백.
                 _live_trk, _live_d, _live_rt = (_live if _live else (None, 0.0, None))
                 _live_since = 0            # 마지막 판정 이후 OK 프레임 수
                 _last_ok_v = None          # 최근 OK 프레임 정점 (스캐너 프레임, m)
+                _last_ok_fr = None         # 그 프레임 핸들 (디버그 이미지의 텍스처용)
                 vel_rad_s = (2.0 * np.pi) / s.rotation_duration_s
                 if s.sweep_rad is not None:            # 부분 스윕 (nbv gap 겨냥)
                     target_rad = float(abs(s.sweep_rad)) \
@@ -760,9 +781,21 @@ class ArtecStreamingScanSession:
                                         _v = ev.frame_mesh.vertices()
                                         if _v is not None and len(_v):
                                             _last_ok_v = np.asarray(_v, float) / 1000.0
+                                            _last_ok_fr = ev.frame_mesh
                             except Exception:                    # noqa: BLE001
                                 pass
-                            if _live_since >= _live_trk.every and _last_ok_v is not None:
+                            _dead = bool(getattr(_live_trk, "dead_state", {}).get("dead"))
+                            if _dead and _live_since >= _live_trk.every:
+                                # 밴드 시작에서 "이동에 측정이 안 따라옴" 으로 중단된 상태.
+                                # 예전엔 여기서도 update() 를 불러 retarget 이 조용히 거부되고
+                                # 트래커가 "재겨냥 실패(IK/충돌)" 로 오표기했다(run_160447 39회).
+                                _live_since = 0
+                                if not getattr(_live_trk, "_dead_logged", False):
+                                    print("  [거리추종] 이 밴드 추종 중단 상태 — live 판정 생략")
+                                    _live_trk._dead_logged = True
+                            elif (_live_since >= _live_trk.every and _last_ok_v is not None
+                                    and len(_last_ok_v) >= _TRK_MIN_PTS
+                                    and self._track_usable(tracking)):
                                 _live_since = 0
                                 try:
                                     _d_new = _live_trk.update(
@@ -771,6 +804,13 @@ class ArtecStreamingScanSession:
                                 except Exception as e:           # noqa: BLE001
                                     print(f"  [거리추종] live 판정 실패({e}) — 유지")
                                     _d_new = _live_d
+                                self._dbg_range_image(
+                                    f"s{self._dbg_seq:02d}_band{_bi+1}_live_f{int(tracking.frames_ok):04d}",
+                                    _last_ok_v, _live_d, None,
+                                    f"theta={np.degrees(theta_rad):+.0f}deg  "
+                                    f"-> d={_d_new*1000:.0f}mm", frame=_last_ok_fr)
+                                # ★ 예전엔 frame 을 안 넘겨 밴드 시작 프레임의 텍스처가 live 이미지
+                                #   전부에 복사됐다(run_161342: live 45장 텍스처 동일). 3D 점은 맞았다.
                                 if _d_new != _live_d:
                                     _live_d = _d_new
                                     tracking.mark_started()      # 이동 공백 = stall 아님
@@ -779,6 +819,7 @@ class ArtecStreamingScanSession:
                                     #   새 자세의 프레임만 재게 한다.
                                     _live_since = -int(_live_trk.every)
                                     _last_ok_v = None
+                                    _last_ok_fr = None
                         if live is not None and live_ok and events:
                             try:
                                 FS = artec_scanning.FrameState
@@ -892,6 +933,9 @@ class ArtecStreamingScanSession:
                         f"band {_bi + 1}/{len(bands)}: {end_reason}{_th}")
                     if band_ok:
                         n_bands_done += 1
+                        _lp = getattr(_live_trk, "last_p", None) if _live_trk is not None else None
+                        if _live_trk is not None and _lp:
+                            band_standoff_m.append((float(_live_d), float(_lp)))
                     tracking.stop_event.set()
                     if tt_ctrl is not None:
                         tt_ctrl.join(timeout=3.0)
@@ -978,6 +1022,10 @@ class ArtecStreamingScanSession:
             last_good_theta_rad=last_good_theta_rad,
             n_bands=len(bands),
             n_bands_done=n_bands_done,
+            band_standoff_m=list(band_standoff_m),
+            # ignore_registration_errors=False 면 미정합 프레임은 애초에 scan 에 없다 — 자르면 안 됨
+            n_tail_lost=(int(max(tracking.consecutive_reg_err, tracking.consecutive_lost))
+                         if (tracking.tracking_lost and s.ignore_registration_errors) else 0),
             band_reasons=list(band_reasons),
         )
 
@@ -1031,6 +1079,7 @@ class ArtecStreamingScanSession:
                         v = ev.frame_mesh.vertices()
                         if v is not None and len(v):
                             best = np.asarray(v, float)
+                            self._dbg_last_frame = ev.frame_mesh   # 디버그 이미지용
                 except Exception:                               # noqa: BLE001
                     continue
             if best is not None:
@@ -1039,6 +1088,41 @@ class ArtecStreamingScanSession:
         if best is None:
             return None
         return best / 1000.0                     # mm → m (원점 = 카메라)
+
+    # ── 거리추종 디버그 이미지 (output/debug/lookaround_<RUN_TS>/) ────────────
+    def _dbg_range_image(self, tag: str, verts_m, d_axis_m: float, p_m,
+                         note: str = "", frame=None) -> None:
+        """정점을 각도 좌표로 펼친 거리 이미지 + (있으면) 텍스처 프레임을 저장한다.
+        "이동했는데 측정이 안 변함" 같은 판정을 **눈으로** 검증하기 위한 것이라
+        판정 지점마다 한 장씩만 찍는다(밴드당 ~30장). MMS_LOOKAROUND_DEBUG_IMG=0 으로 끈다."""
+        if os.environ.get("MMS_LOOKAROUND_DEBUG_IMG", "1") == "0":
+            return
+        try:
+            from utils.nbv.range_debug_image import save_range_image
+            from utils.nbv.standoff import TRACK_CORE_HALF_DEG, core_mask_camera_frame
+            run_ts = os.environ.get("MMS_RUN_TS", "run")
+            d = os.path.join("output", "debug", f"lookaround_{run_ts}")
+            V = np.asarray(verts_m, float)
+            m = core_mask_camera_frame(V) if len(V) else np.zeros(0, bool)
+            p_core = (float(np.median(np.linalg.norm(V[m], axis=1))) if m.sum() else float("nan"))
+            p_all = (float(np.median(np.linalg.norm(V, axis=1))) if len(V) else float("nan"))
+            dof = self.scan_range or (0.20, 0.30)
+            lines = [f"{tag}  {self.s.stage_label}",
+                     f"axis d={d_axis_m*1000:.0f}mm  core median={p_core*1000:.0f}mm "
+                     f"(all {p_all*1000:.0f})  n={len(V)} core={int(m.sum())}",
+                     f"window {dof[0]*1000:.0f}-{dof[1]*1000:.0f}mm  used p={'-' if p_m is None else f'{p_m*1000:.0f}mm'}"]
+            if note:
+                lines.append(note)
+            tex = None
+            fr = frame if frame is not None else getattr(self, "_dbg_last_frame", None)
+            if fr is not None:
+                try:
+                    tex = fr.image()
+                except Exception:                                   # noqa: BLE001
+                    tex = None
+            save_range_image(os.path.join(d, f"{tag}.png"), V, dof, TRACK_CORE_HALF_DEG, lines, tex)
+        except Exception as e:                                      # noqa: BLE001
+            print(f"  [거리추종] 디버그 이미지 실패({type(e).__name__}: {e})")
 
     # ── 밴드 전환: 조준 유지 소보간 + relocalization ─────────────────────
     #  왜 — 2026-09-21 여섯 run 전부 밴드 전환 직후 θ=0° 에서 lost(회전 중은 0회).
@@ -1050,10 +1134,25 @@ class ArtecStreamingScanSession:
     BAND_RELOC_WAIT_S = 1.5      # 되찾음 판정 대기 (스텝당)
 
     def _reg_ok(self, tracking) -> bool:
-        """마지막 프레임이 정합됐고 연속 reg<0 가 끊겼는가."""
+        """마지막 프레임이 정합됐고 연속 reg<0 가 끊겼는가 (밴드 전환의 되찾음 판정용)."""
         with tracking._lock:
             return (tracking.last_reg_error >= 0.0
                     and tracking.consecutive_reg_err == 0)
+
+    def _track_usable(self, tracking) -> bool:
+        """거리추종이 프레임을 믿어도 되는가 — **아직 lost 가 아니면** 된다.
+
+        ★ `_reg_ok`(마지막 프레임까지 정합) 를 여기 썼더니 스캔 **시작**(SDK 워밍업,
+          last_reg_error 초기 0/−1)부터 '추적 끊김' 으로 판정돼 밴드 1 내내 거리추종이
+          꺼졌다(2026-09-22 run_152915: "추적 끊김 상태" 30회, d=316 고정). 표면거리
+          측정은 정합과 무관한 카메라-로컬 정점이므로, lost 판정 전까지는 쓴다.
+          잘못된 프레임은 이동-측정 일관성 검사가 따로 잡는다.
+        """
+        with tracking._lock:
+            if getattr(tracking, "tracking_lost", False):
+                return False
+            thr = int(getattr(self.s, "consecutive_reg_err_threshold", 5) or 5)
+            return int(getattr(tracking, "consecutive_reg_err", 0)) < thr
 
     BAND_LOST_N = 3              # 스텝 뒤 연속 reg<0 가 이만큼이면 '잃었다' 로 보고 멈춤
 
@@ -1100,19 +1199,47 @@ class ArtecStreamingScanSession:
                 return i
         return -1
 
-    def _band_transition(self, session, tracking, q_from, q_to, band_i: int = 0) -> None:
+    def _band_transition(self, session, tracking, q_from, q_to, band_i: int = 0,
+                         standoff_from: float = None):
         """밴드 q_from → q_to. 소보간 전진, 잃으면 그 자리에서 멈춰 **되돌아가**
         되찾은 뒤 더 잘게 재전진(최대 BAND_RELOC_TRIES). 끝까지 못 찾으면 목표로
         가서 나간다(이후 should_stop 이 lost 로 처리 — 밴드 부분 성공 경로).
-        결과는 이벤트 로그 `band_move` 로 남긴다(outcome ok/relocalized/failed)."""
+        결과는 이벤트 로그 `band_move` 로 남긴다(outcome ok/relocalized/failed).
+
+        ★ `standoff_from` = 직전 밴드가 **거리추종으로 도달한** 축거리. 2026-09-22
+          run_162620: 밴드 1 이 353→278mm 로 수렴했는데 전환 경로는 **계획** 자세
+          (353mm) 에서 출발해 첫 스텝이 75mm 점프 → α=0.14 에서 즉시 lost, 되돌아가기도
+          계획 자세(=지금 자리가 아님)로 가서 못 찾았다. 전환은 지금 자리에서 시작하고,
+          같은 보정(−75mm)을 다음 밴드 목표에도 미리 반영한다(인접 밴드는 반경이
+          비슷하다 — 트래커가 나머지를 다듬는다). 반환 = 다음 밴드 시작 축거리(보정 반영)
+          또는 None(맥락 없음)."""
         step = self.BAND_STEP_M
-        path = self.band_path_fn(q_from, q_to, step)
+        standoff_to = None
+        d_from_plan = self.standoff_of(q_from) if self.standoff_of else None
+        d_to_plan = self.standoff_of(q_to) if self.standoff_of else None
+        if standoff_from is not None and d_from_plan and d_to_plan:
+            corr = float(standoff_from) - float(d_from_plan)
+            corr = float(np.clip(corr, -0.12, 0.12))
+            standoff_to = float(d_to_plan) + corr
+            if abs(corr) >= 0.005:
+                print(f"  [밴드이동] 직전 밴드 추종 보정 {corr*1000:+.0f}mm 반영 — 출발 "
+                      f"{standoff_from*1000:.0f}mm(계획 {d_from_plan*1000:.0f}) → 목표 "
+                      f"{standoff_to*1000:.0f}mm(계획 {d_to_plan*1000:.0f})")
+        q_cur = None
+        try:
+            q_cur = np.asarray(self.robot.get_joint_angles(is_radian=True), float)
+        except Exception:                                       # noqa: BLE001
+            q_cur = None
+        q_start = q_cur if q_cur is not None else np.asarray(q_from, float)
+        path = self.band_path_fn(q_from, q_to, step, standoff_from=standoff_from,
+                                 standoff_to=standoff_to, seed=q_cur)
+        q_to_eff = np.asarray(path[-1][0], float) if path else np.asarray(q_to, float)
         evb = dict(stage=self.s.stage_label, from_band=band_i, to_band=band_i + 1)
         if not path:
             print("  [밴드이동] 경로 맥락 없음 — 한 방 이동(예전 방식)")
             self.move_robot_fn(q_to)
             _ev("band_move", steps=1, outcome="direct", **evb)
-            return
+            return None
         print(f"  [밴드이동] 조준 유지 소보간 {len(path)}스텝 (스텝 {step*1000:.0f}mm)")
         lost_alpha = None; found_alpha = None
         for attempt in range(0, self.BAND_RELOC_TRIES + 1):
@@ -1126,7 +1253,7 @@ class ArtecStreamingScanSession:
                 _ev("band_move", steps=len(path), step_mm=step * 1000,
                     outcome=("ok" if attempt == 0 else "relocalized"), tries=attempt,
                     lost_alpha=lost_alpha, found_alpha=found_alpha, **evb)
-                return
+                return standoff_to
             if attempt == self.BAND_RELOC_TRIES:
                 break
             # 되돌아가기: 잃은 자리(또는 끝)에서 q_from 쪽으로, 되찾을 때까지.
@@ -1135,7 +1262,8 @@ class ArtecStreamingScanSession:
                 ce = tracking.consecutive_reg_err
             print(f"  [밴드이동] ⚠ 정합 없음 (연속 reg<0 {ce}) — 되돌아가 되찾기 "
                   f"{attempt+1}/{self.BAND_RELOC_TRIES}")
-            back = [path[j] for j in range(k_lost - 1, -1, -1)] + [(np.asarray(q_from, float), 0.0)]
+            # α=0 은 **출발 자리**(추종 후 실제 자세)다 — 계획 자세가 아니다.
+            back = [path[j] for j in range(k_lost - 1, -1, -1)] + [(q_start, 0.0)]
             k = self._walk_path(session, tracking, back, "후진", mode="back",
                                 wait_s=self.BAND_RELOC_WAIT_S)
             if k < 0:
@@ -1144,7 +1272,8 @@ class ArtecStreamingScanSession:
             a_found = back[k][1]
             found_alpha = float(a_found)
             step *= 0.5
-            path = self.band_path_fn(q_from, q_to, step, alpha_from=a_found, seed=back[k][0])
+            path = self.band_path_fn(q_from, q_to, step, alpha_from=a_found, seed=back[k][0],
+                                     standoff_from=standoff_from, standoff_to=standoff_to)
             if not path:
                 break
             print(f"  [밴드이동] α={a_found:.2f} 에서 되찾음 — 스텝 {step*1000:.1f}mm 로 재전진 "
@@ -1152,9 +1281,11 @@ class ArtecStreamingScanSession:
         print("  [밴드이동] ✘ 되찾기 실패 — 목표 자세로 가서 진행 (이 밴드는 lost 로 처리될 수 있다)")
         _ev("band_move", steps=len(path), step_mm=step * 1000, outcome="failed",
             tries=self.BAND_RELOC_TRIES, lost_alpha=lost_alpha, found_alpha=found_alpha, **evb)
-        self.move_robot_fn(q_to)
+        self.move_robot_fn(q_to_eff)
+        return standoff_to
 
-    def _track_standoff(self, session, band_q, band_i: int, n_bands: int):
+    def _track_standoff(self, session, tracking, band_q, band_i: int, n_bands: int,
+                        d0_override: float = None):
         """밴드 시작에서 축거리를 작동거리 창 중앙으로 보정하고, **트래커를 돌려준다**.
 
         반환 = (tracker, 현재 축거리 m, retarget(d)->bool) 또는 None.
@@ -1165,14 +1296,24 @@ class ArtecStreamingScanSession:
           sim 에만 배선돼 있었다. 이제 회전 루프가 반환된 트래커로 `TRACK_EVERY`
           OK 프레임마다 `update()` 를 부른다(아래 밴드 루프 "거리추종 live").
         """
+        # ★ 빠질 때는 **이유를 찍는다**. 조용히 None 을 돌려주던 탓에 단일 자세 계획이
+        #   밴드 경로를 안 타 거리추종이 통째로 빠진 것을 로그로 알 수 없었다(run_154059).
         if (self.retarget_fn is None or self.standoff_of is None
                 or self.move_robot_fn is None or band_q is None):
+            print(f"  [거리추종] band {band_i+1}/{n_bands} — 밴드 맥락 없음(콜백/자세 None) → off")
             return None
         from utils.nbv.standoff import (StandoffTracker, core_mask_camera_frame,
                                         TRACK_FRESH_SETTLE_S)
         d0 = self.standoff_of(band_q)
         if d0 is None:
+            print(f"  [거리추종] band {band_i+1}/{n_bands} — 계획 축거리 없음(_band_pairs 불일치) → off")
             return None
+        if d0_override is not None:
+            # 전환이 직전 밴드의 보정을 반영해 도달한 실제 축거리 — 트래커의 d 는 이것이어야
+            # `d_next = d + (c − p)` 가 맞는다.
+            print(f"  [거리추종] band {band_i+1}/{n_bands} 시작 축거리 {d0_override*1000:.0f}mm "
+                  f"(계획 {d0*1000:.0f}, 직전 밴드 보정 반영)")
+            d0 = float(d0_override)
         dof = self.scan_range or (0.20, 0.30)
         # ★ 표면거리는 **밴드 핵심 높이대**(광축 세로 ±9.5°)의 점으로 잰다.
         #   프레임 전체 중앙값은 내려다보는 자세에서 가까운 윗부분에 끌려 카메라를
@@ -1183,12 +1324,62 @@ class ArtecStreamingScanSession:
                               log=lambda m: print(f" {m}"),
                               core=core_mask_camera_frame)
         if not trk.enabled:
+            print(f"  [거리추종] band {band_i+1}/{n_bands} — MMS_STANDOFF_TRACK={trk.mode} → off")
             return None
         if self._latest_frame_ranges_m(session) is None:
             print(f"  [거리추종] band {band_i+1}/{n_bands} — OK 프레임이 없어 건너뜀")
             return None
 
+        # ★ 추적이 끊긴 상태의 프레임은 믿지 않는다. 2026-09-22 run_132655: 밴드 3 도착
+        #   후 lost 상태에서 표면 221→219→219mm 로 읽혀(카메라는 25mm 씩 세 번 물러났는데
+        #   측정이 안 따라옴) 축거리를 312→387mm 로 밀어냈다 — 사용자가 "스캐너가 너무
+        #   멀다" 로 본 그 장면. 이동량과 측정 변화가 안 맞으면 이 밴드의 거리추종을 끈다.
+        state = {"d": None, "p": None, "dead": False, "warned": False, "k": 0}
+
+        def _measure():
+            if state["dead"]:
+                return None, cam0
+            if not self._track_usable(tracking):          # 일시 veto — 회복되면 재개
+                if not state["warned"]:
+                    print("  [거리추종] 추적 끊김 중 — 이 측정은 건너뜀 (회복되면 재개)")
+                    state["warned"] = True
+                return None, cam0
+            r = self._latest_frame_ranges_m(session, fresh_settle_s=TRACK_FRESH_SETTLE_S)
+            if r is None:
+                return None, cam0
+            from utils.nbv.standoff import core_mask_camera_frame as _core, TRACK_MIN_PTS
+            state["k"] += 1
+            if len(r) < TRACK_MIN_PTS:
+                # 희소 프레임(4~34점)으로 25mm 를 움직이고 그걸로 "측정이 안 따라옴" 까지
+                # 판정했다(run_161342). 믿지 않고, 일관성 검사에도 넣지 않는다.
+                print(f"  [거리추종] 측정 불충분(n={len(r)} < {TRACK_MIN_PTS}) — 이 측정 건너뜀")
+                self._dbg_range_image(f"s{self._dbg_seq:02d}_band{band_i+1}_start{state['k']:02d}",
+                                      r, state["dcur"], None, f"sparse n={len(r)} -> skipped")
+                return None, cam0
+            m = _core(r)                         # r 는 (N,3) 정점(m, 스캐너 프레임)
+            p = float(np.median(np.linalg.norm(r[m] if m.sum() >= 30 else r, axis=1)))
+            _note = ""
+            if state["d"] is not None:
+                _note = (f"moved {(state['dcur'] - state['d'])*1000:+.0f}mm  "
+                         f"measured {(p - state['p'])*1000:+.0f}mm (prev p={state['p']*1000:.0f})")
+            self._dbg_range_image(f"s{self._dbg_seq:02d}_band{band_i+1}_start{state['k']:02d}", r,
+                                  state["dcur"], p, _note)
+            if state["d"] is not None and abs(state["dcur"] - state["d"]) >= 0.015:
+                dd = state["dcur"] - state["d"]; dp = p - state["p"]
+                if abs(dp - dd) > 0.6 * abs(dd):
+                    print(f"  [거리추종] ✘ 이동 {dd*1000:+.0f}mm 에 측정이 {dp*1000:+.0f}mm 만 변함 — "
+                          f"프레임을 믿을 수 없어 이 밴드의 거리추종 중단")
+                    _ev("standoff_skip", stage=self.s.stage_label, band=band_i + 1,
+                        reason="measurement does not follow motion",
+                        moved_mm=dd * 1000, measured_mm=dp * 1000)
+                    state["dead"] = True
+                    return None, cam0
+            state["d"], state["p"] = state["dcur"], p
+            return r, cam0
+
         def _retarget(d_new) -> bool:
+            if state["dead"] or not self._track_usable(tracking):
+                return False
             qn = self.retarget_fn(band_q, float(d_new))
             if qn is None:
                 return False
@@ -1201,16 +1392,16 @@ class ArtecStreamingScanSession:
             if isinstance(code, (int, np.integer)) and int(code) != 0:
                 print(f"  [거리추종] 이동 거부(code={int(code)}) — 유지")
                 return False
+            state["dcur"] = float(d_new)
             return True
 
         cam0 = np.zeros(3)                       # 스캐너 프레임 원점 = 카메라
         # 회전 전(정지)이라 제한을 유지한 채 여러 번 수렴시킨다 — sim 과 동일.
         # ★ 매 측정은 **이동 뒤 새 프레임**이어야 한다(`fresh_settle_s`) — 큐에 남은
         #   이동 전 프레임을 읽으면 같은 값으로 세 번 연속 밀어낸다(run_150720).
-        d1 = trk.converge(float(d0),
-                          lambda: (self._latest_frame_ranges_m(
-                              session, fresh_settle_s=TRACK_FRESH_SETTLE_S), cam0),
-                          _retarget)
+        state["dcur"] = float(d0)
+        trk.dead_state = state                   # live 루프: 중단이면 판정 생략
+        d1 = trk.converge(float(d0), _measure, _retarget)
         if d1 != d0 and self.s.band_settle_s > 0:
             # 움직였으면 SLAM 이 새 시점에서 다시 정착할 시간을 준다 — 밴드
             # 경계 이동에 settle 을 두는 것과 같은 이유다.

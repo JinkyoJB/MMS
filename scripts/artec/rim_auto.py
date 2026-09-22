@@ -149,8 +149,11 @@ def _sweep_azimuths(client, robot, T_EC, args):
         robot.enable_motion()
         bad = False
         for w in way:
+            # ★ xArm SDK: is_radian=True 이면 speed/mvacc 도 rad/s·rad/s² 로 해석한다 — deg 값을 그대로 넘기면 π rad/s(180°/s)로 클램프돼 설정과 무관하게 최고속이 된다(2026-09-22 발견).
             if robot.arm.set_servo_angle(angle=np.asarray(w).tolist(),
-                                         speed=args.speed, is_radian=True, wait=True):
+                                         speed=float(np.radians(args.speed)),
+                                         mvacc=float(np.radians(args.speed * 4.0)),
+                                         is_radian=True, wait=True):
                 bad = True
                 break
         if bad:

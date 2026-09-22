@@ -457,14 +457,20 @@ class ArtecMMS:
             print("   → skip (이전 모델 유지)")
             return current_model
 
-    def _save_intermediate(self, tag: str, model, s) -> None:
-        """중간 sproj 저장(디버깅용). 실패는 무시."""
+    def _save_intermediate(self, tag: str, model, s, force: bool = False) -> None:
+        """중간 sproj 저장. `force` 가 아니면 `export_sproj_intermediate` 가 켜져야 한다.
+        실패는 무시."""
         if not s.export_sproj_path:
             return
+        if not force and not getattr(s, "export_sproj_intermediate", False):
+            return
         try:
+            # ★ Artec 프로젝트는 <sproj 폴더>/scans/{uuid}.* 에 페이로드를 쓴다 — 프로젝트마다
+            #   **자기 폴더**가 있어야 raw/최종본이 한 scans/ 에 섞이지 않는다(2026-09-22 발견).
             p = Path(s.export_sproj_path)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            mid = str(p.with_stem(p.stem + f"_{tag}"))
+            d = p.parent / f"{p.stem}_{tag}"
+            d.mkdir(parents=True, exist_ok=True)
+            mid = str(d / f"{p.stem}_{tag}.sproj")
             Path(mid).unlink(missing_ok=True)
             self.sensor.save_project(model, mid)
             print(f"   mid-save → {mid}")
@@ -489,10 +495,13 @@ class ArtecMMS:
         # 능력 확인으로 건너뛴다(설정이 real 것을 쓰고 있어도 조용히 통과).
         if s.export_sproj_path and hasattr(self.sensor, "save_project"):
             try:
-                Path(s.export_sproj_path).parent.mkdir(parents=True, exist_ok=True)
-                Path(s.export_sproj_path).unlink(missing_ok=True)
-                self.sensor.save_project(model, s.export_sproj_path)
-                print(f"[artec_process] {pre}saved sproj → {s.export_sproj_path}")
+                p = Path(s.export_sproj_path)
+                d = p.parent / p.stem                 # 프로젝트 전용 폴더 (scans/ 가 그 안에)
+                d.mkdir(parents=True, exist_ok=True)
+                final = d / p.name
+                final.unlink(missing_ok=True)
+                self.sensor.save_project(model, str(final))
+                print(f"[artec_process] {pre}saved sproj → {final}")
             except Exception as e:                   # noqa: BLE001
                 print(f"[artec_process] {pre}sproj 저장 실패({type(e).__name__}): {e}")
 
@@ -545,6 +554,12 @@ class ArtecMMS:
             return ArtecProcessResult(model=model, ctx=ctx)
 
         # ── 1-2. Registration ───────────────────────────────────────────
+        # ★ **raw 보존** — SerialReg/GlobalReg 가 IScan 프레임 변환을 건드리기 **전**에
+        #   저장한다. 이 파일이 정합 알고리즘을 오프라인에서 바꿔 볼 유일한 원본이다
+        #   (프레임 정점·사진·uv·pass 병합 시 적용된 T_pre 가 그대로 들어 있다).
+        #   2026-09-21 까지는 첫 저장이 post_reg 라 원본이 없었다.
+        self._save_intermediate("raw", model, s, force=True)
+
         if s.do_serial_registration:
             model = self._stage("SerialRegistration", self.sensor.serial_registration, model)
         if do_global_reg:
@@ -620,6 +635,9 @@ class ArtecProcessSettings:
 
     export_obj_path:   Optional[str] = None
     export_sproj_path: Optional[str] = None
+    #: 후처리 단계 사이(post_reg·pre_fusion) 중간 sproj 도 남길지. 기본 끔 — 저장마다
+    #  ~47s. **raw**(스캔 직후, 정합 전) 와 최종본은 export_sproj_path 만 있으면 항상 남긴다.
+    export_sproj_intermediate: bool = False
 
     def __post_init__(self):
         # ⚠ 아래 scan-settings 클래스들은 Artec SDK(artec_base)에 의존 → isaac 에선 import 실패.

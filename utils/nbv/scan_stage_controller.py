@@ -379,8 +379,15 @@ def run_scan_stages(backend: ScanBackend) -> Any:
     #   밴드마다 capture_rotation 을 부르면 밴드 = 별도 IScan 이 되어 SLAM 이 끊기고
     #   밴드끼리 후처리 정합에 의존하게 된다(2026-09-16 실물에서 어긋남).
     #   제공하지 않는 backend(sim)는 아래 기존 루프를 그대로 탄다.
-    if len(poses1) > 1 and hasattr(backend, "capture_bands"):
-        print(f"[stage]   → 밴드 {len(poses1)}개를 한 scan 으로 연속 캡처")
+    # ★ 자세가 **1개여도** 밴드 경로를 탄다 (2026-09-22). `len > 1` 게이트 때문에 단일
+    #   자세 계획은 `capture_rotation` 으로 갔고, 그쪽은 밴드 맥락(`band_poses`)이 없어
+    #   거리추종·되돌아가기·새 IScan 이어붙이기가 **조용히 전부 빠졌다**
+    #   (run_154059: 단일 밴드, `[거리추종]` 로그 0줄 — 축거리 313mm 고정).
+    #   AT_CURRENT(플래너 실패, home 고정)만 예전 경로다.
+    if (poses1 and poses1[0] is not AT_CURRENT
+            and hasattr(backend, "capture_bands")):
+        print(f"[stage]   → 밴드 {len(poses1)}개를 한 scan 으로 연속 캡처"
+              + ("  (단일 자세 — 거리추종·재시도는 밴드 경로와 동일)" if len(poses1) == 1 else ""))
         _t = _time.perf_counter()
         ok = backend.capture_bands(poses1, stage="lookaround")
         _mark("lookaround", f"bands×{len(poses1)}", _time.perf_counter() - _t)

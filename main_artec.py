@@ -190,6 +190,15 @@ if _SCAN_SETTINGS_AVAILABLE:
         rotation_overshoot_deg=5.0,
         target_fps=None,                  # None = scanner.max_fps()
         capture_texture=True,
+        # ★ True 여야 한다 (2026-09-22 실측, run_154059). False 로 바꿔 봤더니 SDK 가
+        #   회전 중인 턴테이블 장면에서 8프레임(≈1s, θ≈−10°) 만에 REGISTRATION_FAILED 를
+        #   연속으로 내고 registration_error 도 0.000 만 찍혀 밴드 1 시작 직후 lost
+        #   (4회 반복, 0/4 밴드). True 인 예전 run 들은 같은 자세·속도에서 fail=0,
+        #   regErr≈+0.25 로 밴드 1 을 끝까지 돌았다. 즉 SDK 의 실시간 프레임 정합은
+        #   True 모드(실패 프레임도 예측 자세로 넣고 다음 프레임은 그것에 대고 정합)
+        #   를 전제로 굴러가고, False 는 마지막 *정합된* 프레임까지의 간격이 벌어져
+        #   연쇄 실패한다. lost 판정은 우리 tracker 의 "regErr<0 연속 5" 로 한다.
+        #   대가: lost 뒤 꼬리 프레임이 스캔에 섞인다 → 세션 결과의 n_tail_lost 로 잘라낸다.
         ignore_registration_errors=True,
         preview_settle_s=1.5,
         post_record_settle_s=0.5,
@@ -231,11 +240,15 @@ if _SCAN_SETTINGS_AVAILABLE:
         do_outliers_removal=True,
         do_small_objects_filter=True,
         do_simplify=False,
-        do_texturize=True,
+        # ★ SDK Texturize 는 **CPU 단일코어**라 1900 프레임에 15~20분(2026-09-22 실측, GPU
+        #   옵션 없음). 기본 끔 — 최종 sproj(융합 메시 + 텍스처 프레임)를 Artec Studio 에서
+        #   열어 Texture(GPU) 하는 것이 수십 초. SDK 로 하려면 `--texturize`.
+        do_texturize=False,
         export_obj_path=str(PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}.obj"),
-        # ★ sproj 저장은 **기본 끔**. 실측 458초 실행에서 sproj 저장에만 47초가
-        #   들었다(중간 저장 포함하면 더). 필요할 때 `--sproj` 로 켠다.
-        export_sproj_path=None,
+        # ★ sproj 저장 **기본 켬**(2026-09-22). raw(정합 전) + 최종본, 각 ~47s.
+        #   데이터 수집은 되므로 이제 정합을 오프라인에서 개선할 원본이 필요하다.
+        #   빠른 반복 테스트면 `--no-sproj`.
+        export_sproj_path=str(PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}.sproj"),
     )
 elif CFG.backend == "isaac":
     # isaac: Artec SDK scan-settings 없이 sim 스캔(IsaacScanSession) 실행.
@@ -435,8 +448,11 @@ def _apply_cli() -> None:
     ap.add_argument("--speed-scale", type=float, default=None, metavar="K",
                     help="로봇 이동 속도를 K 배로 (예: 0.8). 세 곳에 흩어진 "
                          "속도(계획용·NBV·복구)를 한 번에 조절한다")
-    ap.add_argument("--sproj", action="store_true",
-                    help="Artec .sproj 도 저장한다 (기본 끔 — 실측 47초 소요)")
+    ap.add_argument("--no-sproj", action="store_true",
+                    help="Artec .sproj 저장 생략 (기본은 raw+최종 저장, 각 ~47초)")
+    ap.add_argument("--texturize", action="store_true",
+                    help="SDK Texturize 실행 (기본 끔 — CPU 단일코어 15~20분. 대신 최종 "
+                         "sproj 를 Artec Studio 에서 텍스처링, docs/6_postprocess.md §5)")
     ap.add_argument("--test", action="store_true",
                     help="반복 테스트용 — **texturize 생략**. 실측 181초가 빠진다. "
                          "메시 형상만 확인할 때")
@@ -445,10 +461,12 @@ def _apply_cli() -> None:
     # ── 후처리 스위치 (PROCESS_SETTINGS) — MULTIPASS 유무와 무관 ──────
     ps = globals().get("PROCESS_SETTINGS")
     if ps is not None:
-        if a.sproj:
-            ps.export_sproj_path = str(
-                PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}.sproj")
-            print(f"[main] sproj 저장 ON → {ps.export_sproj_path}")
+        if a.no_sproj:
+            ps.export_sproj_path = None
+            print("[main] --no-sproj: sproj 저장 생략")
+        if a.texturize:
+            ps.do_texturize = True
+            print("[main] --texturize: SDK Texturize ON (CPU, 15~20분)")
         if a.test:
             ps.do_texturize = False
             print("[main] --test: texturize 생략 (형상만 확인)")

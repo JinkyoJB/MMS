@@ -165,10 +165,14 @@ def register_models(sub_model, master_model, *, stride: int = 4,
     """
     t0 = time.perf_counter()
 
-    def _db(model):
+    def _db(model, max_frames: int = 80):
+        # 프레임 수에 맞춰 stride 를 키운다 — master 가 14 scan·1900 프레임이면 stride 4 로도
+        # SIFT 480회 = 54s 였다(2026-09-22 run_132655). 모델당 ≤ max_frames 만 본다.
+        n_total = sum(model.get_scan(i).frame_count() for i in range(model.scan_count()))
+        st = max(int(stride), int(np.ceil(n_total / max(1, max_frames))))
         ds, ps = [], []
         for i in range(model.scan_count()):
-            d, p = build_feature_db(model.get_scan(i), stride)
+            d, p = build_feature_db(model.get_scan(i), st)
             if len(d):
                 ds.append(d); ps.append(p)
         if not ds:

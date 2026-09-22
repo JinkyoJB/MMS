@@ -14,11 +14,13 @@
 > 앞 단계 `2_preview.md`(형상 탐색) · 부족면 보강 `4_nbv.md`
 >
 > **§0(결정 요약)·§1(실행)이면 쓰기에 충분하다.** §2 이후는 왜 그렇게 도는지다.
-> 문제가 생기면 맨 뒤 부록(T1~T9)을 본다.
+> 문제가 생기면 맨 뒤 부록(T1~T11)을 본다.
 >
-> **검증 상태** — sim 에서 testset 9종 계획·스캔 확인. 자세 선정·밴드 산정은 실제 점군으로
-> 재서 맞췄다. **실물 미검증**(T7) — 특히 SLAM 이 밴드 이음매에서 실제로 이어지는지는
-> 실물에서만 확인된다.
+> **검증 상태 (2026-09-22)** — sim 에서 testset 9종 계획·스캔 확인. 실물(머스타드)은
+> 2026-09-21~22 에 run 8회: **밴드 1 은 한 바퀴 붙는다**(fail=0, regErr≈+0.25). **밴드
+> 이음매(로봇 이동)에서는 아직 잃는다**(§7) — 되돌아가기와 새 IScan 이어붙이기가 그 대응이고,
+> 다음 run 의 `band_move`/`band_continue` 이벤트로 확인한다. `ignore_registration_errors`
+> 는 **True 여야 한다**(§7, T10) — False 로 바꾸면 밴드 1 시작 1초 만에 잃는다.
 
 ---
 
@@ -54,7 +56,7 @@ min_fill = min over θ ( 그 순간 보이는 면적 )      ← 평균이 아니
 | **캡처 순서** | **z 단조** 한 방향. 방향만 안전한 끝(min_fill 큰 쪽)에서 시작 | — | `_band_capture_order` |
 | **이 자세를 실행할까** | `min_fill` 이 배제선 아래면 볼 면이 없어 tracking lost 가 난다 | ≤ 1cm² 제외 · < 6cm² 경고만 | `FILL_HARD_MIN_CM2` / `FILL_MIN_CM2` |
 | **방위각(az)** | **최적화하지 않는다.** az 는 관측을 안 바꾸므로(회전은 턴테이블 몫) 후보를 순서대로 훑어 **IK + 충돌을 처음 통과하는 것**을 쓴다 | 후보 `0°, +30°, −30°` | `solve_plan_poses` |
-| **캡처 중 거리 보정** | 표면거리 중앙값이 창 중앙에서 불감대 밖이면 **축거리만** 옮긴다. el·az·tz 는 안 건드린다 | 불감대 창폭/6, 1회 ≤ 25mm, 밴드 시작 1회 | `standoff.StandoffTracker` |
+| **캡처 중 거리 보정** | 밴드 핵심 높이대의 표면거리 중앙값이 창 중앙에서 불감대 밖이면 **축거리만** 옮긴다. el·az·tz 는 안 건드린다. lost 판정 전까지만 프레임을 믿고, 이동에 측정이 안 따라오면 그 밴드의 추종은 끊는다(§2) | 불감대 창폭/6 · 1회 ≤ 25mm · 밴드 시작 ≤3회 + 회전 중 OK 프레임 8개마다 | `standoff.StandoffTracker` / `_track_standoff` |
 
 ### 두 가지만 기억하면 된다
 
@@ -83,6 +85,25 @@ env -u PYTHONPATH MMS_BACKEND=real \
 ```
 
 `--until` 은 `preview | lookaround | nbv | flip` 이고 **앞 단계는 항상 포함**이다.
+
+| 플래그 | 뜻 |
+|---|---|
+| `--no-recovery` | lost 자동복구를 끈다 — 원래 스캔이 붙는지만 볼 때 |
+| `--no-planner` | 자세 플래너를 끈다(preview·계획 생략, home 고정). 캡처 루프만 떼어 볼 때 |
+| `--no-prompt` / `--no-viewer` | pass 사이 Enter 생략 / 라이브 뷰어 스냅샷 끔 |
+| `--max-passes 1` | 한 자세만 돌고 끝 |
+| `--speed-scale K` | 로봇 속도 배율(계획용·nbv·복구 세 곳 한 번에) |
+| `--no-sproj` / `--texturize` | raw·최종 sproj 저장 끔(각 ~47s) / SDK 텍스처링(CPU 15~20분, 기본 끔 → Studio, `6_postprocess.md` §5) |
+
+**run 뒤에 볼 것** — 콘솔 로그(`output/run_<RUN_TS>.log`) 말고도 세 가지가 남는다:
+
+```bash
+python scripts/artec/lost_report.py          # output/events_<RUN_TS>.jsonl 집계 — 언제 잃었고 뭘 했나 (§7)
+output/scan_dumps/<RUN_TS>/scanNN_<stage>_poseK.npz   # IScan 별 원본 점군 (오프라인 정합, 6_postprocess.md)
+output/artec_lookaround_<RUN_TS>_raw/*.sproj          # 정합 전 raw — Artec Studio 로 열어 IScan 별로 본다
+output/debug/lookaround_<RUN_TS>/band{b}_start{k}.png  # 거리추종 판정마다: 3D 점을 각도좌표로 펼친 거리 이미지(+텍스처)
+output/debug/lookaround_<RUN_TS>/band{b}_live_f{n}.png # 회전 중 live 판정마다 — '정말 멀어졌나' 를 눈으로 본다 (§2)
+```
 
 
 ### 손잡이
@@ -162,18 +183,48 @@ env -u PYTHONPATH MMS_BACKEND=real \
 두면 표면거리가 작동거리 창을 벗어난 채 한 바퀴를 다 돈다 — 실물에서 "가끔 물체와
 거리가 멀다" 로 보이던 증상이다.
 
-그래서 **밴드 시작(턴테이블 정지 중)에 표면거리를 재서 축거리만 고친다.**
+그래서 **표면거리를 재서 축거리만 고친다** — 밴드 시작(턴테이블 정지 중)에 최대 3회
+나눠 수렴시키고(`StandoffTracker.converge`), 회전 중에도 **OK 프레임 8개마다** 한 번씩
+본다(`MMS_STANDOFF_TRACK=live` 기본, real 은 `_track_standoff`, sim 은 `_scan_pass`).
 
 ```
 표면거리 중앙값 p  →  국소 반경 r ≈ d − p  →  d_next = 창중앙 c + r = d + (c − p)
 ```
 
-`el`·`az`·`tz` 는 건드리지 않는다 — el 을 바꾸면 그 밴드가 덮는 z 대역이 바뀌어 계획
-전체가 흔들리지만, 축거리는 카메라를 시선 방향으로 밀고 당길 뿐이다. 1회 이동은
-25mm 로 제한하고 정지 중에는 최대 3회 나눠 수렴시킨다(급하게 뛰면 프레임 중첩이
-깨진다). 판단은 `utils/nbv/standoff.py::StandoffTracker` 한 곳, sim·real 공용.
+측정은 **밴드 핵심 높이대**(조준 ±40mm / 광축 세로 ±9.5°)의 점만 쓴다 — 전체 중앙값은
+윗부분에 끌려 물러난다. `el`·`az`·`tz` 는 건드리지 않는다 — el 을 바꾸면 그 밴드가 덮는
+z 대역이 바뀌어 계획 전체가 흔들리지만, 축거리는 카메라를 시선 방향으로 밀고 당길
+뿐이다. 1회 이동은 25mm 로 제한한다(급하게 뛰면 프레임 중첩이 깨진다). 판단은
+`utils/nbv/standoff.py::StandoffTracker` 한 곳, sim·real 공용.
 
-실측(sim, 오차 +70mm 주입): 5밴드 전부 250mm 부근(251~260mm)으로 수렴.
+실물에서 두 번 데었고(2026-09-21~22) 그래서 가드가 셋이다:
+
+- **프레임을 믿는 조건은 "아직 lost 가 아니다"** (`_track_usable`: `tracking_lost` 아님 ·
+  연속 reg<0 가 임계 5 미만). "마지막 프레임까지 정합됨"(`_reg_ok`)을 조건으로 걸었더니
+  SDK 워밍업(초기 reg=−1/0) 때문에 **스캔 시작부터 꺼져** 밴드 내내 축거리가 고정됐다
+  (run_152915: "추적 끊김 상태" 30회, d=316mm 유지 — "거리 고정" 증상). 지금은 일시
+  veto 이고 회복되면 재개한다. 표면거리는 카메라-로컬 정점이라 정합과 무관하다.
+- **이동-측정 일관성.** 카메라를 15mm 이상 옮겼는데 측정이 그 60% 도 안 따라오면 그
+  밴드의 추종을 끊는다(`standoff_skip` 이벤트). lost 상태의 stale 프레임이 221→219→219mm
+  로 읽혀 축거리를 312→387mm 로 밀어낸 사고(run_150720, "스캐너가 너무 멀다")의 대응이다.
+- **측정이 없으면 움직이지 않는다.** 예전 `converge` 는 "반환 없음 → 가까이 한 스텝"
+  이라 빈 측정에도 헛이동과 `재겨냥 실패` 로그를 냈다.
+- **희소 프레임은 측정이 아니다** (`TRACK_MIN_PTS` 300, `MMS_STANDOFF_MIN_PTS`). run_161342
+  의 디버그 이미지: 밴드 시작·live 판정이 **4·17·28·34 점**짜리 프레임의 중앙값으로 25mm 씩
+  움직였고(물러남 → 더 희소 → 또 물러남, 밴드 2 가 축거리 380mm 까지), "이동에 측정이 안
+  따라옴" 판정도 4점 프레임이 내렸다. 정상 프레임은 수천 점이다.
+- **스캐너 프레임 광축은 −z 다.** 핵심 높이대 마스크가 `max(z, 0)` 을 써서 실물에서는
+  **항상 비었고**(이미지 `core=0`), 거리추종은 설계와 달리 프레임 전체 중앙값으로 돌고
+  있었다. 2026-09-22 dump 로 확인(정점 z<0 100%)하고 |z| 로 고쳤다.
+
+실측(sim, 오차 +70mm 주입): 5밴드 전부 250mm 부근(251~260mm)으로 수렴. 실물 확인 항목:
+밴드 1 시작에 `[거리추종] f0 표면 …mm → …` 가 "끊김" 없이 실제로 보정하는지.
+
+> ⚠ **단일 자세 계획도 밴드 경로를 탄다** (2026-09-22). 컨트롤러가 `len(poses) > 1` 일
+> 때만 `capture_bands` 를 불러서, 자세가 1개면 `capture_rotation` 으로 갔고 그쪽엔 밴드
+> 맥락이 없어 거리추종·되돌아가기·새 IScan 이어붙이기가 **조용히 빠졌다**(run_154059:
+> `[거리추종]` 로그 0줄, 축거리 313mm 고정). 지금은 플래너가 실패한 `AT_CURRENT` 만
+> 예전 경로다. `[stage] → 밴드 1개를 한 scan 으로 …` 가 찍혀야 정상.
 
 ### 대상물은 계획 전에 장애물로 등록된다
 
@@ -219,7 +270,8 @@ Artec Spider 는 프레임 좌표를 **직전 프레임에 정합해서** 얻는
 
 그래서 성패를 가르는 것은 hand-eye 나 θ 의 정확도가 아니라 **프레임 간 겹침**이다.
 각도를 띄엄띄엄 옮기면 겹침이 끊기므로 턴테이블을 **천천히 연속 회전시키면서 최대 FPS
-로** 찍는다. 회전을 멈추고 자세를 옮기는 방식은 쓰지 않는다.
+로** 찍는다. 회전을 멈추고 자세를 옮기는 방식은 **이 단계에서는** 쓰지 않는다(nbv 의
+정지-촬영은 IScan 을 따로 만들므로 다르다 — `4_nbv.md`).
 
 이 성질에서 나머지가 따라온다. 방위각은 턴테이블이 다 커버하므로 로봇이 고를 자유도는
 **고도각 φ 하나**(§4)고, 한 자세로 높이를 못 덮으면 z 방향 밴드로 나눈다(§5). 그리고
@@ -406,8 +458,12 @@ z-span 미달의 원인이 높이가 아니라 **윗면**일 수 있는데(납�
 매 tick 마다 `poll_events()` 를 부르는데 **이걸 거르면 SDK 가 얼어붙는다.**
 
 결과 `ArtecStreamingScanResult` 는 `model`, `n_frames`, `rotation_actual_deg`,
-`fps_actual`, `tracking_lost`, `loss_reason`, 그리고 복구가 되돌아갈 기준인
-**`last_good_theta_rad`**(= `reg_err ≥ 0` 인 마지막 θ)를 담는다.
+`fps_actual`, `tracking_lost`, `loss_reason`, 복구 기준 **`last_good_theta_rad`**(= `reg_err
+≥ 0` 인 마지막 θ), 밴드 진행 **`n_bands` / `n_bands_done` / `band_reasons`**, 그리고 lost
+로 끝났을 때 잘라낼 꼬리 **`n_tail_lost`** 를 담는다. 오케스트레이터
+(`ArtecMultiPassScanSession`)는 IScan 마다 원본 점군을
+`output/scan_dumps/<RUN_TS>/scanNN_<stage>_poseK.npz` 로 떨구고(오프라인 정합용), 판단
+지점마다 `output/events_<RUN_TS>.jsonl` 에 이벤트를 남긴다(§7).
 
 ---
 
@@ -422,12 +478,27 @@ z-span 미달의 원인이 높이가 아니라 **윗면**일 수 있는데(납�
 
 `reg_err = -1` 은 SDK sentinel 이라, `reg_err ≥ 0` 을 한 번 본 뒤부터만 (3)(4)를 센다
 (`tracking_established`). 이 플래그를 건드리면 warm-up 이 곧바로 lost 로 잡힌다.
+`ignore_registration_errors=True`(아래) 에서는 FrameState 가 늘 OK 라 **(1)은 사실상 안
+뜨고 실제 lost 는 (3)이 잡는다** — 실물 run 전부 그랬다.
 
-**복구**(`ArtecMultiPassScanSession`)는 같은 자세에서 최대 3회 retry 하고,
-`last_good_theta_rad` 보다 10° 더 뒤로 턴테이블을 되돌린 뒤(safe-back)
-`_adaptive_prescan_position(recovery=True)` 로 자세를 다시 고른다.
+**복구는 두 갈래다.**
 
-이때 쓰는 채점기는 §4 의 maximin 과 **다르다.** 복구는 빨라야 하므로 한 바퀴를 돌리지
+1. **밴드 계획이 있을 때(기본).** probe 기반 recovery 를 **쓰지 않는다**(2026-09-22).
+   계획된 밴드 자세는 preview 로 검증된 자세라, 잃으면 **그 자세로 되돌아가 새 IScan 으로
+   남은 밴드를 이어 찍는다**(`capture_bands` 루프): 완주한 밴드는 남기고 남은 밴드의 첫
+   자세로 로봇을 옮겨 `T_BC` 를 재캡처 → 카메라 이동 보정(기구학)으로 master 프레임에 초기
+   배치 → 인접 밴드 겹침(대개 90%)으로 ICP 다듬기(`[band icp]`, patch 모드 게이트 통과
+   시만 적용, `merge_method=camera+icp`). 같은 자세에서 새 IScan 이 **두 번 연속** 0 밴드면
+   남은 밴드는 nbv 몫(`band_partial`). 예전(2026-09-21~22 run 6회)은 "부분 성공 → 남은
+   밴드 nbv 몫" 이라 윗부분이 통째로 빠졌고 nbv 는 그걸 못 메웠다.
+   0 밴드일 때도 probe recovery 를 생략하는 이유: run_154059 에서 probe 가 물체를
+   h=42mm 로 오판해 빈 시야(preview 429점) 자세로 옮겼고, 이후 재시도 3회가 전부 그
+   자세에서 즉시 lost 였다.
+2. **계획이 없을 때(legacy, `--no-planner`).** 같은 자세에서 최대 3회 retry 하고,
+   `last_good_theta_rad` 보다 10° 더 뒤로 턴테이블을 되돌린 뒤(safe-back)
+   `_adaptive_prescan_position(recovery=True)` 로 자세를 다시 고른다.
+
+legacy 가 쓰는 채점기는 §4 의 maximin 과 **다르다.** 복구는 빨라야 하므로 한 바퀴를 돌리지
 않고 preview 한 장만 본다 — 물체로 분류된 점이 **최적거리 225mm 근처 FOV 안에** 얼마나
 모였는지를 `w(d) = exp(−((d−225)/25)²)` 로 가중해 합산한다. 후보는 `[-5°, 0°, +5°]` 로
 줄여 30초 안에 끝낸다. 구현은 `artec_multipass_scan_session.py::_elevation_search`,
@@ -468,6 +539,37 @@ reg<0 ≥ 3 이면 그 자리에서 멈추고, 되찾을 때까지 **왔던 스�
 (부분 성공 → nbv). 오프라인 IK 검증: band1→2 는 8스텝(≤4.6mm), 뚜껑 자세 전환은
 32스텝(관절 직선보간이면 직선에서 24mm 이탈). 실기 확인 항목: 스텝 로그에서 **어느 α
 에서 끊기는지**가 처음으로 데이터로 남는다.
+
+**전환은 추종 후 실제 자세에서 출발한다 (2026-09-22 run_162620).** 밴드 1 이 거리추종으로
+353→278mm 까지 들어왔는데 전환 경로가 **계획** 자세(353mm)에서 출발하도록 짜여 있어 첫
+스텝이 75mm 점프였고 α=0.14 에서 즉시 잃었다. 되돌아가기도 계획 자세로 가서 못 찾았다
+(전 run 들의 α≈0.67 보다 훨씬 앞). 지금은 출발 축거리 = 직전 밴드 추종값, 목표 축거리 =
+다음 밴드 계획값 + 같은 보정(±120mm 클램프), α=0 = 출발 자리, 시드 = 현재 관절각이다.
+다음 밴드의 트래커는 그 보정된 축거리에서 시작한다(`d0_override`). 전환은 물체 옆을
+**수직으로 타고 오르는** 이동이고 가까워지는 것은 거리추종의 몫이다 — 재전진에서 로봇이
+위로만 가는 것은 정상이다.
+
+**밴드별 실측 반경 → nbv.** 완주한 밴드마다 (축거리 d, 표면거리 p) 를 결과에 남기고
+(`band_standoff_m`), `r_eff = d − p` 의 중앙값을 nbv 축거리(`표면 225 + r`)에 쓴다.
+preview p95 반경은 과대했다(같은 run: 92mm → nbv 축거리 317mm, 프레임당 ~1,000점 "빈
+캡처" 2회. 밴드 추종은 r_eff≈25~30mm).
+
+### SDK 안에서 되찾기 — 되는 것과 안 되는 것 (2026-09-22)
+
+`IScanningProcedure.h`: `ScanningState_ContinueRecord` 는 **"Not supported now."** — SDK 에
+relocalization 상태가 없다. 되찾는 길은 새 프레임이 **마지막으로 정합된 프레임과 겹치는 것**
+뿐이고, 위의 되돌아가기(`_band_transition`)가 그것을 로봇으로 하는 것이다(run_150720: 후진
+중 regErr −1 → 0 회복 관측).
+
+**`ignore_registration_errors` 는 True 여야 한다.** SDK 문서만 보면 False("정합된 프레임만
+스캔에 넣는다")가 맞아 보여 2026-09-22 에 바꿔 봤더니(run_154059) 밴드 1 시작 **8프레임
+(≈1s, θ≈−10°) 만에 REGISTRATION_FAILED 연속**, `registration_error` 는 0.000 만 찍혀 4회
+모두 즉시 lost(0/4 밴드). True 인 run 들은 같은 자세·같은 12°/s 에서 fail=0, regErr≈+0.25
+로 한 바퀴를 돌았다. SDK 의 실시간 프레임 정합은 True 모드(실패 프레임도 예측 자세로 넣고
+다음 프레임은 그것에 정합)를 전제로 굴러가고, False 는 마지막 정합 프레임까지의 간격이
+벌어져 연쇄 실패한다. 따라서 lost 판정은 우리 tracker(§7 표의 3번)가 하고, True 의
+대가(lost 뒤 꼬리의 미정합 프레임이 스캔에 섞임)는 결과의 `n_tail_lost` 로 잘라낸다
+(`_trim_lost_tail`). 플래그의 근거는 `main_artec.py` 의 설정 주석에도 있다.
 
 ---
 
@@ -532,10 +634,14 @@ utils/nbv/standoff.py               ★ 거리 판단 전부
     그 밖(거리격자·탐침·보정식)      # → 2_preview.md
 utils/nbv/scan_stage_controller.py  # preview→lookaround→nbv→flip 순서 (밴드 실패 허용)
     STAGES · runs_stage · resolve_stage_until
+utils/nbv/event_log.py              # output/events_<RUN_TS>.jsonl (§7) — 판단 지점마다 한 줄
+scripts/artec/lost_report.py        # 그 이벤트 집계 (lost · band_move · recovery · merge)
 
 mms_artec/nbv/artec_streaming_scan_session.py   ★ 실물 streaming SLAM
     TrackingState(watchdog 4종) · TurntableController · run()
+    _band_transition(조준 유지 소보간 + 되돌아가기) · _track_standoff(회전 중 거리추종)
 mms_artec/nbv/artec_multipass_scan_session.py   # 오케스트레이션 + 복구 + view-score
+    capture_bands(밴드 이어붙이기) · _do_one_rotation · _dump_scan_raw(scan_dumps)
 mms_artec/nbv/live_scan_viewer.py               # SDK 정합행렬 미러
 mms_artec/nbv/recovery_pose_selector.py         # 복구용 Spider 광학 상수
 mms_artec/backends/isaac/isaac_turntable.py     # sim 턴테이블 (kinematic 직접 회전)
@@ -620,3 +726,18 @@ az 는 도달성·충돌만 좌우하므로 `solve_plan_poses` 가 스윕한다.
 - **자세를 고르는 곳과 검사하는 곳은 같은 게이트를 쓴다.** `find_home_pose.py` 가 충돌
   게이트 없이 home 을 고르는 바람에 손목이 디스크 27mm 위를 스치는 home 이 채택됐고,
   `is_path_safe` 의 start 검사에 걸려 **모든 이동이 거부**됐다(2026-09-17).
+- **`ignore_registration_errors=True`.** False 는 문서상 그럴듯하지만 실물에서 밴드 1 이
+  1초 만에 죽는다(§7, T10). lost 는 tracker 가 판정하고 꼬리는 `n_tail_lost` 로 자른다.
+- **밴드 계획이 있으면 probe recovery 를 돌리지 않는다.** 잃으면 계획 자세로 돌아가 새
+  IScan(§7). 계획 자세는 preview 로 검증된 자세고 probe 는 그렇지 않다.
+
+### T10. 밴드 1 이 시작 1~2초 만에 `REGISTRATION_FAILED` 연속으로 죽는다
+`[b1 1.0s] … ok=7 fail=1 … regErr=+0.000 … last=REGISTRATION_FAILED` 꼴이면
+`ignore_registration_errors` 가 False 다(run_154059, 4회 모두 0/4 밴드). True 로. 정상은
+`fail=0 regErr≈+0.25 last=OK` 가 초당 7프레임씩 이어진다. §7 "SDK 안에서 되찾기".
+
+### T11. lost 뒤 재시도가 매번 빈 시야에서 즉시 죽는다
+재시도 앞에 `[probe] … h=42mm` 처럼 물체 크기가 preview 와 딴판이고 `preview 캡처 … 점 4xx
+(<500)` 이 찍히면 legacy probe recovery 가 엉뚱한 자세로 옮긴 것이다. 밴드 계획이 있으면
+이 경로는 지금 타지 않는다(§7). 타고 있다면 `lookaround_planner_enabled`/`--no-planner`
+를 확인.

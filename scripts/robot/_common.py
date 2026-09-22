@@ -275,8 +275,10 @@ def move_joint_safe(robot, q_target, *, speed_deg_s: float,
     for i, w in enumerate(way, 1):
         if len(way) > 1:
             print(f"  → 경유점 {i}/{len(way)}")
+        # ★ xArm SDK: is_radian=True 이면 speed/mvacc 도 rad/s·rad/s² 로 해석한다 — deg 값을 그대로 넘기면 π rad/s(180°/s)로 클램프돼 설정과 무관하게 최고속이 된다(2026-09-22 발견).
         code = robot.arm.set_servo_angle(
-            angle=w.tolist(), speed=float(speed_deg_s), is_radian=True, wait=True)
+            angle=w.tolist(), speed=float(np.radians(speed_deg_s)),
+            mvacc=float(np.radians(speed_deg_s * 4.0)), is_radian=True, wait=True)
         if code:
             print(f"  ✘ set_servo_angle 실패 (code={code})")
             return False

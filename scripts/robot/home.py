@@ -76,8 +76,10 @@ def main() -> int:
             for i, w in enumerate(way, 1):
                 if n > 1:
                     print(f"  → 경유점 {i}/{n}")
+                # ★ xArm SDK: is_radian=True 이면 speed/mvacc 도 rad/s·rad/s² 로 해석한다 — deg 값을 그대로 넘기면 π rad/s(180°/s)로 클램프돼 설정과 무관하게 최고속이 된다(2026-09-22 발견).
                 code = robot.arm.set_servo_angle(
-                    angle=w.tolist(), speed=float(args.speed),
+                    angle=w.tolist(), speed=float(np.radians(args.speed)),
+                    mvacc=float(np.radians(args.speed * 4.0)),
                     is_radian=True, wait=True)
                 if code:
                     print(f"\n✘ set_servo_angle 실패 (code={code})")

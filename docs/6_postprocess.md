@@ -109,3 +109,36 @@ PointCloud 를 못 그린다. 이 조합이 유일하게 검증된 구성이다.
 `hints_applied` 가 안 켜진 것이다. flip 의 centroid-pivot hint 가 적용되면 이 플래그가
 켜지고 2단계를 건너뛴다. 켜졌는데도 어긋나면 hint 자체를 의심한다
 (`5_flip.md` T1).
+
+---
+
+## 4. run 산출물 — 정합을 오프라인에서 개선하려면 (2026-09-22)
+
+데이터 수집(preview→lookaround→nbv→flip)은 돌아가므로, 정합 알고리즘은 **run 을 다시
+돌리지 않고** 아래 산출물로 고친다. 모두 기본으로 남는다(`--no-sproj` 면 sproj 만 빠짐).
+
+| 파일 | 무엇 | 용도 |
+|---|---|---|
+| `output/artec_lookaround_<RUN>_raw/…_raw.sproj` (+ `scans/`) | **정합 전** IScan 원본(정점·사진·uv). 프레임 변환에 run 의 T_pre 가 박혀 있음. Artec 은 페이로드를 sproj 옆 `scans/` 에 쓰므로 프로젝트마다 폴더 하나 | 정합 재실험의 원본. 텍스처 매칭도 여기서 |
+| `output/artec_lookaround_<RUN>/…​.sproj` · `output/…​.obj` | 후처리 끝난 최종본 | 결과 비교 |
+| `output/scan_dumps/<RUN>/scanNN_<stage>_poseK.npz` | pass 별 점(스캔월드)·적용 `T_pre_mm`·`R_phys`·`master_T_CB`·`T_BC_new`·`S` | 어떤 변환이 적용됐는지 — sproj 의 프레임 변환을 되돌릴 때 |
+| `output/events_<RUN>.jsonl` | lost·밴드 전환·복구·병합(method) 이벤트 | `scripts/artec/lost_report.py` |
+
+재실험: `python scripts/artec/reg_offline.py [--run RUN] [--sub N] [--methods hint,img,greg]`
+— sub 스캔을 run 의 T_pre 로 되돌린 뒤 방법별로 다시 정합하고 `output/reg_offline/<RUN>/`
+에 PLY 와 지표(겹침 NN 거리)를 남긴다. 새 방법은 그 파일의 `METHODS` 에 함수 하나 추가.
+
+## 5. 텍스처는 Artec Studio 에서 (2026-09-22)
+
+SDK Texturize 는 CPU 단일코어다 — `TexturizationSettings` 에 GPU 항목이 없고, 1912 프레임에
+15~20분(실측, GPU 0%). 그래서 **기본 끔**(`do_texturize=False`, 켜려면 `--texturize`).
+
+파이프라인은 융합 메시 + 원본 스캔(텍스처 프레임 포함)을 `output/artec_lookaround_<RUN>/…​.sproj`
+로 남긴다. Studio 에서:
+
+1. File → Open project → 그 `.sproj`.
+2. Workspace 에서 융합 메시(composite)를 선택 → **Texture** 탭 → 소스 스캔 전부 체크 →
+   Texture resolution 2048 → Apply (GPU, 보통 1분 내).
+3. File → Export meshes → OBJ(+ texture) 로 저장.
+
+정합을 다듬는 동안은 텍스처가 필요 없으므로 `--test`(Texturize 생략 + 형상만)로 돌린다.

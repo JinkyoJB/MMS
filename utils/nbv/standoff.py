@@ -139,13 +139,21 @@ def core_mask_camera_frame(pts_cam, half_deg: float = None):
     import numpy as np
     P = np.asarray(pts_cam, float)
     h = math.radians(TRACK_CORE_HALF_DEG if half_deg is None else float(half_deg))
-    return np.abs(np.arctan2(P[:, 1], np.maximum(P[:, 2], 1e-9))) <= h
+    # ★ Artec 스캐너 프레임은 광축이 **−z** 다 (2026-09-22 dump 실측: 정점 z<0 100%,
+    #   중앙값 −317~−365mm). 예전 `np.maximum(z, 1e-9)` 는 그 점을 전부 z≈0 으로 눌러
+    #   세로각 ±90° → 마스크가 **항상 비었고**, 실물 거리추종은 핵심 높이대 없이
+    #   프레임 전체 중앙값으로 돌고 있었다(디버그 이미지 core=0 으로 발견).
+    return np.abs(np.arctan2(P[:, 1], np.maximum(np.abs(P[:, 2]), 1e-9))) <= h
 TRACK_TOL_M: float = float(os.environ.get("MMS_STANDOFF_TOL_MM", "0.0")) / 1000.0
 #: 재겨냥 이동 **뒤** 표면거리를 다시 재기 전에 버리는 시간 (s). 로봇 이동이
 #  블로킹이라 그동안 SDK 큐에 쌓인 프레임은 전부 **이동 전** 것이다 — 그걸 재면
 #  "안 움직였다" 로 읽혀 같은 방향으로 또 민다. 2026-09-21 run_150720: 25mm 씩
 #  세 번 물러났는데 측정은 213→214→218mm, 직후 tracking lost.
 TRACK_FRESH_SETTLE_S: float = float(os.environ.get("MMS_STANDOFF_FRESH_S", "0.4"))
+#: 표면거리 측정을 **믿는** 최소 정점 수. 2026-09-22 run_161342: 밴드 시작·live 판정이
+#  4·17·28·34 점짜리 프레임의 중앙값으로 25mm 씩 움직였고(물러남→희소→또 물러남),
+#  "이동에 측정이 안 따라옴" 판정도 4점 프레임이 내렸다. 정상 프레임은 수천 점이다.
+TRACK_MIN_PTS: int = int(os.environ.get("MMS_STANDOFF_MIN_PTS", "300"))
 
 
 def window_center(dof) -> float:
@@ -339,6 +347,7 @@ class StandoffTracker:
         self.log = log or (lambda _m: None)
         self.n_moves = 0
         self.n_reject = 0
+        self.last_p = None
 
     @property
     def enabled(self) -> bool:
@@ -383,7 +392,14 @@ class StandoffTracker:
         if self.mode == "live" and i > 0 and (pts is None or len(pts) == 0):
             self.log(f"  [거리추종] f{i} 반환 없음 — 회전 중이라 유지 (d={d*1000:.0f}mm)")
             return d
+        if pts is not None and 0 < len(pts) < TRACK_MIN_PTS:
+            self.log(f"  [거리추종] f{i} 측정 불충분(n={len(pts)} < {TRACK_MIN_PTS}) — 유지 "
+                     f"(d={d*1000:.0f}mm)")
+            return d
         pts = self._core_points(pts)
+        _p = surface_distance(pts, cam_pos)
+        if _p is not None:
+            self.last_p = float(_p)          # 마지막 표면거리 — 밴드별 실측 반경(d − p) 용
         d_next, why = distance_correction(d, pts, cam_pos, self.dof,
                                           self.lo, self.hi,
                                           max_step=self.max_step, tol=self.tol)
@@ -415,6 +431,10 @@ class StandoffTracker:
             return d
         for _k in range(max(1, int(max_tries))):
             pts, cam = measure()
+            if pts is None:
+                # 측정을 못 했으면 **추측으로 움직이지 않는다** — 예전엔 update() 의
+                # "반환 없음 → 가까이 한 스텝" 이 여기서도 발동해 헛이동/거부 로그를 냈다.
+                break
             d_new = self.update(i, d, pts, cam, retarget)
             if d_new == d:                      # 유지 판정 또는 재겨냥 실패
                 break
