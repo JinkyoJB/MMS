@@ -6,10 +6,10 @@
 `crop=0` 하나를 두고 IK·충돌·프레임 변환·관절 리밋을 차례로 배제하다가, 결국
 원인은 **카메라가 딴 데를 보고 있었던 것**이었다. 그 한 장을 봤으면 바로 끝났다.
 
-그래서 **스캐너가 그 순간 실제로 본 그림**을 남긴다. 저장 위치는 `output/debug/<단계>/`:
+그래서 **스캐너가 그 순간 실제로 본 그림**을 남긴다. 저장 위치는 `output/<RUN>/debug/cam/<단계>/`:
 
-  output/debug/preview/      거리 탐색이 어디를 봤는가 (이동마다)
-  output/debug/lookaround/   밴드 처음·중간·끝
+  …/debug/cam/preview/      거리 탐색이 어디를 봤는가 (이동마다)
+  …/debug/cam/lookaround/   밴드 처음·중간·끝
 
 단계마다 폴더를 나누는 이유 — preview 는 "왜 이 밴드 계획이 나왔나" 를 되짚을 때
 제일 먼저 보는 그림인데, 밴드 스냅샷과 한 폴더에 섞이면 묻힌다.
@@ -39,18 +39,19 @@ def _enabled() -> bool:
 class DebugViewSaver:
     """스캐너 시점 스냅샷을 순번 붙여 저장한다.
 
-    `output/debug/<단계>/` 아래에 쌓는다(단계 미지정이면 lookaround). 실행마다
+    `output/<RUN>/debug/cam/<단계>/` 아래에 쌓는다(단계 미지정이면 lookaround). 실행마다
     지우지 않는다 — 직전 실행과 비교하는 것이 디버깅의 핵심이라서다. 대신 파일명 앞에 **실행
     타임스탬프**를 붙여 섞이지 않게 한다.
     """
 
     def __init__(self, root: str = None, run_ts: str = None, log=print):
         from utils import PROJECT_ROOT
-        #: 단계별 폴더의 부모. `output/debug/<단계>/` 로 갈라진다.
+        #: 단계별 폴더의 부모. `output/<RUN>/debug/cam/<단계>/` 로 갈라진다.
         #  `MMS_DEBUG_DIR` 로 바꿀 수 있다 — testset 여러 종을 연달아 돌릴 때
         #  물체별로 폴더를 나누지 않으면 한 곳에 섞여 눈으로 못 본다.
-        self._base = str(root or os.environ.get("MMS_DEBUG_DIR")
-                         or (PROJECT_ROOT / "output" / "debug"))
+        # 기본은 run 폴더 — output/<RUN>/debug/cam/<단계>/ (utils/run_paths.py, 2026-09-23)
+        from utils.run_paths import debug_dir
+        self._base = str(root or os.environ.get("MMS_DEBUG_DIR") or debug_dir("cam"))
         self.root = os.path.join(self._base, "lookaround")   # 단계 미지정 기본
         self.run_ts = run_ts or time.strftime("%H%M%S")
         self.log = log
@@ -91,7 +92,7 @@ class DebugViewSaver:
 
         `tag`   파일명에 들어가는 짧은 식별자 (`preview_d300_az0`, `band1_mid` 등)
         `note`  이미지 위에 얹는 한 줄 (점 수·거리 같은 그 순간의 숫자)
-        `stage` 저장 위치 — `output/debug/<stage>/` (미지정이면 lookaround)
+        `stage` 저장 위치 — `…/debug/cam/<stage>/` (미지정이면 lookaround)
         """
         if not self.enabled:
             return None

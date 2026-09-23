@@ -629,8 +629,8 @@ class Algorithms:
         1. serial_registration  (do_serial_registration)
         2. global_registration  (do_global_registration)
         3. outliers_removal     (do_outliers_removal)
-        4. small_objects_filter (do_small_objects_filter)
-        5. fast_fusion / poisson_fusion  (do_fusion)
+        4. fast_fusion / poisson_fusion  (do_fusion)
+        4b. small_objects_filter (do_small_objects_filter) — fusion 뒤(메시 입력)
         6. mesh_simplify        (do_simplify)
         7. texturize            (do_texturize)
 
@@ -670,13 +670,6 @@ class Algorithms:
             result = Algorithms.outliers_removal(result, s)
             print(f"    done ({time.perf_counter()-t0:.2f}s)")
 
-        if pipeline.do_small_objects_filter:
-            s = pipeline.small_objects_filter or SmallObjectsFilterSettingsDTO.default(st)
-            print("  [Algorithms] small_objects_filter ...")
-            t0 = time.perf_counter()
-            result = Algorithms.small_objects_filter(result, s)
-            print(f"    done ({time.perf_counter()-t0:.2f}s)")
-
         if pipeline.do_fusion:
             if pipeline.use_fast_fusion:
                 s = pipeline.fast_fusion or FastFusionSettingsDTO.default(st)
@@ -690,6 +683,15 @@ class Algorithms:
                 t0 = time.perf_counter()
                 result = Algorithms.poisson_fusion(result, s)
                 print(f"    done ({time.perf_counter()-t0:.2f}s)")
+
+        # ★ SmallObjectsFilter 는 **fusion 뒤** — 메시 입력이라 스캔만 있는 모델에 걸면
+        #   executeJob 0x80010201 로 실패한다(2026-09-23 실측). system.py 와 같은 순서.
+        if pipeline.do_small_objects_filter:
+            s = pipeline.small_objects_filter or SmallObjectsFilterSettingsDTO.default(st)
+            print("  [Algorithms] small_objects_filter ...")
+            t0 = time.perf_counter()
+            result = Algorithms.small_objects_filter(result, s)
+            print(f"    done ({time.perf_counter()-t0:.2f}s)")
 
         if pipeline.do_simplify:
             s = pipeline.simplify or MeshSimplificationSettingsDTO.default(st)

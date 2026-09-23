@@ -1,8 +1,8 @@
-"""lost_report.py — run 이벤트 로그(`output/events_*.jsonl`)에서 tracking-lost 를 집계한다.
+"""lost_report.py — run 이벤트 로그(`output/<RUN>/events.jsonl`)에서 tracking-lost 를 집계한다.
 
     python scripts/artec/lost_report.py                 # 최근 run 5개
     python scripts/artec/lost_report.py -n 20           # 최근 20개
-    python scripts/artec/lost_report.py output/events_20260921_162322.jsonl
+    python scripts/artec/lost_report.py output/20260921_162322/events.jsonl
 
 run 마다: 어디서(stage/band/θ) 잃었는지, 밴드 전환이 몇 번 살고 죽었는지(잃은 α),
 되돌아가기·자동 복구가 먹었는지. 마지막에 전체 합계.
@@ -16,6 +16,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))            # utils.run_paths
 
 
 def load(p: Path):
@@ -32,7 +33,7 @@ def load(p: Path):
 
 def report(p: Path, agg: dict) -> None:
     ev = load(p)
-    tag = p.stem.replace("events_", "")
+    tag = p.parent.name if p.name == "events.jsonl" else p.stem.replace("events_", "")
     lost = [e for e in ev if e["kind"] == "lost"]
     moves = [e for e in ev if e["kind"] == "band_move" and e.get("outcome")]
     recov = [e for e in ev if e["kind"] == "recovery" and "ok" in e]
@@ -76,9 +77,10 @@ def main() -> int:
     ap.add_argument("files", nargs="*")
     ap.add_argument("-n", type=int, default=5)
     a = ap.parse_args()
-    files = [Path(f) for f in a.files] or sorted((ROOT / "output").glob("events_*.jsonl"))[-a.n:]
+    from utils.run_paths import list_runs, events_path
+    files = [Path(f) for f in a.files] or [events_path(r) for r in list_runs() if events_path(r).exists()][-a.n:]
     if not files:
-        print("events_*.jsonl 이 없다 — run 을 한 번 돌리면 output/ 에 생긴다")
+        print("events.jsonl 이 없다 — run 을 한 번 돌리면 output/<RUN>/ 에 생긴다")
         return 1
     agg = {"runs": 0, "lost": 0, "lost_by_stage": Counter(), "moves": Counter(),
            "lost_alpha": [], "recovery": Counter()}

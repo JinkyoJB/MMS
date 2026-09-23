@@ -95,15 +95,54 @@ env -u PYTHONPATH MMS_BACKEND=real \
 | `--speed-scale K` | 로봇 속도 배율(계획용·nbv·복구 세 곳 한 번에) |
 | `--no-sproj` / `--texturize` | raw·최종 sproj 저장 끔(각 ~47s) / SDK 텍스처링(CPU 15~20분, 기본 끔 → Studio, `6_postprocess.md` §5) |
 
-**run 뒤에 볼 것** — 콘솔 로그(`output/run_<RUN_TS>.log`) 말고도 세 가지가 남는다:
+**run 뒤에 볼 것** — 콘솔 로그(`output/<RUN_TS>/run.log`) 말고도 세 가지가 남는다:
 
 ```bash
-python scripts/artec/lost_report.py          # output/events_<RUN_TS>.jsonl 집계 — 언제 잃었고 뭘 했나 (§7)
-output/scan_dumps/<RUN_TS>/scanNN_<stage>_poseK.npz   # IScan 별 원본 점군 (오프라인 정합, 6_postprocess.md)
-output/artec_lookaround_<RUN_TS>_raw/*.sproj          # 정합 전 raw — Artec Studio 로 열어 IScan 별로 본다
-output/debug/lookaround_<RUN_TS>/band{b}_start{k}.png  # 거리추종 판정마다: 3D 점을 각도좌표로 펼친 거리 이미지(+텍스처)
-output/debug/lookaround_<RUN_TS>/band{b}_live_f{n}.png # 회전 중 live 판정마다 — '정말 멀어졌나' 를 눈으로 본다 (§2)
+python scripts/artec/lost_report.py          # output/<RUN_TS>/events.jsonl 집계 — 언제 잃었고 뭘 했나 (§7)
+output/<RUN_TS>/                             # ★ run 산출물은 전부 이 폴더 (규칙: utils/run_paths.py, README.txt 자동 생성)
+output/<RUN_TS>/scan_dumps/scanNN_<stage>_poseK.npz   # IScan 별 원본 점군 (오프라인 정합, 6_postprocess.md)
+output/<RUN_TS>/aligned/aligned.sproj                 # 변환 적용·SDK 정합 전 IScan — Artec Studio 로 여는 파일
+output/<RUN_TS>/debug/preview/p{NNN}_tz{}_d{}_az{}.png      # preview 탐침마다 — '빈 시야' 판정이 맞나 (`2_preview.md`)
+output/<RUN_TS>/debug/lookaround/s{NN}_band{b}_start{k}.png  # 거리추종 판정마다: 3D 점을 각도좌표로 펼친 거리 이미지(+텍스처)
+output/<RUN_TS>/debug/lookaround/s{NN}_band{b}_live_f{n}.png # 회전 중 live 판정마다 — '정말 멀어졌나' 를 눈으로 본다 (§2)
+output/<RUN_TS>/debug/nbv/nbv{NN}_step{KK}_th{DDD}.png       # nbv 정지-촬영 프레임마다 (`4_nbv.md`)
+output/<RUN_TS>/debug/flip/s{NN}_band{b}_*.png               # flip 밴드 캡처 (lookaround 와 같은 형식)
+output/<RUN_TS>/debug/cam/<단계>/                            # 카메라 스냅샷 (utils/debug_view.py)
 ```
+
+**네 단계 모두 같은 형식**이다 — 3D 점을 광축 기준 각도좌표로 펼치고 카메라까지의 거리로
+색칠한 그림에, 그 순간 텍스처 프레임을 옆에 붙인다. 뷰어는 그 run 의 단계 폴더를 전부
+시간순으로 이어 보여주므로 preview → lookaround → nbv → flip 이 한 흐름으로 지나간다.
+
+`s{NN}` 은 IScan(세션) 번호다 — 밴드 이어붙이기로 IScan 이 여러 개면 파일이 덮이지 않게
+붙는다. 이 이미지들은 **run 중에 창으로도 뜬다**(`main_artec.py` 가 자동 실행):
+
+```bash
+python scripts/artec/live_range_view.py --run <RUN_TS>   # 수동으로 띄울 때
+```
+
+`SPACE` 로 멈추고 `←`/`→` 로 앞뒤 장을 넘기면 **이동 전/후 두 장을 나란히 비교**할 수 있다
+(거리추종이 "이동했는데 측정이 안 따라옴" 으로 꺼졌을 때 그게 맞는 판정인지 보는 용도).
+`q` 로 닫는다. 끄려면 `main_artec.py --no-range-view`. 점군 뷰어(`live_scan_view.py`)와
+달리 자식 프로세스로 띄워도 되는 이유는 Filament 가 아니라 OpenCV 창이기 때문이다.
+
+> ⚠ **창은 run 마다 하나씩 생기고 스스로 닫히지 않는다.** 끝난 run 의 창은 그 run 의
+> 마지막 장에서 멈춰 있는데, 이걸 이번 run 의 창으로 착각해 "뷰어가 멈췄다" 로 보기 쉽다
+> (2026-09-22 실제로 그랬다). 그래서 **창 제목에 RUN_TS 가 들어가고**, 새 이미지가 45초
+> 넘게 없으면 배너가 `LIVE` → `FINISHED (no new img Nm)` 로 바뀐다. 쌓이는 게 싫으면
+> `live_range_view.py --idle-exit 300` 처럼 스스로 닫게 한다.
+
+**동영상으로 남기려면** (기본 꺼짐):
+
+```bash
+python main_artec.py --range-video                          # run 과 함께 녹화 → output/<RUN>/debug/range.avi
+python scripts/artec/live_range_view.py --run <RUN> --make-video   # 끝난 뒤 PNG 로 만들기 → .mp4
+```
+
+PNG 가 원본이라 **사후 제작(`--make-video`)이 언제나 가능하고 더 안전하다**. 라이브 녹화는
+창을 닫지 않고 강제 종료될 수 있어서 컨테이너를 AVI/MJPG 로 쓴다 — mp4 는 그때 moov atom 이
+안 쓰여 통째로 재생 불가가 되지만(실측 44바이트), AVI 는 잘려도 쓴 프레임이 그대로 읽힌다
+(강제 kill 실측 13/14).
 
 
 ### 손잡이
@@ -392,6 +431,53 @@ standoff 가 조금 달라질 수 있다.)
 > 무너짐(44,360점)" 은 **옛 플래너**(전체 r_max 축거리·2방향 preview) 결과라 지금과 다르다.
 > 스프레이·머스타드·알람시계 는 preview 덤프가 지워져 재확인 못 했다 —
 > `bash scripts/sim/preview_testset.sh --headless` 로 덤프를 다시 만들면 같은 표를 4종으로 낼 수 있다.
+
+### 윗면 보강 자세가 조용히 빠지던 버그 (2026-09-22)
+
+`_augment_top_face` 는 "상단 30mm 안에서 법선이 위를 향하는 점이 **50개 미만**이면 윗면이
+없는 물체(구·원뿔)" 로 보고 보강 자세를 안 넣었다. run_184746 은 그 점이 **49개**였다 —
+한 개 차이로 밴드 3개가 전부 `el=30°` 가 됐고, 뚜껑(라벨면)에 구멍이 남았다. 같은 상단부
+131점의 법선은 p50 +0.81 · max +1.00 으로 **분명히 윗면이 있었다.**
+
+두 가지를 고쳤다.
+
+- **문턱을 점군 밀도에 비례**시켰다(`max(15, 0.2% of N)`). 절대 50 은 preview 7천점 기준으로
+  임의값이었다. 진짜로 평평한 윗면이 없는 물체는 이 문턱이 아니라 **커버율 판정**이 거른다.
+- **입사각을 감안해 고른다**(`CAP_SCORE_MARGIN` 0.15). 채점에 쓰는 cap 점은 preview 가
+  옆(el=30°)에서 본 **테두리**뿐이고, 정작 채워야 할 윗면 **중앙**은 점이 없어 점수에
+  안 들어간다. 그래서 점수가 근소하게 낮아도 가파른 el 을 택한다 — 수평면 입사각은
+  90°−el 이라 el=50°→40°, 70°→20° 로 품질 차가 크다.
+
+같은 preview 점군으로 재계획하면 `el30 el30 el30` → `el30 el30 el30 + el70(cap)` 이 된다.
+실물에서 el=70 으로 윗면이 잘 찍혔다는 관찰과 일치한다.
+
+> ⚠ 남은 한계 — **preview 는 el=30° 옆에서만 본다**(`preview_el_deg`). 윗면 중앙은 원리적으로
+> 안 잡히므로 "윗면 커버율" 은 늘 테두리 기준의 과대평가다. 커버율이 50% 를 넘어 보여 보강
+> 자세가 빠지는 경우가 남아 있다. 근본 해결은 preview 탐침에 높은 el 을 한 번 넣는 것이다.
+
+### 물체 높이는 분위수가 아니라 밀도로 (2026-09-23)
+
+preview 점군의 1% 분위수·최댓값으로 잡던 "물체 꼭대기"가 **성긴 잡음 꼬리**에 끌리고
+있었다. run_102221: preview p1 = 119mm, 최댓값 129mm 인데 점의 96% 는 85mm 아래에 있고
+master 스캔의 밀도 기준 꼭대기도 80~85mm 다(눕혀 놓은 머스타드, 두께 ~80mm). 이 40mm 가
+세 군데를 동시에 망가뜨렸다.
+
+- **밴드 계획** — 80mm 물체에 밴드가 109·119mm 까지 잡혀 윗밴드가 허공을 돌았다. "윗밴드는
+  늘 빈다"의 원인이 이것이다(물체가 없는 높이였다).
+- **flip 되돌리기** — 반사면 H/2 가 20mm 위로 잡혀 flip 의 뒷면이 master 의 라벨면 높이에
+  겹쳤다("윗면과 아랫면이 겹쳐 보인다").
+- **nbv 윗면 부족분** — 있지도 않은 33mm 가 "부족" 으로 나왔다.
+
+지금은 `robust_top_height` 한 곳에서 잰다: 디스크면부터 5mm 구간 히스토그램을 위에서 내려오며
+**처음으로 전체의 2% 이상을 담는 구간의 위 경계**. 플래너는 그 위의 점을 계획 점군에서 아예
+빼고(`plan_lookaround_viewpoints`), 윗면 자세(`_augment_top_face`)·flip 피벗(`_flip_pivots_B`)·
+nbv 부족분(`_cap_shortfall_m`)이 같은 값을 쓴다. 얇은 돌출부(노즐)는 밴드 계획에서 빠질 수
+있는데, 그건 nbv 몫이다.
+
+**넓은 수평 윗면이면 보강 자세를 강제한다**(`CAP_FORCE_FRAC` 5%). 옆 밴드(el≤40°)는 수평면을
+입사각 50°+ 로밖에 못 봐 실제 스캔엔 구멍이 남는데, preview 점 기반 커버율은 그걸 못 잰다
+(라벨면 점 2,182개가 el=30 에서 "70% 커버" 로 나와 보강이 빠졌다). 위쪽 법선 점이 전체의
+5% 를 넘으면 커버율과 무관하게 el 높은 자세를 하나 넣는다.
 
 ### 플래너 입사각 여유 — 45° vs 캡처 필터 50° (2026-09-18)
 

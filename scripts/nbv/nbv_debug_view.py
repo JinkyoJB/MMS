@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """nbv_debug_view.py — nbv 디버그 뷰어 (사용자가 **다른 터미널에서 직접** 실행).
 
-`utils/nbv/nbv_debug_dump.py` 가 반복마다 남기는 `output/debug/nbv/nbv_*.npz` 를 tail 하며
+`utils/nbv/nbv_debug_dump.py` 가 반복마다 남기는 `output/<RUN>/debug/nbv_plan/nbv_*.npz` 를 tail 하며
 Filament(O3DVisualizer) 로 그린다. sim·real 공용 — 파이프라인이 무엇을 겨냥해 무엇을
 얻었는지 한 그림에:
 
@@ -10,7 +10,7 @@ Filament(O3DVisualizer) 로 그린다. sim·real 공용 — 파이프라인이 �
     노랑   찍힌 점(기구학 자리)              연두      정합 후 점            제목     정합 결과
 
 키:  [ / ]  이전/다음 반복     r  카메라 리셋     q  종료
-    python scripts/nbv/nbv_debug_view.py [디렉터리]        (기본 output/debug/nbv)
+    python scripts/nbv/nbv_debug_view.py [디렉터리]        (기본 최근 run 의 debug/nbv_plan)
     python scripts/nbv/nbv_debug_view.py --png [디렉터리]  (창 없이 PNG 만 다시 생성)
 
 왜 별도 실행인가 — 이 환경에서 Open3D 창은 파이프라인의 자식 프로세스로 띄우면
@@ -113,7 +113,14 @@ def title(rec, name):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    d = args[0] if args else "output/debug/nbv"
+    if args:
+        d = args[0]
+    else:                                    # 기본: 가장 최근 run 의 debug/nbv_plan (utils/run_paths.py)
+        import sys as _sys; from pathlib import Path as _P
+        _sys.path.insert(0, str(_P(__file__).resolve().parents[2]))
+        from utils.run_paths import list_runs, run_dir
+        _runs = list_runs()
+        d = str(run_dir(_runs[-1]) / "debug" / "nbv_plan") if _runs else "output/_norun/debug/nbv_plan"
     if "--png" in sys.argv:
         from utils.nbv.nbv_debug_dump import NbvDebugDump
         for f in list_files(d):

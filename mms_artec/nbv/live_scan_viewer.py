@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -90,6 +91,16 @@ class LiveScanViewer:
         self.throttle_s = float(throttle_s)
         self.title = title
 
+        # ★ snapshot 쓰기는 **백그라운드 스레드**에서 한다. 예전에는 `tick()` 이
+        #   스캔 폴링 루프에서 직접 vstack+voxel+저장을 했고, 버퍼가 커지면
+        #   (rebuild 후 5.1M 점) 한 번에 2~3초를 잡아먹어 `poll_events()` 가 굶었다.
+        #   그러면 콜백이 안 들어와 stall watchdog 이 "frame stall" 로 스캔을 죽인다
+        #   (2026-09-22 run_182946: 첫 IScan 이후 모든 세션이 3~7초 만에 죽고
+        #    윗면 밴드와 flip 이 통째로 날아갔다). 뷰어는 거울일 뿐 스캔을 막으면 안 된다.
+        self._lock = threading.Lock()
+        self._req = threading.Event()
+        self._worker: Optional[threading.Thread] = None
+        self._worker_stop = threading.Event()
         self._pts: list = []
         self._cols: list = []
         self._n_buffered = 0
@@ -159,11 +170,12 @@ class LiveScanViewer:
                 if not self._reject:
                     self._reject = "voxel=empty"
                 return
-            self._pts.append(xq)
-            self._cols.append(cq)
-            self._n_buffered += xq.shape[0]
-            self._frames_ingested += 1
-            self._dirty = True
+            with self._lock:
+                self._pts.append(xq)
+                self._cols.append(cq)
+                self._n_buffered += xq.shape[0]
+                self._frames_ingested += 1
+                self._dirty = True
         except Exception as e:
             if not self._reject:
                 self._reject = f"exc:{type(e).__name__}:{e}"
@@ -233,6 +245,21 @@ class LiveScanViewer:
                             n_total += xq.shape[0]
                     except Exception:
                         continue
+            # ★ **전역** voxel + 상한. 프레임마다 voxel 을 걸어도 프레임끼리 겹친
+            #   점은 그대로 남아, 1000 프레임이면 5M 점이 된다(run_182946 실측
+            #   5,121,810). 그 상태로 다음 세션에 들어가면 snapshot 한 번이 몇 초다.
+            if n_total:
+                P = np.vstack(new_pts)
+                C = np.vstack(new_cols)
+                P, C = self._voxel_chunk(P, C)
+                if P.shape[0] > self.max_points:
+                    sel = np.random.default_rng(0).choice(
+                        P.shape[0], self.max_points, replace=False)
+                    P, C = P[sel], C[sel]
+                if P.shape[0] != n_total:
+                    print(f"  [live] rebuild 축약 {n_total:,} → {P.shape[0]:,} 점 "
+                          f"(전역 voxel {self.voxel_m*1000:.0f}mm, 상한 {self.max_points:,})")
+                new_pts, new_cols, n_total = [P], [C], int(P.shape[0])
             self._pts = new_pts
             self._cols = new_cols
             self._n_buffered = n_total
@@ -250,6 +277,7 @@ class LiveScanViewer:
     # ── snapshot write (Open3D 없음) ───────────────────────────────────
 
     def tick(self, scanning_flag: bool = True) -> bool:
+        """스캔 루프가 부른다 — **절대 블로킹하지 않는다**. 실제 쓰기는 워커 몫."""
         if self._dead:
             return False
         try:
@@ -257,24 +285,47 @@ class LiveScanViewer:
                 f.write("1" if scanning_flag else "0")
         except Exception:
             pass
+        if self._worker is None:
+            self._worker = threading.Thread(
+                target=self._writer_loop, name="live-snapshot", daemon=True)
+            self._worker.start()
+        self._req.set()
+        return True
 
-        now = time.time()
-        if (now - self._last_tick) < self.throttle_s:
-            return True
-        self._last_tick = now
+    def _writer_loop(self) -> None:
+        while not self._worker_stop.is_set():
+            if not self._req.wait(0.5):
+                continue
+            self._req.clear()
+            if self._dead:
+                return
+            now = time.time()
+            if (now - self._last_tick) < self.throttle_s:
+                time.sleep(max(0.0, self.throttle_s - (now - self._last_tick)))
+            self._last_tick = time.time()
+            self._write_snapshot()
 
+    def _write_snapshot(self) -> None:
         try:
-            if self._dirty and self._n_buffered > 0:
-                pts = np.vstack(self._pts)
-                cols = np.vstack(self._cols)
+            with self._lock:
+                if not (self._dirty and self._n_buffered > 0):
+                    return
+                pts_l, cols_l = self._pts, self._cols
+                # 처리하는 동안 들어오는 프레임은 빈 리스트에 쌓인다 — 아래에서 합친다.
+                self._pts, self._cols, self._n_buffered = [], [], 0
+                self._dirty = False
+            if True:
+                pts = np.vstack(pts_l)
+                cols = np.vstack(cols_l)
                 pts, cols = self._voxel_chunk(pts, cols)
                 if pts.shape[0] > self.max_points:
                     sel = np.random.default_rng(0).choice(
                         pts.shape[0], self.max_points, replace=False)
                     pts, cols = pts[sel], cols[sel]
-                self._pts = [pts]
-                self._cols = [cols]
-                self._n_buffered = pts.shape[0]
+                with self._lock:                 # 처리 중 들어온 새 점 앞에 되돌린다
+                    self._pts.insert(0, pts)
+                    self._cols.insert(0, cols)
+                    self._n_buffered += pts.shape[0]
 
                 mn, mx = pts.min(axis=0), pts.max(axis=0)
                 ctr = (mn + mx) / 2.0
@@ -293,7 +344,6 @@ class LiveScanViewer:
                 with open(tmp, "wb") as f:
                     np.save(f, arr)
                 os.replace(tmp, SNAP_PATH)
-                self._dirty = False
         except Exception as e:
             print(f"  [live] ⚠ snapshot write 예외 "
                   f"({type(e).__name__}: {e}) — writer 종료")
@@ -311,10 +361,16 @@ class LiveScanViewer:
         except Exception:
             pass
         # 최종 누적 클라우드 PLY (Open3D 없이 binary PLY 직접 작성)
+        self._worker_stop.set()
+        self._req.set()
+        if self._worker is not None:
+            self._worker.join(timeout=5.0)          # 쓰던 snapshot 은 끝내고 나간다
         try:
-            if self._pts and self._n_buffered > 0:
-                pts = np.vstack(self._pts).astype(np.float32)
-                cols = np.clip(np.vstack(self._cols), 0.0, 1.0)
+            with self._lock:
+                _pl, _cl, _n = list(self._pts), list(self._cols), self._n_buffered
+            if _pl and _n > 0:
+                pts = np.vstack(_pl).astype(np.float32)
+                cols = np.clip(np.vstack(_cl), 0.0, 1.0)
                 rgb = (cols * 255.0).astype(np.uint8)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 ply = str(_OUT / f"live_cloud_{ts}.ply")

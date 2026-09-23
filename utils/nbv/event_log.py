@@ -4,7 +4,7 @@
 --
 콘솔 로그는 사람이 읽는 것이라 "언제 잃었고, 뭘 했고, 됐나" 를 run 여러 개에 걸쳐
 세려면 매번 grep 을 다시 짜야 했다(2026-09-21 여섯 run 을 그렇게 봤다). 그래서
-판단이 일어나는 자리마다 **구조화된 한 줄**을 남긴다 — `output/events_<RUN_TS>.jsonl`.
+판단이 일어나는 자리마다 **구조화된 한 줄**을 남긴다 — `output/<RUN_TS>/events.jsonl`.
 집계는 `scripts/artec/lost_report.py`.
 
 이벤트 종류 (`kind`)
@@ -32,9 +32,9 @@ _PATH = None
 def _path() -> Path:
     global _PATH
     if _PATH is None:
-        root = Path(__file__).resolve().parents[2]
-        tag = os.environ.get("MMS_RUN_TS") or time.strftime("%Y%m%d_%H%M%S")
-        _PATH = root / "output" / f"events_{tag}.jsonl"
+        from utils.run_paths import run_dir          # output/<RUN_TS>/events.jsonl
+        _PATH = run_dir() / "events.jsonl"
+        _PATH.parent.mkdir(parents=True, exist_ok=True)
     return _PATH
 
 

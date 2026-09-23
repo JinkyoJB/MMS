@@ -466,16 +466,24 @@ class ArtecMMS:
             return
         try:
             # ★ Artec 프로젝트는 <sproj 폴더>/scans/{uuid}.* 에 페이로드를 쓴다 — 프로젝트마다
-            #   **자기 폴더**가 있어야 raw/최종본이 한 scans/ 에 섞이지 않는다(2026-09-22 발견).
+            #   **자기 폴더**가 있어야 aligned/최종본이 한 scans/ 에 섞이지 않는다(2026-09-22 발견).
+            #   run 폴더(output/<RUN>/) 아래 <tag>/<tag>.sproj.
             p = Path(s.export_sproj_path)
-            d = p.parent / f"{p.stem}_{tag}"
+            d = p.parent / tag
             d.mkdir(parents=True, exist_ok=True)
-            mid = str(d / f"{p.stem}_{tag}.sproj")
+            mid = str(d / f"{tag}.sproj")
             Path(mid).unlink(missing_ok=True)
             self.sensor.save_project(model, mid)
             print(f"   mid-save → {mid}")
         except Exception as e:                       # noqa: BLE001
             print(f"   mid-save 실패 (무시): {e}")
+
+    @staticmethod
+    def _write_run_readme(s, hints_applied: bool) -> None:
+        """run 폴더(output/<RUN>/)에 후임용 README.txt — 본문은 utils/run_paths.write_run_readme."""
+        if s.export_sproj_path:
+            from utils.run_paths import write_run_readme
+            write_run_readme(Path(s.export_sproj_path).parent, hints_applied)
 
     def _export(self, model, s, tag: str = "") -> None:
         """OBJ/sproj 내보내기. **sim·real 공용** — 예전엔 isaac 경로가 별도 블록을
@@ -554,11 +562,15 @@ class ArtecMMS:
             return ArtecProcessResult(model=model, ctx=ctx)
 
         # ── 1-2. Registration ───────────────────────────────────────────
-        # ★ **raw 보존** — SerialReg/GlobalReg 가 IScan 프레임 변환을 건드리기 **전**에
-        #   저장한다. 이 파일이 정합 알고리즘을 오프라인에서 바꿔 볼 유일한 원본이다
-        #   (프레임 정점·사진·uv·pass 병합 시 적용된 T_pre 가 그대로 들어 있다).
-        #   2026-09-21 까지는 첫 저장이 post_reg 라 원본이 없었다.
-        self._save_intermediate("raw", model, s, force=True)
+        # ★ **aligned 보존** — SerialReg/GlobalReg 가 IScan 프레임 변환을 건드리기 **전**에
+        #   저장한다. 모든 패스(lookaround·nbv·flip)가 파이프라인이 정한 변환(핸드아이·턴테이블
+        #   각·flip 힌트/yaw/greg)으로 한 좌표계에 놓인 IScan 만 있는 프로젝트다. 정합이 완벽하지
+        #   않아 watertight 를 못 만든 run 이라도 **이 파일을 Artec Studio 로 열어 수작업 후처리**
+        #   (정합 보정·fusion·텍스처)할 수 있다(`docs/6_postprocess.md` §4). 오프라인 정합 재실험의
+        #   원본이기도 하다. 2026-09-21 까지는 첫 저장이 post_reg 라 원본이 없었고, 2026-09-23
+        #   까지 이름이 `_raw` 였다(변환이 들어 있어 raw 가 아니다).
+        self._save_intermediate("aligned", model, s, force=True)
+        self._write_run_readme(s, hints_applied)
 
         if s.do_serial_registration:
             model = self._stage("SerialRegistration", self.sensor.serial_registration, model)
@@ -566,11 +578,9 @@ class ArtecMMS:
             model = self._stage("GlobalRegistration", self.sensor.global_registration, model)
         self._save_intermediate("post_reg", model, s)
 
-        # ── 3. Cleaning (Fusion 전) ─────────────────────────────────────
+        # ── 3. Cleaning (Fusion 전) — 프레임 단위는 OutliersRemoval 뿐 ───────
         if s.do_outliers_removal:
             model = self._stage("OutliersRemoval", self.sensor.outliers_removal, model)
-        if s.do_small_objects_filter:
-            model = self._stage("SmallObjectsFilter", self.sensor.small_objects_filter, model)
         self._save_intermediate("pre_fusion", model, s)
 
         # ── 4. Fusion ───────────────────────────────────────────────────
@@ -579,6 +589,15 @@ class ArtecMMS:
             model = self._stage("PoissonFusion", self.sensor.poisson_fusion, model)
         elif s.fusion == "fast":
             model = self._stage("FastFusion", self.sensor.fast_fusion, model)
+
+        # ── 4b. SmallObjectsFilter — **Fusion 뒤**(융합 메시의 떨어진 조각 제거) ──
+        # ★ 2026-09-23 실측: 스캔만 있는 모델(fusion 전)에 걸면 SDK 가 항상
+        #   executeJob 0x80010201 로 실패했고(모든 run 로그의 "SmallObjectsFilter 실패"),
+        #   fusion 뒤 메시에 걸면 5초 만에 잡음 조각 462개 → 1개로 정리된다. 이 필터는
+        #   메시 입력이다. (예전 문서·메모가 "Fusion 전" 으로 적은 것은 OutliersRemoval
+        #   에만 맞는 말이었다 — 그쪽이 0x80010203 의 원인.)
+        if s.do_small_objects_filter and s.fusion != "none":
+            model = self._stage("SmallObjectsFilter", self.sensor.small_objects_filter, model)
 
         # ── 5-6. Simplify + Texturize ───────────────────────────────────
         if s.do_simplify:
@@ -636,7 +655,8 @@ class ArtecProcessSettings:
     export_obj_path:   Optional[str] = None
     export_sproj_path: Optional[str] = None
     #: 후처리 단계 사이(post_reg·pre_fusion) 중간 sproj 도 남길지. 기본 끔 — 저장마다
-    #  ~47s. **raw**(스캔 직후, 정합 전) 와 최종본은 export_sproj_path 만 있으면 항상 남긴다.
+    #  ~47s. **aligned**(스캔 직후, SDK 정합 전) 와 최종본은 export_sproj_path 만 있으면 항상
+    #  남긴다 — 둘 다 export_sproj_path 의 폴더(run 폴더) 아래 <tag>/<tag>.sproj.
     export_sproj_intermediate: bool = False
 
     def __post_init__(self):

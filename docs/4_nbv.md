@@ -64,7 +64,7 @@ nbv 만 따로 돌릴 수는 없다 — 메울 구멍이 있어야 하므로 `st
 
 ### 디버그 뷰어 — 겨냥·수집·정합을 그림으로 (sim·real 공용, 2026-09-18)
 
-반복마다 `output/debug/nbv/nbv_<런>_<NN>.npz` + `.png` 가 남는다(`utils/nbv/nbv_debug_dump.py`,
+반복마다 `output/<RUN>/debug/nbv_plan/nbv_<런>_<NN>.npz` + `.png` 가 남는다(`utils/nbv/nbv_debug_dump.py`,
 끄기 `MMS_NBV_DEBUG=0`). 담기는 것: master 점군(회색) · gap 후보 전부(주황, 크기=L) ·
 고른 gap(빨강) · 카메라 프러스텀과 광축(파랑) · 스윕 구간(초록) · 찍힌 점(노랑) ·
 정합 후 점(연두) · 정합 결과(ok/fitness/Δt). PNG 는 창 없이도 생기고(위·옆 두 시점),
@@ -398,8 +398,9 @@ ICP 게이트(RMSE = corr/2, drift 8mm/2°)는 실측 RMSE 2.4~2.5mm 로 전부 
 
 ### 디버그 이미지 (2026-09-22)
 
-정지-촬영 프레임마다 `output/debug/nbv_<RUN_TS>/nbvNN_stepKK_thDDD.png` 를 남긴다 —
+정지-촬영 프레임마다 `output/<RUN_TS>/debug/nbv/nbvNN_stepKK_thDDD.png` 를 남긴다 —
 lookaround 와 같은 거리 이미지(3D 점을 각도좌표로 펼치고 카메라 거리로 색칠, 흰 선 = 핵심
 높이대) + 텍스처 프레임. 제목에 점 수·거리 중앙값·축거리. "빈 캡처" 판정이 났을 때 물체가
-시야 어디에 있었는지, 점이 정말 없었는지를 바로 본다. 끄려면 `MMS_LOOKAROUND_DEBUG_IMG=0`.
+시야 어디에 있었는지, 점이 정말 없었는지를 바로 본다. 끄려면 `MMS_LOOKAROUND_DEBUG_IMG=0`. run 중에는 `live_range_view.py` 창에 lookaround
+이미지와 함께 시간순으로 뜬다(`3_lookaround.md` §1).
 nbv 축거리의 반경은 lookaround 거리추종 실측(`r_eff = d − p`)을 1순위로 쓴다(`3_lookaround.md` §7).

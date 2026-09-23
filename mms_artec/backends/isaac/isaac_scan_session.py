@@ -343,7 +343,7 @@ class IsaacScanSession:
                                 ensure_els=ENSURE_ELS,
                                 log=lambda m: print(f"[isaac_scan] {m}"))
         self._last_roll = None                      # _view_q 가 채택한 roll(로그용)
-        # ★ 스캐너 시점 스냅샷 (output/debug/<단계>/). "왜 점이 안 들어왔나" 를 숫자로만
+        # ★ 스캐너 시점 스냅샷 (output/<RUN>/debug/cam/<단계>/). "왜 점이 안 들어왔나" 를 숫자로만
         #   쫓다 하루를 쓴 뒤 넣었다 — 그림 한 장이면 카메라가 딴 데 보는 걸 바로 안다.
         from utils.debug_view import DebugViewSaver
         self._dbg = DebugViewSaver(log=lambda m: print(f"[isaac_scan] {m}"))
@@ -674,7 +674,7 @@ class IsaacScanSession:
     def _snap(self, tag: str, note: str = "", stage: str = None) -> None:
         """현재 스캐너 시점을 PNG 로 남긴다 (실패해도 스캔은 계속).
 
-        `stage="preview"` 면 `output/debug/preview/`, 미지정이면 `.../lookaround/`.
+        `stage="preview"` 면 `…/debug/cam/preview/`, 미지정이면 `.../lookaround/`.
         """
         if not getattr(self, "_dbg", None) or not self._dbg.enabled:
             return

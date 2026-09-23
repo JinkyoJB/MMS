@@ -28,7 +28,7 @@ rim 캘리브 값과 비교할 수 있다.
   0.4mm), "얼마나 틀렸다"를 단정하는 데는 약하다. 큰 차이가 나오면 물체를
   **원판 한가운데**에 놓고 다시 재는 것이 먼저다.
 
-입력은 `--until preview` 가 남기는 `output/debug/preview_points_*.npz` 다
+입력은 `--until preview` 가 남기는 `output/<RUN>/debug/preview_points_*.npz` 다
 (방향별 패치가 들어 있다). 장비도 로봇도 건드리지 않는다.
 
     python scripts/artec/verify_turntable_axis.py              # 최신 파일
@@ -77,9 +77,11 @@ def main() -> int:
     if len(sys.argv) > 1:
         npz = Path(sys.argv[1])
     else:
-        cand = sorted((_ROOT / "output" / "debug").glob("preview_points_*.npz"))
+        # 최근 run 부터 — output/<RUN>/debug/preview_points_*.npz (utils/run_paths.py)
+        cand = sorted((_ROOT / "output").glob("*/debug/preview_points_*.npz"),
+                      key=lambda q: (q.parents[1].name, q.name))
         if not cand:
-            print("✘ output/debug/preview_points_*.npz 가 없다.")
+            print("✘ output/<RUN>/debug/preview_points_*.npz 가 없다.")
             print("   먼저:  python main_artec.py --until preview")
             return 2
         npz = cand[-1]

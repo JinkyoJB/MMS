@@ -126,11 +126,57 @@ flip 도 preview → 밴드 계획으로 로봇이 움직이므로 **카메라 �
 
 ```
 T_pre = S⁻¹ · T_BC_master · T_unflip_B · R_B(axis, −θ0) · T_CB_new · S
-T_unflip_B : 회전 R_phys⁻¹, 평행이동 = c_master_B − R_phys⁻¹·c_pass_B  (무게중심 피벗)
+T_unflip_B : 회전 R_phys⁻¹, 평행이동 = P_m_mid − R_phys⁻¹·P_f_mid   (디스크면 + H/2 피벗)
+             P_*_mid = 축점 + footprint중심 − (H/2)·축방향     ← 각 자세의 물체 중간높이 점
 ```
 
 `_flip_unflip_B` + `_compose_T_pre_W_mm(T_extra_B=…)`. 합성 검증(합성 점군, θ0=0/37°):
 오차 0.000mm, 카메라 보정만 하면 145mm 어긋남.
+
+**피벗은 무게중심이 아니라 디스크면 + 물체높이/2 다 (2026-09-23).** 물체는 두 자세 모두
+디스크 위에 서므로, 높이 H 인 물체를 뒤집으면 바닥면(h=0)과 뚜껑(h=−H)이 맞바뀐다. 즉
+축 위 h=−H/2 점을 지나는 수평축 180° 회전이 곧 되돌리기이고, 수평 위치만 두 자세의
+footprint 중심(preview) 차로 맞춘다. 예전의 **무게중심 피벗**은 두 스캔이 **다른 부위**를
+덮으면 그 차이가 그대로 수직 오차가 됐다. 실측(run_102221, 되돌린 flip 의 어깨면 높이를
+master 와 비교):
+
+| 피벗 | 어깨면 높이 오차 | 겹침대 최근접 중앙 |
+|---|---|---|
+| 무게중심 (예전) | +20mm | 9.1mm |
+| 디스크면 + H/2, preview H=119mm | +10mm | 5.3mm |
+| 디스크면 + H/2, H=129mm | **0mm** | **1.9mm** |
+
+> ⚠ 위 표의 "H=129mm → 0mm" 는 **철회**한다(2026-09-23). 그 H 는 preview 의 잡음 꼬리에서
+> 나온 값이고(물체는 ~80mm), 그 반사면으로 되돌리면 flip 의 **뒷면**이 master 의 **라벨면**
+> 높이에 포개져 최근접거리만 좋아 보였다("윗면과 아랫면이 겹친다" — 사용자 관찰이 맞았다).
+> 진짜 두께(밀도 기준 H≈75~80)로 반사하면 flip 이 물리적으로 맞는 자리(뒷면이 바닥 쪽)에
+> 놓이지만 겹침대 최근접은 ~10mm 로 남고, 축·방위(Y/X × 0/90/180/270°)를 바꿔도 ICP 를
+> 돌려도 안 줄어든다. 즉 **두 패스가 같은 강체의 같은 면을 담고 있다는 가정 밖의 오차**가
+> 있다(놓을 때 기울어짐, 또는 180° 가 아닌 뒤집기). 미해결.
+
+**손으로 다시 놓을 때의 수평 자유도(yaw + xy)** 는 힌트가 원리적으로 모른다. 그래서
+`_flip_global_refine` 이 텍스처 다음, greg 앞에 **footprint yaw 맞춤**(`_flip_yaw_fit`)을 둔다:
+힌트 배치에서 축 둘레 yaw 를 3° 간격으로 훑고 수평은 옆면 무게중심으로 맞춰 겹침 중앙값이
+가장 낮은 각을 고른다. 채택 조건은 셋 — <8mm, yaw 0 대비 20% 이상 개선, **최솟값이 유일**(두
+번째 골보다 15% 이상 낮음). run_102221(눕힌 병)은 72°:4.9mm 와 312°:5.4mm 두 골이 비슷해
+**미채택**이 맞다 — 겉보기엔 둘 다 그럴듯해서 기하로는 못 정한다(`yaw_fit/yaw_candidates_top.png`).
+오프라인: `scripts/artec/reg_hint_yaw.py`.
+
+**위에서 본 윤곽(contour) 매칭도 시험했다(2026-09-23, `scripts/artec/reg_hint_contour.py`)** —
+두 패스의 footprint 를 방위각별 최대 반경 프로파일 r(φ) 로 만들어 yaw 를 돌리며 차이가 최소인
+각을 찾는 방식. 결과는 역시 두 골(251°:11.2mm vs 100°:12.4mm, 11% 차)이고, 251° 로 놓으면 옆면
+겹침은 오히려 나빠진다(6.4 → 7.4mm). 원인은 알고리즘이 아니라 **flip 패스 데이터**: 점의 71% 가
+높이 40–60mm(위로 향한 뒷면)에 있고 10–30mm 옆면은 6% 뿐(master 13%)이라 목(neck) 이 footprint
+에 없다 → 눕힌 병의 윤곽이 거의 2회 대칭이 되어 머리/꼬리를 못 가린다(`contour_fit/contour_fit.png`
+왼쪽: master 는 병 모양, flip 은 몸통만). 해법은 정합이 아니라 flip 패스도 낮은 고도각 밴드
+(el 30) 로 옆면·목을 찍는 것 — 현재 계획기(`el30 + el70(cap)`)가 그렇게 잡는다. 다음 실측에서
+flip 의 10–30mm 높이대 비율이 master 와 비슷해지면 `_flip_yaw_fit` 이 유일 최솟값을 낼 가능성이
+크다; 그래도 모호하면 위 스크립트로 프로파일을 눈으로 비교하라.
+
+H 는 `robust_top_height`(밀도 기준, `3_lookaround.md` §5) 로 세 추정의 최댓값 — preview
+(똑바로)·preview(뒤집힘)·master 메시 — 을 쓴다(`_flip_pivots_B`). 검증 스크립트:
+`scripts/artec/reg_hint_test.py`(`--H-mm` 로 민감도), SDK 후처리까지는 `reg_hint_post.py`
+(`6_postprocess.md` §4). 축 둘레 방위는 이 피벗이 못 잡고 텍스처 매칭 몫이다.
 
 **힌트는 초기값일 뿐이다.** 사람 손회전 오차와 부분 스캔의 무게중심 가정 때문에 힌트가
 틀리면 후처리 GlobalReg 도 건너뛰어(`hints_applied`) 그대로 굳는다(2026-09-21
@@ -199,11 +245,12 @@ Artec Studio 는 사용자가 manual alignment 로 시작 transform 을 주어 �
 그게 없다. 그 자리를 §3 ② 의 centroid-pivot hint 가 대신한다. **`hints_applied` 가
 켜졌는데도 어긋나면 hint 자체(R_phys, centroid)를 먼저 의심한다.**
 
-### T2. 〔한계〕 비대칭·길쭉한 물체는 centroid 가정이 깨진다
+### T2. 〔해소〕 centroid 가정 → 디스크면 + H/2 피벗 (2026-09-23)
 
-②는 "표면 vertex centroid ≈ 물체 중심"을 가정한다. 길쭉한 물체를 눕히면 보이는 면이
-바뀌면서 surface centroid 가 body 중심에서 벗어나 hint 가 틀어진다. 향후 OBB center 로
-바꾸는 것을 검토한다.
+예전 ②는 "표면 vertex centroid ≈ 물체 중심"을 가정했고, 두 스캔이 다른 부위를 덮으면
+그 차이가 수직 오차가 됐다(실측 +20mm). 지금은 디스크면과 물체높이로 피벗을 잡아
+커버리지와 무관하다(§3). preview·축 정보가 없을 때만 무게중심으로 폴백하며, 그때는
+`[hint flip] ⚠ … 무게중심 피벗(폴백)` 이 찍힌다.
 
 ### T3. 〔미검증〕 flip 후 두 SLAM 스캔의 정합 병합
 
@@ -232,3 +279,9 @@ flip 면 패스(el≈70°)만으로는 **바닥 모서리(필렛)** 가 남는�
 → 309mm). 컨트롤러 `_flip_extra_passes` 가 `backend.flip_extra_poses()` 를 불러
 캡처한다. **sim 구현·real 보류**(real 은 flip hint 합성이 필요 — 스텁 주석 참조).
 시간: flip 당 전회전 +1회.
+
+### 디버그 이미지 (2026-09-22)
+
+flip 도 밴드 캡처라 lookaround 와 **같은 거리 이미지**가 남는다 —
+`output/<RUN_TS>/debug/flip/`. 예전에는 폴더 이름이 `lookaround_` 로 박혀 있어 flip 그림이
+lookaround 폴더에 섞였다. 보는 법은 `3_lookaround.md` §1.

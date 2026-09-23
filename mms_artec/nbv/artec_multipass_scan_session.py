@@ -305,7 +305,7 @@ class ArtecMultiPassScanSessionSettings:
     # (통과 녹/턴테이블floor 빨강/profile 밖 회) 색상 PLY 덤프.
     # 기본 OFF — scan/성능 무영향. CloudCompare 로 검증. docs §3.0.
     probe_debug_dump: bool = False
-    iso_debug_dir: str = "output/iso_debug"
+    iso_debug_dir: str = ""                  # 비면 output/<RUN>/debug/iso/ (utils/run_paths.py)
 
     # 병합 비교용: False 면 _merge_into_master 가 IScan frame_transformations 에
     # T_pre 를 set 하지 않고 result.recorded_hints 에 (scan_index, T_pre) list 로만
@@ -391,8 +391,23 @@ class ArtecMultiPassScanSessionSettings:
     nbv_patch_span_deg: float = 90.0
     #: nbv 패치 병합 게이트 — 4mm 복셀 점수·OK 프레임이 이보다 적으면 빈 캡처로 보고 버린다.
     #  실측(2026-09-22): 정상 패치 6만~8만점/30~100프레임, 빈 캡처 5~8천점.
+    #  ⚠ 점 문턱은 **물체 크기에 비례**해야 한다 — 저 값은 큰 물체(세제병)에서 잰 것이고,
+    #  작은 물체는 완전한 패치도 몇 천 점뿐이다. 그래서 실제 문턱은
+    #  min(nbv_min_patch_pts, nbv_patch_pts_frac × master 점수) 로 낮춘다.
     nbv_min_patch_pts: int = 5000
     nbv_min_patch_frames: int = 10
+    nbv_patch_pts_frac: float = 0.10
+    #: **전체 패스**(lookaround/flip) 병합 게이트 — nbv 패치와 기준이 다르다.
+    #  2026-09-23 run_125718: 눕힌 병(55mm)의 flip 전체 패스가 725 OK 프레임·4,932점
+    #  (4mm 복셀)인데 nbv 용 고정 문턱 5,000 에 걸려 **통째로 버려졌다**(master scan_count=1).
+    #  같은 run 의 master(lookaround)도 6,839점이라 문턱 바로 위였다 — 즉 고정 점수는
+    #  물체가 작으면 정상 패스를 기각한다. 그래서 전체 패스는
+    #    ① OK 프레임 수 (29·31프레임짜리 flip 재시도를 거르는 기준)
+    #    ② master(같은 물체의 좋은 패스) 점수 대비 비율  ③ 절대 바닥
+    #  으로 본다. master 가 아직 비었으면(첫 패스) ③만 적용.
+    pass_min_ok_frames: int = 50
+    pass_min_pts_frac: float = 0.15
+    pass_min_pts_abs: int = 500
     #: nbv 캡처 방식. "step" = 정지-촬영(턴테이블 K단계, 프레임마다 θ 로 배치, SDK 추적
     #  없음 — 기본, 2026-09-22). "sweep" = 예전 스트리밍 부분 스윕(SLAM 의존).
     nbv_capture_mode: str = "step"
@@ -592,6 +607,9 @@ class ArtecMultiPassScanSession:
         v_mm = None
         best_uv = None
         best_wh = None
+        # ★ 디버그 이미지용 — **미달이어서 버린 캡처도** 그려야 "빈 시야" 판정이
+        #   맞는지 눈으로 볼 수 있다. 성공/실패 모두 여기에 남긴다.
+        self._last_preview_verts = None
         # ★ 텍스처 캡처는 스캐너3D→Color 변환(`_T_scan_color`)을 **한 번** 풀 때만 필요하다.
         #   변환이 캐시된 뒤에도 매번 텍스처를 찍고 있었고, 빈 프레임(점 0)이면
         #   capture+reconstruct 실패에 ~3s 가 걸려 3회 재시도 = 탐침 하나에 9s
@@ -616,6 +634,7 @@ class ArtecMultiPassScanSession:
             if vv is not None and vv.shape[0] > 0:
                 if v_mm is None or vv.shape[0] > v_mm.shape[0]:
                     v_mm = vv
+                    self._last_preview_verts = np.asarray(vv, float)
                     if to_color:
                         try:
                             best_uv = fmh.uv()
@@ -797,7 +816,8 @@ class ArtecMultiPassScanSession:
         try:
             import os
             import open3d as o3d
-            d = getattr(self.s, "iso_debug_dir", "output/iso_debug")
+            from utils.run_paths import debug_dir
+            d = getattr(self.s, "iso_debug_dir", "") or str(debug_dir("iso"))
             if not os.path.isabs(d):                 # cwd 가 utils/turntable
                 try:                                  # 로 바뀌므로 절대경로
                     from utils import PROJECT_ROOT
@@ -852,7 +872,8 @@ class ArtecMultiPassScanSession:
             cols = np.tile([0.6, 0.6, 0.6], (len(xB), 1))
             cols[mask_excl] = [0.95, 0.15, 0.15]
             cols[mask_obj] = [0.15, 0.95, 0.25]
-            d = getattr(self.s, "iso_debug_dir", "output/iso_debug")
+            from utils.run_paths import debug_dir
+            d = getattr(self.s, "iso_debug_dir", "") or str(debug_dir("iso"))
             if not os.path.isabs(d):
                 try:
                     from utils import PROJECT_ROOT
@@ -1235,14 +1256,93 @@ class ArtecMultiPassScanSession:
         T_CB_master = (self._st.master_T_CB if self._st.master_T_CB is not None
                        else np.linalg.inv(self._T_BC))
         A_new = self._R_obj_B(theta0, tag="flip") @ np.linalg.inv(T_BC_new) @ S_m
-        c_pass_B = (A_new @ np.r_[np.asarray(c_pass_W_mm, float) / 1000.0, 1.0])[:3]
-        c_master_B = (T_CB_master @ S_m
-                      @ np.r_[np.asarray(c_master_W_mm, float) / 1000.0, 1.0])[:3]
         R_inv = np.linalg.inv(np.asarray(R_phys, float))[:3, :3]
         T = np.eye(4)
         T[:3, :3] = R_inv
+        # ── 설계 피벗 (2026-09-23): 디스크면 + 물체높이/2 ─────────────────────
+        #   물체는 두 자세 모두 디스크 위에 선다. 높이 H 인 물체를 뒤집으면 바닥면(h=0)과
+        #   뚜껑(h=−H)이 맞바뀌므로, 축 위 h=−H/2 점을 지나는 수평축 180° 회전이 곧
+        #   되돌리기다. 수평 위치만 두 자세의 footprint 중심 차로 맞춘다.
+        #   무게중심 피벗은 두 스캔이 **다른 부위**를 덮으면 그 차이가 그대로 수직 오차가
+        #   된다(run_162620 실측 +24mm, run_102221 +20mm). 설계 피벗은 커버리지와 무관
+        #   하다 — 같은 데이터로 +10mm, H 를 정확히 주면 0mm(`scripts/artec/reg_hint_test.py`).
+        piv = self._flip_pivots_B()
+        if piv is not None:
+            P_f_mid, P_m_mid, info = piv
+            T[:3, 3] = P_m_mid - R_inv @ P_f_mid
+            print(f"  [hint flip] 피벗 = 디스크면 + H/2  ({info})")
+            return T
+        # ── 폴백: 무게중심 피벗 (preview/축 정보가 없을 때만) ────────────────
+        c_pass_B = (A_new @ np.r_[np.asarray(c_pass_W_mm, float) / 1000.0, 1.0])[:3]
+        c_master_B = (T_CB_master @ S_m
+                      @ np.r_[np.asarray(c_master_W_mm, float) / 1000.0, 1.0])[:3]
         T[:3, 3] = c_master_B - R_inv @ c_pass_B
+        print("  [hint flip] ⚠ preview·축 정보 없음 — 무게중심 피벗(폴백, 커버리지 차이만큼 틀릴 수 있다)")
         return T
+
+    def _flip_pivots_B(self):
+        """뒤집기 되돌리기 피벗 두 점 (B, m): (flip 패스 중간높이점, master 패스 중간높이점, 설명).
+
+        높이 H 는 세 추정의 **최댓값**이다 — preview(똑바로)·preview(뒤집힘)·master 메시.
+        preview 는 el=30° 옆에서만 봐서 윗면을 놓쳐 **작게** 잰다(run_102221: 119mm, 실제
+        ≈129mm — 그 10mm 가 그대로 수직 오차였다). 윗면 보강 자세(el=70 cap)가 잡히면
+        master 메시가 진짜 높이를 알고, 셋 다 아래로만 틀리므로 최댓값이 가장 정확하다.
+        master 는 잡음(허공 점)이 H 를 부풀릴 수 있어 상단 10mm 에 점이 충분할 때만 믿는다.
+        정보가 없으면 None → 호출자가 무게중심 피벗으로 폴백.
+        """
+        try:
+            from utils.nbv import lookaround as p1
+            tt = getattr(self.mms, "turntable_transform", None)
+            pv_up = getattr(self, "_preview_upright", None) or {}
+            pv_fl = getattr(self, "preview_result", None) or {}
+            P_up, P_fl = pv_up.get("points_B"), pv_fl.get("points_B")
+            if tt is None or P_up is None or P_fl is None:
+                return None
+            P_up, P_fl = np.asarray(P_up, float), np.asarray(P_fl, float)
+            if len(P_up) < 100 or len(P_fl) < 100:
+                return None
+            ax_pt = np.asarray(tt.axis_point_B, float)
+            ax_dir = np.asarray(tt.axis_dir_B, float)
+            ax_dir = ax_dir / np.linalg.norm(ax_dir)
+
+            def _stats(P, need_top_pts: int = 0):
+                # ★ 높이는 **밀도 기준**(`robust_top_height`) — 분위수는 성긴 잡음 꼬리에
+                #   끌린다(run_102221: p1 119mm vs 실제 ~80mm → flip 뒷면이 master 윗면에 겹침).
+                H, sgn = p1.robust_top_height(P, ax_pt, ax_dir)
+                if H is None:
+                    return None, None
+                v = P - ax_pt
+                h = v @ ax_dir
+                perp = v - np.outer(h, ax_dir)
+                keep = np.linalg.norm(perp, axis=1) < 0.16
+                h, perp = h[keep], perp[keep]
+                up_neg = sgn < 0.0
+                # footprint 중심 = 디스크에 가까운 1/3 의 perp 평균
+                low = (h >= np.percentile(h, 67)) if up_neg else (h <= np.percentile(h, 33))
+                return float(H), perp[low].mean(axis=0)
+
+            H_up, C_up = _stats(P_up)
+            H_fl, C_fl = _stats(P_fl)
+            if H_up is None or H_fl is None:
+                return None
+            H_me = None
+            try:
+                M = self._master_pts_B_m(60_000)
+                if M is not None and len(M) >= 500:
+                    H_me, _ = _stats(np.asarray(M, float))
+            except Exception:                                   # noqa: BLE001
+                H_me = None
+            H = max(H_up, H_fl, H_me or 0.0)
+            P_f_mid = ax_pt + C_fl - (H / 2.0) * ax_dir
+            P_m_mid = ax_pt + C_up - (H / 2.0) * ax_dir
+            info = (f"H={H*1000:.0f}mm [preview 똑바로 {H_up*1000:.0f} · 뒤집힘 {H_fl*1000:.0f}"
+                    f" · master {H_me*1000:.0f}]" if H_me else
+                    f"H={H*1000:.0f}mm [preview 똑바로 {H_up*1000:.0f} · 뒤집힘 {H_fl*1000:.0f} · master 없음]")
+            info += f"  footprint Δ={np.linalg.norm(C_fl - C_up)*1000:.1f}mm"
+            return P_f_mid, P_m_mid, info
+        except Exception as e:                                  # noqa: BLE001
+            print(f"  [hint flip] 피벗 계산 실패({type(e).__name__}: {e}) — 폴백")
+            return None
 
     def _flip_global_refine(self, sub_model, T_BC_new, theta0: float,
                             T_hint_B: np.ndarray):
@@ -1272,9 +1372,8 @@ class ArtecMultiPassScanSession:
             print(f"  [flip] 텍스처 정합 불가({info.get('reason', '?')}) — 기하 전역 정합으로")
         except Exception as e:                                   # noqa: BLE001
             print(f"  [flip] ⚠ 텍스처 정합 예외({type(e).__name__}: {e}) — 기하 전역 정합으로")
-        # ── 2순위: 기하 전역 정합 합의 ─────────────────────────────────────
+        # ── 점군 (B, m): sub = 뒤집힌 채 놓인 그대로(논리 0°), master = 누적 ──────
         try:
-            from utils.nbv.global_registration import register_consensus
             T_CB_new = np.linalg.inv(np.asarray(T_BC_new, float))
             sub_pcd = self._master_to_pcd_B(
                 sub_model, T_CB_new, voxel_mm=self.s.nbv_master_voxel_mm,
@@ -1286,6 +1385,25 @@ class ArtecMultiPassScanSession:
             S = np.asarray(sub_pcd.points, float) / 1000.0
             R_obj = self._R_obj_B(theta0, tag="flip-greg")
             S = S @ R_obj[:3, :3].T + R_obj[:3, 3]          # 논리 0° 기준으로
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  [flip] ⚠ 점군 준비 예외({type(e).__name__}: {e}) — 힌트 사용")
+            return "B", T_hint_B, "hint(예외)"
+        # ── 2순위: footprint yaw 맞춤 — 사람이 다시 놓을 때 생긴 수평 자유도 ──────
+        #   힌트는 뒤집기 축과 반사면(H/2)만 안다. 손으로 뒤집어 놓으면 물체는 축 둘레로
+        #   임의 각(yaw) 돌고 몇 cm 옮겨진다 — 이 3 자유도는 힌트가 원리적으로 모른다.
+        #   run_102221: yaw 0 가정 시 옆면 겹침 8.6mm, yaw −48°·이동 37mm 를 찾으면 4.1mm.
+        #   회전대칭 물체면 최솟값이 평평해 못 잡는다 → 그때는 아래 greg/텍스처 몫.
+        try:
+            T_yaw, yinfo = self._flip_yaw_fit(S, mp, np.asarray(T_hint_B, float))
+            if T_yaw is not None:
+                print(f"  [flip] ✓ footprint yaw 맞춤 채택 ({yinfo})")
+                return "B", T_yaw, "yawfit"
+            print(f"  [flip] footprint yaw 맞춤 미채택 ({yinfo}) — 기하 전역 정합으로")
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  [flip] ⚠ yaw 맞춤 예외({type(e).__name__}: {e}) — 기하 전역 정합으로")
+        # ── 3순위: 기하 전역 정합 합의 ─────────────────────────────────────
+        try:
+            from utils.nbv.global_registration import register_consensus
             T, info = register_consensus(S, mp, log=lambda m: print(f"  [flip] {m}"))
             if T is None:
                 print(f"  [flip] 전역 정합 불합의({info.get('reason', '?')}) — 힌트 사용")
@@ -1300,28 +1418,139 @@ class ArtecMultiPassScanSession:
             print(f"  [flip] ⚠ 전역 정합 예외({type(e).__name__}: {e}) — 힌트 사용")
             return "B", T_hint_B, "hint(예외)"
 
+    def _flip_yaw_fit(self, S_B, M_B, T_hint_B, yaw_step_deg: float = 3.0,
+                      accept_mm: float = 8.0, improve_frac: float = 0.2):
+        """힌트로 되돌린 flip 점군을 **축 둘레 yaw + 수평 이동**으로 master 옆면에 맞춘다.
+
+        반환 (T_extra_B | None, 설명). 채택 조건: 최선 겹침 중앙값 < `accept_mm` 이고
+        yaw=0(힌트 그대로)보다 `improve_frac` 이상 좋아야 한다(최솟값이 뾰족해야 함 —
+        회전대칭 물체는 평평해서 미채택 → 텍스처/greg 몫). 옆면만 비교한다: master 가
+        덮은 높이대 안, 축에서 20mm 밖의 점.
+        """
+        from scipy.spatial import cKDTree
+        tt = getattr(self.mms, "turntable_transform", None)
+        if tt is None:
+            return None, "축 정보 없음"
+        ax = np.asarray(tt.axis_point_B, float)
+        ad = np.asarray(tt.axis_dir_B, float); ad = ad / np.linalg.norm(ad)
+        M = np.asarray(M_B, float)
+        hm = (M - ax) @ ad
+        rm = np.linalg.norm((M - ax) - np.outer(hm, ad), axis=1)
+        lo, hi = np.percentile(hm, 3), np.percentile(hm, 97)
+        Mw = M[rm > 0.02]
+        if len(Mw) < 500:
+            return None, "master 옆면 점 부족"
+        tree = cKDTree(Mw[::max(1, len(Mw) // 60_000)])
+        cm = Mw.mean(0)
+        T0 = np.asarray(T_hint_B, float)
+        Q0 = (T0[:3, :3] @ np.asarray(S_B, float).T).T + T0[:3, 3]
+        Q0 = Q0[::max(1, len(Q0) // 60_000)]
+
+        def _rot(a, ang):
+            c, s_ = np.cos(ang), np.sin(ang)
+            K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+            return np.eye(3) * c + np.outer(a, a) * (1 - c) + K * s_
+
+        def _score(Q):
+            hq = (Q - ax) @ ad
+            rq = np.linalg.norm((Q - ax) - np.outer(hq, ad), axis=1)
+            m = (hq >= lo) & (hq <= hi) & (rq > 0.02)
+            if int(m.sum()) < 300:
+                return None, None, None
+            dc = cm - Q[m].mean(0); dc = dc - (dc @ ad) * ad     # 수평 정렬
+            d, _ = tree.query((Q + dc)[m][::4], k=1)
+            return float(np.median(d)), dc, m
+
+        piv = Q0.mean(0)
+        curve = []; med0 = None
+        for yaw in np.arange(0.0, 360.0, yaw_step_deg):
+            R = _rot(ad, np.radians(yaw))
+            Q = (R @ (Q0 - piv).T).T + piv
+            med, dc, _ = _score(Q)
+            if med is None:
+                continue
+            if yaw == 0.0:
+                med0 = med
+            curve.append((med, yaw, dc))
+        if not curve or med0 is None:
+            return None, "겹침 점 부족"
+        curve.sort(key=lambda c: c[1])
+        vals = np.array([c[0] for c in curve]); n = len(vals)
+        # 국소 최솟값들 — 최선이 두 번째 국소 최솟값보다 뚜렷이 낮아야 '유일'하다.
+        # run_102221(눕힌 병): 72° 4.9mm vs 312° 5.4mm 처럼 두 골이 비슷하면 기하로는 못 정한다.
+        mins = [i for i in range(n) if vals[i] < vals[(i - 1) % n] and vals[i] < vals[(i + 1) % n]]
+        mins.sort(key=lambda i: vals[i])
+        if not mins:
+            return None, "최솟값 없음"
+        best = curve[mins[0]]
+        second = curve[mins[1]][0] if len(mins) > 1 else None
+        med, yaw, dc = best
+        if second is not None and med > 0.85 * second:
+            return None, (f"모호 — 국소 최솟값 {yaw:.0f}°:{med*1000:.1f}mm 와 "
+                          f"{curve[mins[1]][1]:.0f}°:{second*1000:.1f}mm 가 비슷 (기하로 yaw 못 정함, 텍스처 몫)")
+        for y in np.arange(yaw - yaw_step_deg, yaw + yaw_step_deg + 1e-6, 0.5):
+            R = _rot(ad, np.radians(y))
+            Q = (R @ (Q0 - piv).T).T + piv
+            m_, d2, _ = _score(Q)
+            if m_ is not None and m_ < med:
+                med, yaw, dc = m_, y, d2
+        info = (f"yaw={yaw:+.1f}° 수평 {np.linalg.norm(dc)*1000:.0f}mm · 옆면 겹침 "
+                f"{med0*1000:.1f} → {med*1000:.1f}mm")
+        if med * 1000 >= accept_mm or med > (1.0 - improve_frac) * med0:
+            return None, info + f" (기준: <{accept_mm:.0f}mm 이고 {improve_frac*100:.0f}% 이상 개선)"
+        R = _rot(ad, np.radians(yaw))
+        T_y = np.eye(4); T_y[:3, :3] = R; T_y[:3, 3] = piv - R @ piv + dc
+        return T_y @ T0, info
+
     @staticmethod
-    def _trim_lost_tail(model, n_tail: int):
-        """IScan 꼬리의 미정합 프레임 `n_tail` 개를 잘라낸 **새 모델**을 돌려준다.
-        SDK 에 프레임 삭제가 없어 scan 을 다시 만든다(프레임·변환 복사). 실패면 원본."""
-        if n_tail <= 0 or model is None:
+    def _trim_lost_tail(model, n_tail: int, frame_errs=None):
+        """정합 실패 프레임을 잘라낸 **새 모델**. SDK 에 프레임 삭제가 없어 scan 을
+        다시 만든다(프레임·변환 복사). 실패면 원본.
+
+        두 가지를 함께 버린다.
+          · 꼬리 `n_tail` 개 — lost 로 끝났을 때 마지막 연속 미정합 구간.
+          · `frame_errs[i] < 0` 인 **중간** 프레임 — 밴드 전환이 실패했다 되찾으면
+            그 구간이 스캔 한가운데 남는다. 꼬리만 자르던 예전에는 그게 그대로
+            남아 Artec Studio 의 scan Err 가 1.1mm 로 뜨고 Autopilot 정렬이 깨졌다
+            (2026-09-22 run_170931: 전환에서 17+31+15+28 프레임이 err<0).
+            `ignore_registration_errors=True` 라 SDK 가 예측 자세로 우겨넣은 것이고,
+            좌표가 틀린 것이 확실하므로 버리는 쪽이 항상 낫다.
+        """
+        if model is None:
+            return model
+        errs = list(frame_errs or [])
+        if n_tail <= 0 and not any(e < 0.0 for e in errs):
             return model
         try:
             out = artec_base.create_model()
-            n_cut = 0
+            n_cut_tail = n_cut_mid = 0
             for si in range(model.scan_count()):
                 scan = model.get_scan(si)
                 n = scan.frame_count()
-                keep = max(0, n - n_tail) if si == model.scan_count() - 1 else n
-                if keep < 10:                       # 남는 게 없으면 자르지 않는다
-                    out.add_scan(scan); continue
+                last = (si == model.scan_count() - 1)
+                keep_to = max(0, n - n_tail) if last else n
+                idx = [i for i in range(keep_to)
+                       if i >= len(errs) or errs[i] >= 0.0]   # 모르는 프레임은 남긴다
+                if len(idx) < 10 or len(idx) < 0.25 * n:      # 너무 많이 버리면 그만둔다
+                    out.add_scan(scan)
+                    if len(idx) < 0.25 * n:
+                        print(f"  [정리] ⚠ 버릴 프레임이 {n - len(idx)}/{n} 로 과도 — 자르지 않음")
+                    continue
                 ns = artec_base.create_scan()
-                for i in range(keep):
+                for k, i in enumerate(idx):
                     ns.add_frame(scan.get_frame(i))
-                    ns.set_frame_transformation(i, scan.get_frame_transformation(i))
-                out.add_scan(ns); n_cut += n - keep
-            if n_cut:
-                print(f"  [정리] lost 꼬리 {n_cut} 프레임 제거")
+                    ns.set_frame_transformation(k, scan.get_frame_transformation(i))
+                out.add_scan(ns)
+                n_cut_tail += n - keep_to
+                n_cut_mid += keep_to - len(idx)
+            if n_cut_tail or n_cut_mid:
+                _ok = [e for e in errs if e >= 0.0]
+                _stat = (f"  남은 프레임 정합오차 중앙 {np.median(_ok):.2f}mm · "
+                         f"p90 {np.percentile(_ok, 90):.2f}mm · 최대 {max(_ok):.2f}mm"
+                         if _ok else "")
+                print(f"  [정리] 미정합 프레임 제거 — 꼬리 {n_cut_tail} · 중간 {n_cut_mid}")
+                if _stat:
+                    print(_stat)
             return out
         except Exception as e:                                   # noqa: BLE001
             print(f"  [정리] ⚠ 꼬리 제거 실패({type(e).__name__}: {e}) — 원본 사용")
@@ -1347,13 +1576,12 @@ class ArtecMultiPassScanSession:
 
     def _dump_scan_raw(self, model, T_pre_mm, stage: str, **extra) -> None:
         """원시 IScan 점(스캔 월드, mm, 색) + 적용 T_pre 를 npz 로 남긴다 —
-        `output/scan_dumps/<RUN_TS>/scanNN_<stage>_poseK.npz`. 정합을 SDK 없이 오프라인에서
+        `output/<RUN_TS>/scan_dumps/scanNN_<stage>_poseK.npz`. 정합을 SDK 없이 오프라인에서
         다시 돌리기 위한 것. master 월드 = scan00 (T_pre 항등). 실패는 무시."""
         try:
-            from pathlib import Path as _P
-            tag = os.environ.get("MMS_RUN_TS") or time.strftime("%Y%m%d_%H%M%S")
-            # output/scans/ 는 Artec 프로젝트 페이로드 폴더 이름과 겹친다 → scan_dumps/
-            d = _P(__file__).resolve().parents[2] / "output" / "scan_dumps" / tag
+            from utils.run_paths import run_dir
+            # scans/ 는 Artec 프로젝트 페이로드 폴더 이름과 겹친다 → scan_dumps/
+            d = run_dir() / "scan_dumps"
             d.mkdir(parents=True, exist_ok=True)
             pts, cols = [], []
             for si in range(model.scan_count()):
@@ -1929,9 +2157,12 @@ class ArtecMultiPassScanSession:
             if vC is None:
                 print(f"  [p1plan] tz={tz:.3f} d={d:.2f} az={azd:+.0f}° — "
                       f"원시 정점 부족(<{s.preview_raw_min_verts}) = 빈 시야")
+                self._preview_dbg_image(tz, d, azd, None,
+                                        f"raw<{s.preview_raw_min_verts} -> empty view")
                 return np.zeros((0, 3)), self._cam_pos_B()
             print(f"  [p1plan] tz={tz:.3f} d={d:.2f} az={azd:+.0f}° — "
                   f"정점 {len(vC):,}")
+            self._preview_dbg_image(tz, d, azd, vC, "")
             self._snap_preview(tz, d, azd, len(vC))
             T_CB = np.asarray(self._T_CB, float)
             xB = (vC / 1000.0) @ T_CB[:3, :3].T + T_CB[:3, 3]
@@ -2070,9 +2301,8 @@ class ArtecMultiPassScanSession:
         #   를 나중에 못 따진다. 좌표계 문제는 눈보다 숫자로 재야 갈린다.
         try:
             import datetime as _dt
-            from pathlib import Path as _Path
-            _o = _Path(__file__).resolve().parents[2] / "output" / "debug"
-            _o.mkdir(parents=True, exist_ok=True)
+            from utils.run_paths import debug_dir
+            _o = debug_dir()                          # output/<RUN>/debug/
             _f = _o / f"preview_points_{_dt.datetime.now():%H%M%S}.npz"
             _extra = {}
             for _i, (_t, _P) in enumerate(
@@ -2086,6 +2316,12 @@ class ArtecMultiPassScanSession:
             print(f"  [p1plan] preview 점군 저장 → {_f.relative_to(_o.parents[1])}")
         except Exception as e:                                  # noqa: BLE001
             print(f"  [p1plan] ⚠ preview 점군 저장 실패({type(e).__name__})")
+        # ★ 첫 패스(똑바로 선 물체)의 preview 는 따로 남긴다 — flip 단계가 다시 preview 를
+        #   돌리면 `preview_result` 가 뒤집힌 물체 것으로 바뀌는데, 뒤집기 되돌리기 피벗에는
+        #   **두 자세의** footprint 중심·높이가 모두 필요하다(`_flip_pivots_B`).
+        if getattr(getattr(self, "_st", None), "master_model", None) is None \
+                or self._st.master_model.scan_count() == 0:
+            self._preview_upright = None       # 아래에서 채운다
         self.preview_result = {
             "points_B": np.asarray(pts, float).copy(),
             "axis_pt_B": np.asarray(axis_pt, float).copy(),
@@ -2095,13 +2331,15 @@ class ArtecMultiPassScanSession:
             "view_poses": list(vps or []),
             "note": plan.note,
         }
+        if getattr(self, "_preview_upright", "unset") is None:
+            self._preview_upright = self.preview_result
         return qs
 
     def _snap_preview(self, tz: float, d: float, azd: float, n_raw: int) -> None:
         """preview 스냅샷 저장 (sim `_snap(stage="preview")` 와 **같은 규칙**).
 
         파일명·폴더·캡션을 sim 과 맞춘다 — 두 쪽 그림을 나란히 놓고 비교하는 것이
-        목적이므로 규칙이 갈라지면 의미가 없다. 저장 위치 `output/debug/preview/`.
+        목적이므로 규칙이 갈라지면 의미가 없다. 저장 위치 `output/<RUN>/debug/cam/preview/`.
         """
         img = getattr(self, "_last_preview_img", None)
         if img is None:
@@ -2514,9 +2752,17 @@ class ArtecMultiPassScanSession:
         except Exception:                                        # noqa: BLE001
             _n_pts = -1
         _ok_frames = int(getattr(sub, "frames_ok", 0) or 0)
-        if 0 <= _n_pts < self.s.nbv_min_patch_pts or _ok_frames < self.s.nbv_min_patch_frames:
+        # 점 문턱은 **master 대비**로도 낮춘다 — 작은 물체는 정상 패치도 몇 천 점뿐이라
+        # 고정 5,000 이면 전부 기각된다(전체 패스에서 실제로 그 일이 났다, 2026-09-23).
+        _n_master = max(0, self._pcd_count_B(st.master_model))
+        _need = self.s.nbv_min_patch_pts
+        if _n_master > 0:
+            _need = min(_need, max(self.s.pass_min_pts_abs,
+                                   int(round(self.s.nbv_patch_pts_frac * _n_master))))
+        if 0 <= _n_pts < _need or _ok_frames < self.s.nbv_min_patch_frames:
             print(f"  [nbv] ✘ 빈 캡처 — 점 {_n_pts:,}(4mm 복셀) · OK 프레임 {_ok_frames} "
-                  f"(기준 {self.s.nbv_min_patch_pts:,}점·{self.s.nbv_min_patch_frames}프레임) → 병합 안 함")
+                  f"(기준 {_need:,}점·{self.s.nbv_min_patch_frames}프레임"
+                  + (f", master {_n_master:,}" if _n_master else "") + ") → 병합 안 함")
             _ev("merge", stage="nbv", pose_idx=st.pose_idx, method="rejected(empty)",
                 n_scans_before=st.master_model.scan_count(), n_pts=_n_pts, frames_ok=_ok_frames)
             if getattr(self, "_nbv", None) is not None:
@@ -2524,7 +2770,8 @@ class ArtecMultiPassScanSession:
             return True
         # nbv 패치도 같은 정리(꼬리 제거 + SerialReg + Outlier) — 예전엔 이 경로만 빠져 있었다.
         sub.model = self._cleanup_model(
-            self._trim_lost_tail(sub.model, int(getattr(sub, "n_tail_lost", 0) or 0)),
+            self._trim_lost_tail(sub.model, int(getattr(sub, "n_tail_lost", 0) or 0),
+                                 getattr(sub, "frame_errs", None)),
             "nbv 정리", outliers=self.s.pass_outlier_removal)
         T_apply = T_pre
         if (self.s.nbv_icp_refine and T_pre is not None
@@ -2769,7 +3016,8 @@ class ArtecMultiPassScanSession:
             _usable = (not sub_result.tracking_lost) or _nb_done > 0 or sub_result.frames_ok >= 30
             if _usable:
                 sub_result.model = self._trim_lost_tail(
-                    sub_result.model, int(getattr(sub_result, "n_tail_lost", 0) or 0))
+                    sub_result.model, int(getattr(sub_result, "n_tail_lost", 0) or 0),
+                    getattr(sub_result, "frame_errs", None))
                 sub_result.model = self._cleanup_model(
                     sub_result.model, "정리", outliers=self.s.pass_outlier_removal)
             else:
@@ -2888,22 +3136,20 @@ class ArtecMultiPassScanSession:
                             R_phys=(R_phys if _is_flip else None),
                             tracking_lost=bool(sub_result.tracking_lost),
                             n_frames=int(sub_result.n_frames))
-        # ★ 빈 IScan 은 master 에 넣지 않는다 (nbv 패치와 같은 게이트, 2026-09-22 run_162620).
-        #   밴드 4(빈 시야, 2,021점)와 flip 재시도 2개(29·31프레임, 2~3천점)가 그대로 master 에
-        #   들어가 Studio 에서 물체 위 100~200mm 허공의 노이즈 구름으로 보였다. dump 는 남긴다.
-        _empty = False
-        try:
-            _T_CB_g = self._T_CB if self._T_CB is not None else np.linalg.inv(self._T_BC)
-            _pcd_g = self._master_to_pcd_B(sub_result.model, _T_CB_g, 4.0,
-                                           T_sc_mm=getattr(self, "_T_scan_color", None))
-            _n_pts_g = 0 if _pcd_g is None else len(_pcd_g.points)
-        except Exception:                                        # noqa: BLE001
-            _n_pts_g = -1
+        # ★ 빈 IScan 은 master 에 넣지 않는다 (2026-09-22 run_162620): 밴드 4(빈 시야, 2,021점)와
+        #   flip 재시도 2개(29·31프레임)가 그대로 들어가 Studio 에서 물체 위 100~200mm 허공의
+        #   노이즈 구름으로 보였다. dump 는 남긴다.
+        #   ⚠ 2026-09-23: 이 게이트가 nbv 패치용 **고정 5,000점**을 쓰는 바람에 run_125718 에서
+        #   정상 flip 패스(725 프레임·4,932점)를 통째로 버렸다 — 작은 물체는 완전한 패스도
+        #   그 정도다. 지금은 master 대비 비율(`_pass_merge_gate`)로 본다.
         _ok_frames_g = int(getattr(sub_result, "frames_ok", 0) or 0)
-        if 0 <= _n_pts_g < self.s.nbv_min_patch_pts or _ok_frames_g < self.s.nbv_min_patch_frames:
-            _empty = True
-            print(f"  [병합] ✘ 빈 IScan — 점 {_n_pts_g:,}(4mm 복셀) · OK 프레임 {_ok_frames_g} "
-                  f"(기준 {self.s.nbv_min_patch_pts:,}점·{self.s.nbv_min_patch_frames}프레임) → master 에 안 넣음")
+        _empty, _n_pts_g, _why_g = self._pass_merge_gate(
+            sub_result.model, st.master_model, _ok_frames_g)
+        if _empty:
+            print(f"\n  [병합] ✘ 빈 IScan — {_why_g} · 점 {_n_pts_g:,} · OK 프레임 "
+                  f"{_ok_frames_g} → master 에 **안 넣음** (dump 는 남는다)")
+            print(f"  [병합]   ⚠ 이 패스의 데이터는 최종 모델에 없다. 의도치 않은 기각이면 "
+                  f"pass_min_* 문턱을 볼 것")
             st.merge_method = "rejected(empty)"
         _ev("merge", stage=stage, pose_idx=st.pose_idx,
             method=getattr(st, "merge_method", "hint" if T_pre is not None else "none"),
@@ -3272,6 +3518,39 @@ class ArtecMultiPassScanSession:
             pcd = pcd.voxel_down_sample(voxel_mm)
         return pcd
 
+    def _pcd_count_B(self, model, voxel_mm: float = 4.0) -> int:
+        """모델의 4mm 복셀 점 수 (실패하면 -1). 병합 게이트 전용."""
+        try:
+            T_CB = self._T_CB if self._T_CB is not None else np.linalg.inv(self._T_BC)
+            pcd = self._master_to_pcd_B(model, T_CB, voxel_mm,
+                                        T_sc_mm=getattr(self, "_T_scan_color", None))
+            return 0 if pcd is None else len(pcd.points)
+        except Exception:                                        # noqa: BLE001
+            return -1
+
+    def _pass_merge_gate(self, sub_model, master_model, ok_frames: int):
+        """**전체 패스**(lookaround/flip)를 master 에 넣을지. 반환 (버릴까, n_pts, 사유).
+
+        점 문턱을 고정값으로 두면 물체 크기에 휘둘린다 — 작은 물체는 완전한 360° 패스도
+        4mm 복셀에서 5~7천점뿐이다(run_125718: master 6,839 · flip 5,894). 그래서
+        **master 대비 비율**로 본다. 프레임 수는 스캔이 일찍 죽은 재시도를 거른다.
+        """
+        n_pts = self._pcd_count_B(sub_model)
+        n_master = self._pcd_count_B(master_model) if master_model is not None else 0
+        n_master = max(0, n_master)
+        need = self.s.pass_min_pts_abs
+        if n_master > 0:
+            need = max(need, int(round(self.s.pass_min_pts_frac * n_master)))
+        if ok_frames < self.s.pass_min_ok_frames:
+            return True, n_pts, (f"OK 프레임 {ok_frames} < {self.s.pass_min_ok_frames} "
+                                 f"(스캔이 일찍 끊긴 패스)")
+        if 0 <= n_pts < need:
+            return True, n_pts, (f"점 {n_pts:,} < {need:,}(4mm 복셀"
+                                 + (f", master {n_master:,}의 "
+                                    f"{self.s.pass_min_pts_frac*100:.0f}%" if n_master else "")
+                                 + ")")
+        return False, n_pts, ""
+
     @staticmethod
     def _master_to_pcd_B(master_model, T_CB_master: np.ndarray,
                          voxel_mm: float, max_frames_per_scan: int = 30,
@@ -3597,6 +3876,15 @@ class ArtecMultiPassScanSession:
         #   없는 물체에서 55° 전회전은 실물 30초 낭비다(2026-09-18).
         if need:
             _ens, _uplen = _nbvp.needs_ensure(gaps, self._nbv.up_sign)
+            # ★ 경계 고리가 없어도 **높이가 모자라면** 뚜껑이 빈 것이다. Poisson 이
+            #   뚫린 윗면을 닫아 버리면 gap 이 0 으로 보인다(run_182946: 물체 114mm,
+            #   메시 84mm 인데 "윗면 gap 0mm — 개구부 없음" 으로 nbv 가 그냥 끝났다).
+            _short = self._cap_shortfall_m(verts)
+            if not _ens and _short >= 0.020:
+                print(f"  [nbv] 윗면 gap 은 0 이지만 메시가 preview 높이보다 "
+                      f"{_short*1000:.0f}mm 짧다 — Poisson 이 뚜껑을 닫은 것으로 보고 "
+                      f"보장 고도각 {need} 실행")
+                _ens = True
             if not _ens:
                 print(f"  [nbv] 보장 고도각 {need} 건너뜀 — 윗면 향한 gap "
                       f"{_uplen*1000:.0f}mm < {_nbvp.ENSURE_MIN_UP_LEN_M*1000:.0f}mm (개구부 없음)")
@@ -3990,16 +4278,83 @@ class ArtecMultiPassScanSession:
         mp = self._master_pts_B_m(80_000)
         return mp if len(mp) else np.asarray(mesh.vertices, float)
 
+    def _preview_dbg_image(self, tz: float, d: float, azd: float,
+                           verts_mm=None, note: str = "") -> None:
+        """preview 탐침 한 번을 lookaround·nbv 와 **같은 거리 이미지**로 남긴다
+        (`output/<RUN_TS>/debug/preview/pNNN_tz###_d###_az###.png`).
+
+        "빈 시야로 봤다" 가 맞는 판정인지 — 물체가 시야에 있는데 점만 안 나온 건지,
+        정말 아무것도 없었는지 — 를 가르는 유일한 단서다. 실패한 캡처도 그린다.
+        끄려면 `MMS_LOOKAROUND_DEBUG_IMG=0`.
+        """
+        if os.environ.get("MMS_LOOKAROUND_DEBUG_IMG", "1") == "0":
+            return
+        try:
+            from utils.nbv.range_debug_image import save_range_image
+            from utils.nbv.standoff import TRACK_CORE_HALF_DEG
+            from utils.run_paths import debug_dir
+            self._pv_dbg_seq = int(getattr(self, "_pv_dbg_seq", 0)) + 1
+            V = (np.asarray(verts_mm, float) / 1000.0 if verts_mm is not None
+                 else np.asarray(getattr(self, "_last_preview_verts", None)
+                                 if getattr(self, "_last_preview_verts", None) is not None
+                                 else np.zeros((0, 3)), float) / 1000.0)
+            dof = self._scanning_range_m()
+            p = float(np.median(np.linalg.norm(V, axis=1))) if len(V) else float("nan")
+            lines = [f"preview {self._pv_dbg_seq:03d}  tz={tz*1000:.0f}mm "
+                     f"d={d*1000:.0f}mm az={azd:+.0f}deg",
+                     f"n={len(V)}  median={p*1000:.0f}mm  "
+                     f"window {dof[0]*1000:.0f}-{dof[1]*1000:.0f}mm"]
+            if note:
+                lines.append(note)
+            save_range_image(
+                str(debug_dir("preview") /
+                    f"p{self._pv_dbg_seq:03d}_tz{tz*1000:.0f}_d{d*1000:.0f}_az{azd:+.0f}.png"),
+                V, dof, TRACK_CORE_HALF_DEG, lines,
+                getattr(self, "_last_preview_img", None))
+        except Exception as e:                                      # noqa: BLE001
+            print(f"  [p1plan] 디버그 이미지 실패({type(e).__name__}: {e})")
+
+    def _cap_shortfall_m(self, mesh_verts) -> float:
+        """preview 가 잰 물체 높이보다 master 메시의 **윗부분이 얼마나 짧은가** (m).
+
+        Poisson 이 뚫린 뚜껑을 닫으면 경계 고리가 사라져 `needs_ensure` 가 '개구부
+        없음' 으로 본다 — 그러면 윗면이 통째로 비어도 nbv 가 아무것도 안 한다.
+        높이를 직접 재서 그 착시를 깬다. 디스크면(h=0) 기준 물체 끝의 거리 차다.
+        preview 가 없으면 0(= 판단 안 함).
+        """
+        try:
+            from utils.nbv import lookaround as p1
+            tt = getattr(self.mms, "turntable_transform", None)
+            pv = (getattr(self, "preview_result", None) or {}).get("points_B")
+            if tt is None or pv is None or len(np.asarray(pv)) < 100:
+                return 0.0
+            ax_pt = np.asarray(tt.axis_point_B, float)
+            ax_dir = np.asarray(tt.axis_dir_B, float)
+            ax_dir = ax_dir / np.linalg.norm(ax_dir)
+
+            def _top(P):
+                # 밀도 기준 꼭대기 (`robust_top_height`) — 분위수는 잡음 꼬리에 끌려
+                # 있지도 않은 33mm '부족분' 을 만들어 낸다(run_102221).
+                H, _ = p1.robust_top_height(np.asarray(P, float), ax_pt, ax_dir)
+                return H
+
+            h_pv, h_me = _top(pv), _top(mesh_verts)
+            if h_pv is None or h_me is None:
+                return 0.0
+            return max(0.0, float(h_pv - h_me))
+        except Exception:                                           # noqa: BLE001
+            return 0.0
+
     def _nbv_dbg_image(self, k: int, K: int, th_act: float, fmh, T_BC_nbv=None) -> None:
         """nbv 정지-촬영 프레임을 lookaround 와 같은 거리 이미지로 남긴다
-        (`output/debug/nbv_<RUN_TS>/nbvNN_stepKK_thDDD.png`). 유효 점군이 모였는지,
+        (`output/<RUN_TS>/debug/nbv/nbvNN_stepKK_thDDD.png`). 유효 점군이 모였는지,
         물체가 시야 어디에 있는지를 눈으로 본다. MMS_LOOKAROUND_DEBUG_IMG=0 으로 끈다."""
         if os.environ.get("MMS_LOOKAROUND_DEBUG_IMG", "1") == "0":
             return
         try:
             from utils.nbv.range_debug_image import save_range_image
             from utils.nbv.standoff import TRACK_CORE_HALF_DEG
-            run_ts = os.environ.get("MMS_RUN_TS", "run")
+            from utils.run_paths import debug_dir
             seq = int(getattr(self, "_nbv_dbg_seq", 0))
             V = (np.asarray(fmh.vertices(), float) / 1000.0
                  if fmh is not None and fmh.vertex_count() > 0 else np.zeros((0, 3)))
@@ -4024,8 +4379,7 @@ class ArtecMultiPassScanSession:
                     cam = ""
             lines = [f"nbv{seq:02d} step{k+1:02d}/{K}  theta={deg}deg",
                      f"n={len(V)}  median={p*1000:.0f}mm  window {dof[0]*1000:.0f}-{dof[1]*1000:.0f}mm{cam}"]
-            save_range_image(os.path.join("output", "debug", f"nbv_{run_ts}",
-                                          f"nbv{seq:02d}_step{k+1:02d}_th{deg:03d}.png"),
+            save_range_image(str(debug_dir("nbv") / f"nbv{seq:02d}_step{k+1:02d}_th{deg:03d}.png"),
                              V, dof, TRACK_CORE_HALF_DEG, lines, tex)
         except Exception as e:                                          # noqa: BLE001
             print(f"  [nbv] 디버그 이미지 실패({type(e).__name__}: {e})")

@@ -19,6 +19,10 @@ from utils.nbv.scan_stage_controller import (
 
 # 모든 output 파일에 같은 타임스탬프(_YYYYMMDD_HHMMSS) 붙여 run 별 구분.
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+# ★ run 산출물 폴더 (2026-09-23): output/<RUN_TS>/ — aligned/(Studio 로 열 것)·final/·final.obj·
+#   timeline.csv·README.txt. 예전엔 output/artec_lookaround_<RUN>{,_raw,.obj,_timeline.csv} 로
+#   흩어져 있었다. 디버그 이미지도 output/<RUN_TS>/debug/<단계>/ (규칙: utils/run_paths.py).
+RUN_DIR = PROJECT_ROOT / "output" / RUN_TS
 # 세션·스트리밍 모듈이 run 별 산출물(이벤트 로그·원시 스캔 덤프)을 같은 태그로 묶는다.
 os.environ.setdefault("MMS_RUN_TS", RUN_TS)
 
@@ -28,7 +32,7 @@ os.environ.setdefault("MMS_RUN_TS", RUN_TS)
 # 나중에 "그때 뭐라고 찍혔더라" 를 복원할 수 없고, 남에게 보여주려면 붙여넣어야
 # 한다. `sim_harness/*` 는 이미 같은 이유로 tee 를 갖고 있었는데(Isaac 콘솔이
 # 출력을 가려서) 본 파이프라인엔 없었다.
-#   output/run_<TS>.log  — 항상 남는다. MMS_NO_LOGFILE=1 로 끌 수 있다.
+#   output/<RUN_TS>/run.log  — 항상 남는다. MMS_NO_LOGFILE=1 로 끌 수 있다.
 import time as _time
 
 _LOG_PATH = None
@@ -106,9 +110,8 @@ if os.environ.get("MMS_NO_LOGFILE") != "1":
 
     try:
         import sys as _sys
-        _LOG_DIR = PROJECT_ROOT / "output"
-        _LOG_DIR.mkdir(parents=True, exist_ok=True)
-        _LOG_PATH = _LOG_DIR / f"run_{RUN_TS}.log"
+        RUN_DIR.mkdir(parents=True, exist_ok=True)   # output/<RUN_TS>/run.log
+        _LOG_PATH = RUN_DIR / "run.log"
         _fh = open(_LOG_PATH, "w", encoding="utf-8", buffering=1)
         _sys.stdout = _Tee(_sys.stdout, _fh)
         _sys.stderr = _Tee(_sys.stderr, _fh)
@@ -203,7 +206,7 @@ if _SCAN_SETTINGS_AVAILABLE:
         preview_settle_s=1.5,
         post_record_settle_s=0.5,
         reset_to_zero_first=True,
-        timeline_csv_path=str(PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}_timeline.csv"),
+        timeline_csv_path=str(RUN_DIR / "timeline.csv"),
     )
 
     # ── Multi-pass: stage_until = **여기까지** 순차 실행 ──────────────────
@@ -244,11 +247,12 @@ if _SCAN_SETTINGS_AVAILABLE:
         #   옵션 없음). 기본 끔 — 최종 sproj(융합 메시 + 텍스처 프레임)를 Artec Studio 에서
         #   열어 Texture(GPU) 하는 것이 수십 초. SDK 로 하려면 `--texturize`.
         do_texturize=False,
-        export_obj_path=str(PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}.obj"),
-        # ★ sproj 저장 **기본 켬**(2026-09-22). raw(정합 전) + 최종본, 각 ~47s.
-        #   데이터 수집은 되므로 이제 정합을 오프라인에서 개선할 원본이 필요하다.
+        export_obj_path=str(RUN_DIR / "final.obj"),
+        # ★ sproj 저장 **기본 켬**(2026-09-22). 두 개가 남는다 — output/<RUN>/aligned/aligned.sproj
+        #   (파이프라인 변환이 적용된 IScan 만, SDK 후처리 전 → Artec Studio 로 열어 수작업
+        #   후처리하는 파일) 과 final/final.sproj(우리 후처리 결과). 각 ~47s.
         #   빠른 반복 테스트면 `--no-sproj`.
-        export_sproj_path=str(PROJECT_ROOT / f"output/artec_lookaround_{RUN_TS}.sproj"),
+        export_sproj_path=str(RUN_DIR / "final.sproj"),
     )
 elif CFG.backend == "isaac":
     # isaac: Artec SDK scan-settings 없이 sim 스캔(IsaacScanSession) 실행.
@@ -311,9 +315,10 @@ def main() -> None:
             print(f"\n[main] === Artec {_pm_desc}  ({_pm_src}) ===")
             print(f"  T_EC: {CFG.T_EC_key}")
             print(f"  fusion: {PROCESS_SETTINGS.fusion}")
+            print(f"  run 폴더: {RUN_DIR}")
             print(f"  export OBJ:  {PROCESS_SETTINGS.export_obj_path}")
-            print(f"  export sproj: "
-                  f"{PROCESS_SETTINGS.export_sproj_path or '끔 (--sproj 로 켜기)'}")
+            _sp = PROCESS_SETTINGS.export_sproj_path
+            print(f"  export sproj: {_sp + '  (+ aligned/aligned.sproj — Studio 용)' if _sp else '끔 (--no-sproj)'}")
 
             # 흐름: home → preview→lookaround→nbv→flip → home  (sim/real 공통)
             #       어디까지 갈지는 --until / stage_until 이 정한다.
@@ -413,6 +418,49 @@ def main() -> None:
                 pass
 
 
+def _spawn_range_view(record: bool = False) -> None:
+    """거리추종·nbv 디버그 이미지 뷰어를 **자식 프로세스**로 띄운다.
+
+    점군 뷰어(`live_scan_view.py`)와 달리 자식으로 띄워도 된다 — 이쪽은
+    Filament/Open3D 가 아니라 OpenCV HighGUI 로 이미 저장된 PNG 를 tail 할
+    뿐이라, 자식 GUI 가 죽던 그 제약이 없다. 실패해도 스캔에는 영향이 없다.
+    """
+    import subprocess
+    script = PROJECT_ROOT / "scripts" / "artec" / "live_range_view.py"
+    if not script.is_file():
+        return
+    try:
+        import sys as _sys
+        kw = {}
+        if os.name == "nt":
+            # 새 콘솔로 떼어 낸다 — 부모가 Ctrl+C 로 죽어도 창이 같이 죽지 않게.
+            kw["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                                   | getattr(subprocess, "DETACHED_PROCESS", 0))
+        argv = [_sys.executable, str(script), "--run", RUN_TS]
+        if record:
+            argv.append("--record")
+        # ★ 자식 출력을 **파일로** 남긴다. DEVNULL 로 버리면 뷰어가 죽어도 흔적이
+        #   없어서 "창이 안 뜬다" 를 추적할 수 없다(2026-09-22).
+        _vlog = RUN_DIR / "debug" / "range_view.log"
+        _vlog.parent.mkdir(parents=True, exist_ok=True)
+        _vf = open(_vlog, "w", encoding="utf-8", buffering=1)
+        argv.insert(1, "-u")                      # 줄 단위 출력 (죽어도 남게)
+        # 자식도 utf-8 로 — 파이프/파일 출력이면 기본이 로케일(cp949)이라 한글·기호에서
+        # 죽는다(2026-09-23). 뷰어 안에서도 reconfigure 하지만 양쪽 다 걸어 둔다.
+        _env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        subprocess.Popen(
+            argv, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL,
+            stdout=_vf, stderr=subprocess.STDOUT, env=_env, **kw)
+        print(f"[main] 디버그 이미지 창 실행 — output/{RUN_TS}/debug/<단계>/ 를 tail "
+              f"(끄려면 --no-range-view)")
+        if record:
+            print(f"[main]   녹화 → output/{RUN_TS}/debug/range.avi")
+        print(f"[main]   창이 안 뜨면 → output/{RUN_TS}/debug/range_view.log 확인")
+    except Exception as e:                                       # noqa: BLE001
+        print(f"[main] ⚠ 디버그 이미지 창 실행 실패({type(e).__name__}: {e}) — 수동: "
+              f"python scripts/artec/live_range_view.py --run {RUN_TS}")
+
+
 def _apply_cli() -> None:
     """실물 파이프라인을 **단계별로** 돌리기 위한 인자.
 
@@ -442,6 +490,12 @@ def _apply_cli() -> None:
                     help="pass 사이 Enter 확인을 생략 (무인 연속 실행)")
     ap.add_argument("--no-viewer", action="store_true",
                     help="라이브 뷰어 스냅샷을 끈다")
+    ap.add_argument("--no-range-view", action="store_true",
+                    help="거리추종·nbv 디버그 이미지 창(자동 실행)을 띄우지 않는다")
+    ap.add_argument("--range-video", action="store_true",
+                    help="그 창이 본 것을 동영상으로도 남긴다 (output/<RUN>/debug/range.avi). "
+                         "기본은 끔 — PNG 는 어차피 남으므로 나중에 "
+                         "`live_range_view.py --run <RUN> --make-video` 로도 만들 수 있다")
     ap.add_argument("--no-recovery", action="store_true",
                     help="tracking lost 자동 복구를 끈다 — 복구 로직을 배제하고 "
                          "원래 스캔이 되는지만 볼 때")
@@ -449,7 +503,7 @@ def _apply_cli() -> None:
                     help="로봇 이동 속도를 K 배로 (예: 0.8). 세 곳에 흩어진 "
                          "속도(계획용·NBV·복구)를 한 번에 조절한다")
     ap.add_argument("--no-sproj", action="store_true",
-                    help="Artec .sproj 저장 생략 (기본은 raw+최종 저장, 각 ~47초)")
+                    help="Artec .sproj 저장 생략 (기본은 output/<RUN>/aligned + final 저장, 각 ~47초)")
     ap.add_argument("--texturize", action="store_true",
                     help="SDK Texturize 실행 (기본 끔 — CPU 단일코어 15~20분. 대신 최종 "
                          "sproj 를 Artec Studio 에서 텍스처링, docs/6_postprocess.md §5)")
@@ -488,6 +542,8 @@ def _apply_cli() -> None:
         m.prompt_on_tracking_lost = False
     if a.no_viewer:
         m.enable_live_viewer = False
+    if not a.no_range_view:
+        _spawn_range_view(record=a.range_video)
     if a.no_recovery:
         m.auto_recovery_enabled = False
     if a.speed_scale is not None:
@@ -506,7 +562,9 @@ def _apply_cli() -> None:
 
     print(f"[main] stage_until={m.stage_until}  max_passes={m.max_passes}  "
           f"planner={m.lookaround_planner_enabled}  recovery={m.auto_recovery_enabled}  "
-          f"prompt={m.prompt_between_passes}  viewer={m.enable_live_viewer}")
+          f"prompt={m.prompt_between_passes}  viewer={m.enable_live_viewer}  "
+          f"range_view={not a.no_range_view}"
+          + ("" if a.no_range_view else f"/rec={a.range_video}"))
 
 
 if __name__ == "__main__":

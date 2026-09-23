@@ -7,9 +7,9 @@
 입력 (run 마다 자동으로 남는 것)
     output/artec_lookaround_<RUN>_raw/*.sproj    IScan 원본(정점·사진·uv, 페이로드는 옆 scans/).
                                                  프레임 변환에는 run 때 적용한 T_pre 가 **이미 박혀** 있다.
-    output/scan_dumps/<RUN>/scanNN_<stage>_poseK.npz  pass 별 메타: 적용 T_pre_mm, stage, pose_idx,
+    output/<RUN>/scan_dumps/scanNN_<stage>_poseK.npz  pass 별 메타: 적용 T_pre_mm, stage, pose_idx,
                                                  R_phys, master_T_CB, T_BC_new, S 등.
-    output/events_<RUN>.jsonl                    어느 병합이 어떤 방법(img/greg/hint)이었나.
+    output/<RUN>/events.jsonl                    어느 병합이 어떤 방법(img/greg/hint)이었나.
 
 하는 일
     sub 스캔(기본: 마지막 flip 스캔)을 npz 의 T_pre 로 **되돌려** 원래 세션 좌표로 만들고,
@@ -29,7 +29,8 @@ sys.path.insert(0, str(ROOT))
 
 
 def _latest_run() -> str:
-    runs = sorted(p.stem.replace("events_", "") for p in (ROOT / "output").glob("events_*.jsonl"))
+    from utils.run_paths import list_runs
+    runs = list_runs()
     if not runs:
         raise SystemExit("output/events_*.jsonl 이 없다 — run 을 먼저 돌릴 것")
     return runs[-1]
@@ -96,7 +97,8 @@ def main() -> int:
     a = ap.parse_args()
     run = a.run or _latest_run()
     sproj = ROOT / "output" / f"artec_lookaround_{run}_raw" / f"artec_lookaround_{run}_raw.sproj"
-    scans_dir = ROOT / "output" / "scan_dumps" / run
+    from utils.run_paths import scan_dumps_dir
+    scans_dir = scan_dumps_dir(run)
     # 2026-09-22 이전 레이아웃(프로젝트 전용 폴더 도입 전) 폴백
     if not sproj.exists() and (ROOT / "output" / f"artec_lookaround_{run}_raw.sproj").exists():
         sproj = ROOT / "output" / f"artec_lookaround_{run}_raw.sproj"

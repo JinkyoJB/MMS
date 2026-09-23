@@ -150,6 +150,11 @@ class TrackingState:
     last_state: Optional[artec_scanning.FrameState] = None
     last_reg_error: float = 0.0         # 가장 최근 frame 의 registration error
     state_counts: dict = field(default_factory=dict)   # FrameState → count
+    #: IScan 에 **들어간 순서대로** 그 프레임의 registration_error.
+    #  ignore_registration_errors=True 라 정합 실패 프레임(err<0)도 스캔에 들어간다 —
+    #  어느 인덱스가 쓰레기인지 여기 없으면 나중에 알 수 없다(2026-09-22: 밴드 전환
+    #  실패로 생긴 중간 쓰레기 ~90 프레임이 남아 Studio 의 scan Err 가 1.1mm).
+    frame_errs: list = field(default_factory=list)
     tracking_lost: bool = False         # 한 번이라도 임계 초과면 True
     last_loss_reason: str = ""
     last_frame_time: float = 0.0        # ★ 마지막 callback 시각 (state 무관)
@@ -194,6 +199,9 @@ class TrackingState:
             if event.frame_state == FS.OK:
                 self.frames_ok += 1
                 self.consecutive_lost = 0
+                # OK 상태 프레임 = IScan 에 추가되는 프레임 (ignore_registration_errors
+                # =True 에서는 정합 실패해도 state 는 OK 로 온다). 순서가 곧 frame index.
+                self.frame_errs.append(float(self.last_reg_error))
             else:
                 self.frames_failed += 1
                 if event.frame_state in (FS.REGISTRATION_FAILED,
@@ -421,6 +429,8 @@ class ArtecStreamingScanResult:
     #  "축거리 = 표면거리 + 반경" 의 그 반경이다. nbv 축거리가 preview p95 반경(과대)
     #  대신 이걸 쓴다(2026-09-22 run_162620: preview 92mm vs 실측 ~25mm → nbv 빈 캡처 2회).
     band_standoff_m: List[tuple] = field(default_factory=list)
+    #: IScan 프레임별 registration_error (추가 순서). <0 = 정합 실패 = 버릴 프레임.
+    frame_errs: list = field(default_factory=list)
     #: lost 로 끝났을 때 IScan **꼬리**의 미정합 프레임 수 (ignore_registration_errors=True 라
     #  reg<0 프레임도 scan 에 들어간다). 병합 전에 잘라내라고 알려 준다.
     n_tail_lost: int = 0
@@ -784,33 +794,47 @@ class ArtecStreamingScanSession:
                                             _last_ok_fr = ev.frame_mesh
                             except Exception:                    # noqa: BLE001
                                 pass
-                            _dead = bool(getattr(_live_trk, "dead_state", {}).get("dead"))
-                            if _dead and _live_since >= _live_trk.every:
-                                # 밴드 시작에서 "이동에 측정이 안 따라옴" 으로 중단된 상태.
-                                # 예전엔 여기서도 update() 를 불러 retarget 이 조용히 거부되고
-                                # 트래커가 "재겨냥 실패(IK/충돌)" 로 오표기했다(run_160447 39회).
+                            # ★ 판정하든 안 하든 **주기마다 한 장 남긴다**(2026-09-23).
+                            #   예전에는 이미지가 `update()` 를 부르는 가지 안에만 있어서,
+                            #   추종이 꺼졌거나(dead) 프레임이 성겼거나 추적을 잃은 밴드는
+                            #   **한 장도 안 남았다** — 정작 눈으로 봐야 하는 밴드가 그
+                            #   밴드다(run_102221: 윗밴드 프레임이 114점이라 판정이 안 걸려
+                            #   뷰어가 이전 장에 멈춰 있었다). 이유를 자막으로 적는다.
+                            if _live_since >= _live_trk.every:
                                 _live_since = 0
-                                if not getattr(_live_trk, "_dead_logged", False):
-                                    print("  [거리추종] 이 밴드 추종 중단 상태 — live 판정 생략")
-                                    _live_trk._dead_logged = True
-                            elif (_live_since >= _live_trk.every and _last_ok_v is not None
-                                    and len(_last_ok_v) >= _TRK_MIN_PTS
-                                    and self._track_usable(tracking)):
-                                _live_since = 0
-                                try:
-                                    _d_new = _live_trk.update(
-                                        int(tracking.frames_ok), _live_d, _last_ok_v,
-                                        np.zeros(3), _live_rt)
-                                except Exception as e:           # noqa: BLE001
-                                    print(f"  [거리추종] live 판정 실패({e}) — 유지")
-                                    _d_new = _live_d
-                                self._dbg_range_image(
-                                    f"s{self._dbg_seq:02d}_band{_bi+1}_live_f{int(tracking.frames_ok):04d}",
-                                    _last_ok_v, _live_d, None,
-                                    f"theta={np.degrees(theta_rad):+.0f}deg  "
-                                    f"-> d={_d_new*1000:.0f}mm", frame=_last_ok_fr)
-                                # ★ 예전엔 frame 을 안 넘겨 밴드 시작 프레임의 텍스처가 live 이미지
-                                #   전부에 복사됐다(run_161342: live 45장 텍스처 동일). 3D 점은 맞았다.
+                                _dead = bool(getattr(_live_trk, "dead_state", {}).get("dead"))
+                                _d_new = _live_d
+                                if _dead:
+                                    # 밴드 시작에서 "이동에 측정이 안 따라옴" 으로 중단된 상태.
+                                    # 여기서 update() 를 부르면 retarget 이 조용히 거부돼
+                                    # "재겨냥 실패(IK/충돌)" 로 오표기된다(run_160447 39회).
+                                    _note = "standoff off for this band"
+                                    if not getattr(_live_trk, "_dead_logged", False):
+                                        print("  [거리추종] 이 밴드 추종 중단 상태 — live 판정 생략")
+                                        _live_trk._dead_logged = True
+                                elif _last_ok_v is None:
+                                    _note = "no OK frame"
+                                elif len(_last_ok_v) < _TRK_MIN_PTS:
+                                    _note = f"sparse n={len(_last_ok_v)} < {_TRK_MIN_PTS} -> hold"
+                                elif not self._track_usable(tracking):
+                                    _note = "tracking lost -> hold"
+                                else:
+                                    try:
+                                        _d_new = _live_trk.update(
+                                            int(tracking.frames_ok), _live_d, _last_ok_v,
+                                            np.zeros(3), _live_rt)
+                                    except Exception as e:       # noqa: BLE001
+                                        print(f"  [거리추종] live 판정 실패({e}) — 유지")
+                                        _d_new = _live_d
+                                    _note = f"-> d={_d_new*1000:.0f}mm"
+                                if _last_ok_v is not None:
+                                    # ★ frame 을 같이 넘겨야 그 순간 텍스처가 붙는다 — 예전엔
+                                    #   밴드 시작 프레임 사진이 live 이미지 전부에 복사됐다.
+                                    self._dbg_range_image(
+                                        f"s{self._dbg_seq:02d}_band{_bi+1}_live_f{int(tracking.frames_ok):04d}",
+                                        _last_ok_v, _live_d, None,
+                                        f"theta={np.degrees(theta_rad):+.0f}deg  {_note}",
+                                        frame=_last_ok_fr)
                                 if _d_new != _live_d:
                                     _live_d = _d_new
                                     tracking.mark_started()      # 이동 공백 = stall 아님
@@ -1023,6 +1047,7 @@ class ArtecStreamingScanSession:
             n_bands=len(bands),
             n_bands_done=n_bands_done,
             band_standoff_m=list(band_standoff_m),
+            frame_errs=list(tracking.frame_errs),
             # ignore_registration_errors=False 면 미정합 프레임은 애초에 scan 에 없다 — 자르면 안 됨
             n_tail_lost=(int(max(tracking.consecutive_reg_err, tracking.consecutive_lost))
                          if (tracking.tracking_lost and s.ignore_registration_errors) else 0),
@@ -1089,7 +1114,7 @@ class ArtecStreamingScanSession:
             return None
         return best / 1000.0                     # mm → m (원점 = 카메라)
 
-    # ── 거리추종 디버그 이미지 (output/debug/lookaround_<RUN_TS>/) ────────────
+    # ── 거리추종 디버그 이미지 (output/<RUN_TS>/debug/<stage>/) ──────────────
     def _dbg_range_image(self, tag: str, verts_m, d_axis_m: float, p_m,
                          note: str = "", frame=None) -> None:
         """정점을 각도 좌표로 펼친 거리 이미지 + (있으면) 텍스처 프레임을 저장한다.
@@ -1100,8 +1125,12 @@ class ArtecStreamingScanSession:
         try:
             from utils.nbv.range_debug_image import save_range_image
             from utils.nbv.standoff import TRACK_CORE_HALF_DEG, core_mask_camera_frame
-            run_ts = os.environ.get("MMS_RUN_TS", "run")
-            d = os.path.join("output", "debug", f"lookaround_{run_ts}")
+            from utils.run_paths import debug_dir
+            # ★ 단계별 폴더 — 예전엔 "lookaround_" 로 박혀 있어 flip 밴드 캡처 이미지가
+            #   lookaround 폴더에 섞였다(2026-09-22). stage_label 은 "lookaround"/"flip".
+            #   위치는 output/<RUN>/debug/<stage>/ (utils/run_paths.py, 2026-09-23).
+            _stage = str(getattr(self.s, "stage_label", "lookaround") or "lookaround")
+            d = str(debug_dir(_stage))
             V = np.asarray(verts_m, float)
             m = core_mask_camera_frame(V) if len(V) else np.zeros(0, bool)
             p_core = (float(np.median(np.linalg.norm(V[m], axis=1))) if m.sum() else float("nan"))

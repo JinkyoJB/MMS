@@ -7,7 +7,7 @@ nbv 는 반복마다 gap 을 고르고(겨냥), 부분 스윕으로 찍고(수�
 카메라가 정말 그 gap 을 보는지, 찍힌 점이 그 gap 을 메우는지, 정합이 옆으로 붙였는지는
 그림으로 봐야 한다. Isaac 뷰포트 오버레이는 sim 에만 있고 real 엔 없다.
 
-무엇을 남기나 — 반복마다 `output/debug/nbv/nbv_NN.npz` + `nbv_NN.png`
+무엇을 남기나 — 반복마다 `output/<RUN>/debug/nbv_plan/nbv_NN.npz` + `nbv_NN.png`
     master        정합 대상(누적 점군, base, m)          gaps_p/n/L  후보 전부
     chosen        고른 후보 인덱스(-1=없음), mode        ensure | frontier | fallback
     eye/target    카메라 위치·조준점 (base, m)           theta/span  턴테이블 중심각·스윕 폭
@@ -17,7 +17,7 @@ nbv 는 반복마다 gap 을 고르고(겨냥), 부분 스윕으로 찍고(수�
     python scripts/nbv/nbv_debug_view.py            # Filament 창, 디렉터리 tail, [ ] 로 반복 이동
     PNG 는 창 없이도 남는다(위에서 본 XY · 옆에서 본 XZ).
 
-끄기: MMS_NBV_DEBUG=0.  디렉터리: MMS_NBV_DEBUG_DIR (기본 output/debug/nbv).
+끄기: MMS_NBV_DEBUG=0.  디렉터리: MMS_NBV_DEBUG_DIR (기본 output/<RUN>/debug/nbv_plan).
 파이프라인을 절대 멈추지 않는다 — 모든 공개 메서드는 예외를 삼킨다.
 """
 from __future__ import annotations
@@ -37,7 +37,10 @@ class NbvDebugDump:
         if enabled is None:
             enabled = os.environ.get("MMS_NBV_DEBUG", "1") == "1"
         self.enabled = bool(enabled)
-        self.dir = out_dir or os.environ.get("MMS_NBV_DEBUG_DIR", "output/debug/nbv")
+        if not (out_dir or os.environ.get("MMS_NBV_DEBUG_DIR")):
+            from utils.run_paths import debug_dir       # output/<RUN>/debug/nbv_plan/
+            out_dir = str(debug_dir("nbv_plan"))
+        self.dir = out_dir or os.environ.get("MMS_NBV_DEBUG_DIR")
         if not os.path.isabs(self.dir):          # cwd 가 바뀌어도 리포 밑에 쌓이게
             _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             self.dir = os.path.join(_root, self.dir)

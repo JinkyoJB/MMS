@@ -136,11 +136,59 @@ MIN_PLAN_PTS: int = 100
 #  "못 본 쪽" 을 "없는 면" 으로 오독하지 않는다(`collect_planning_points` 주석).
 PREVIEW_THETAS = (0.0, math.pi / 2, math.pi, 3 * math.pi / 2)
 
+#: 물체 꼭대기를 정할 때 "위에서 내려오며 처음으로 전체의 이 비율 이상을 담는 5mm 구간".
+#  분위수(p1·max)는 성긴 잡음 꼬리에 끌린다 — 2026-09-23 run_102221: preview p1 = 119mm 인데
+#  밀도 기준은 75~85mm, master 스캔도 80~85mm. 그 40mm 차이로 (1) 윗밴드가 허공(109·119mm)을
+#  돌아 매번 비었고, (2) flip 되돌리기 반사면(H/2)이 20mm 위로 잡혀 flip 의 뒷면이 master 의
+#  윗면 높이에 겹쳤고, (3) 뚜껑 보강 자세가 허공을 겨눴다.
+TOP_DENSITY_FRAC = 0.02
+TOP_BIN_M = 0.005
+
+
+def robust_top_height(pts_B, axis_pt, axis_dir, frac: float = TOP_DENSITY_FRAC,
+                      r_max: float = 0.16, bin_m: float = TOP_BIN_M):
+    """디스크면(축점, h=0) 기준 **물체 꼭대기까지의 높이 H (m, 양수)** 를 밀도로 잰다.
+
+    반환 (H, 방향부호). 방향부호 = 물체가 있는 쪽의 h 부호(-1 = 위가 −axis_dir).
+    점이 부족하면 (None, None). 단순 분위수가 아니라 5mm 구간 히스토그램에서 위에서부터
+    내려오며 처음으로 `frac` 이상을 담는 구간의 **먼 쪽 경계**를 꼭대기로 본다.
+    """
+    P = np.asarray(pts_B, float)
+    if P.ndim != 2 or len(P) < 50:
+        return None, None
+    a = np.asarray(axis_dir, float)
+    a = a / (np.linalg.norm(a) + 1e-12)
+    v = P - np.asarray(axis_pt, float)
+    h = v @ a
+    r = np.linalg.norm(v - np.outer(h, a), axis=1)
+    h = h[r < r_max]
+    if len(h) < 50:
+        return None, None
+    sgn = -1.0 if float(np.median(h)) < 0.0 else +1.0
+    u = h * sgn                                      # 클수록 위 (양수)
+    top_max = float(u.max())
+    edges = np.arange(0.0, top_max + bin_m, bin_m)
+    cnt, _ = np.histogram(u, bins=edges)
+    need = max(30, int(round(frac * len(u))))
+    for i in range(len(cnt) - 1, -1, -1):
+        if cnt[i] >= need:
+            return float(edges[i + 1]), sgn
+    return float(np.percentile(u, 99)), sgn
+
 #: 물체 상단을 **이미 안 뒤** 그 위를 겨눌 때의 거리탐침 횟수.
 #  높이 스윕은 `tz = 관측 상단 + rise_m` 로 설계상 물체 위를 겨눈다 — 거기가 비는
 #  것은 "거리가 틀렸다" 가 아니라 "물체가 끝났다" 는 신호다. 앞 높이에서 창중앙에
 #  맞춰 검증된 거리를 그대로 쓰므로 한 번만 확인하면 충분하다.
 ABOVE_TOP_DIST_TRIES = 1
+#: 높이 오르기(확인 탐침) 생략 조건 — **그 프레임**의 밀도 상단이 조준높이 위로 이 비율 ×
+#  (d·tan(vfov/2)) 안이면 물체 끝이 시야 안에 보인 것이다. 시야 반높이는 d·tan(vfov/2)·cos(el)
+#  인데 el 을 여기서 모르므로 0.5 로 보수적으로 잡는다(el≤60° 에서 cos≥0.5).
+#  판정을 **누적이 아니라 프레임**으로 하는 이유: 누적은 아래 밴드 점이 압도적이라 2% 문턱을
+#  윗부분이 못 넘어 키 큰 물체를 조기 종료시킨다(합성시험 250mm → 125mm 에서 멈춤).
+#  run_125718(눕힌 병 h=55mm): 조준 49mm·d=300 → 허용 49+38=87mm, 프레임 밀도상단 70~75mm
+#  → 오르기 불필요. 옛 규칙은 max(잡음 한 점 142mm)에 끌려 167mm 허공을 네 방위 모두 찍었다
+#  (8 이동 중 4 낭비 · 약 30초).
+TOP_SEEN_FOV_FRAC = 0.5
 
 
 @dataclass
@@ -807,6 +855,7 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
     d_cur = float(np.clip(preview_start_distance(dof), d_lo, d_hi))
     acc = []
     theta_of = []        # acc[i] 가 어느 턴테이블 각에서 왔나 (진단용)
+    prev_top = -np.inf   # 확정된 물체 상단 (s·z 스칼라) — 방위 간 공유
     n_cap = n_move = 0
     for theta in thetas:
         # ★ 회전 성공 여부를 **확인한다.** 실패했는데 그대로 찍으면 다른 방위의
@@ -822,8 +871,12 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
         # 높이는 **up_sign 방향으로** 올린다. 아래 h(·) 는 "위쪽 높이" 스칼라이고
         # up_sign=+1 이면 기존 식과 완전히 같다.
         s = float(np.sign(up_sign)) or 1.0
-        tz, prev_top = float(axis_pt[2]) + s * start_off_m, -np.inf
+        # ★ 상단은 방위 간 공유 — 앞 방위에서 확정한 상단(prev_top)보다 이 방위의 점이
+        #   top_eps 이상 높지 않으면 오르지 않는다. 예전엔 방위마다 −inf 로 초기화해
+        #   같은 확인 탐침을 4번 반복했다.
+        tz = float(axis_pt[2]) + s * start_off_m
         for _ in range(max_heights):
+            frame_pts = None                   # 이 높이에서 마지막으로 쓸 만했던 프레임
             if adaptive:
                 d, d_anchor, n_blind = d_cur, d_cur, 0
                 # ★ **"물체가 없다" 와 "거리가 틀렸다" 를 구분한다.**
@@ -860,6 +913,7 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
                         acc.append(rot_about_axis(pts, axis_pt, axis_dir, -theta))
                         theta_of.append(float(theta))
                         n_cap += 1
+                        frame_pts = pts            # 높이 판정은 이 프레임으로
                     if not useful:
                         # ★ 쓸 만한 반환이 없다 = **방향을 모른다.** 가까이·멀리를
                         #   번갈아 벌려 가며 찾는다. 한쪽만 믿고 가면 "너무 가까워서
@@ -924,14 +978,28 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
                         acc.append(rot_about_axis(pts, axis_pt, axis_dir, -theta))
                         theta_of.append(float(theta))
                         n_cap += 1
+                        frame_pts = pts
                     elif log and pts is not None and len(pts):
                         log(f"  d={d*1000:.0f}mm pts={len(pts)}점뿐 "
                             f"(<{min_pts}) — 노이즈로 보고 버림")
-            # 물체 상단 = up_sign 방향 최댓값 (base 프레임이면 z 최소)
-            top = max(((s * a[:, 2]).max() for a in acc), default=s * tz)
+            # 물체 상단 — **그 프레임의 밀도 기준**(robust_top_height). max 는 잡음 한 점에
+            #   끌려 허공을 겨눈다(run_125718: 실제 55mm 인데 142mm 로 보고 167mm 를 찍음).
+            top = _frame_top(frame_pts, axis_pt, axis_dir, s, default=-np.inf)
+            if not np.isfinite(top):            # 이 높이에서 쓸 만한 프레임이 없었다
+                break
             if top - prev_top < top_eps_m:      # 상단이 안 늘면 종료 (GT 불요)
                 break
             prev_top = top
+            # ★ 물체 끝이 **이미 시야 안에** 보였으면 위를 한 번 더 찍을 이유가 없다.
+            #   조준높이에서 상단까지가 시야 반높이(보수적 0.5·d·tan(vfov/2)) 안이면 끝.
+            #   (방위마다 되풀이하던 확인 탐침이 여기서 빠진다.)
+            half_v = TOP_SEEN_FOV_FRAC * float(d_cur) * sensor.tan_v
+            if top - s * tz < half_v:
+                if log:
+                    log(f"  상단 {(top - s * float(axis_pt[2]))*1000:.0f}mm 가 시야 안"
+                        f"(조준 {(s * tz - s * float(axis_pt[2]))*1000:.0f}mm "
+                        f"+ 시야 {half_v*1000:.0f}mm) — 높이 오르기 생략")
+                break
             tz = s * (top + rise_m)
     move_turntable(0.0)
     pts = np.vstack(acc) if acc else np.zeros((0, 3))
@@ -944,6 +1012,16 @@ def collect_planning_points(preview_at, move_turntable, axis_pt, axis_dir,
     collect_planning_points.last_patches = [
         (float(t), np.asarray(P, float).copy()) for t, P in zip(theta_of, acc)]
     return pts
+
+
+def _frame_top(frame_pts, axis_pt, axis_dir, s: float, default: float) -> float:
+    """그 프레임의 **밀도 상단**을 s·z 스칼라로. 점이 적으면 max 로(옛 동작)."""
+    if frame_pts is None or len(frame_pts) == 0:
+        return default
+    H, _ = robust_top_height(frame_pts, axis_pt, axis_dir)
+    if H is None:
+        return float((s * np.asarray(frame_pts, float)[:, 2]).max())
+    return s * float(axis_pt[2]) + float(H)
 
 
 def _log_theta_merge(acc, theta_of, axis_pt, axis_dir, up_sign, log) -> None:
@@ -1277,7 +1355,16 @@ BAND_GAIN_MIN_COV = 0.035
 CAP_COVER_MIN = 0.50          # 이 비율 미만이면 내려다보는 자세를 하나 더 넣는다
 CAP_EL_MIN_DEG = 50.0         # 윗면 보강 자세의 최소 고도각
 CAP_ZONE_M = 0.03             # '상단부' 로 볼 두께
-CAP_NORMAL_COS = 0.866        # 법선이 위와 이루는 각 ≤30° 를 '윗면' 으로 본다
+CAP_NORMAL_COS = 0.866
+#: 윗면 보강 자세를 고를 때, 최고점수에서 이만큼 안이면 **더 가파른 el** 을 택한다.
+#  채점에 쓰는 cap 점은 preview 가 옆(el=30°)에서 본 **테두리**뿐이라, 정작 채워야 할
+#  평평한 윗면 **중앙**은 점이 없어 점수에 안 들어간다. 수평면의 입사각은 90°−el 이므로
+#  (el=50°→40°, 70°→20°) 가파를수록 실제 품질이 낫고, 실물에서도 el=70 으로 윗면이
+#  잘 찍혔다(2026-09-19 사용자 관찰). 2026-09-22 run_184746 근거.
+CAP_SCORE_MARGIN = 0.15
+#: 상단부 점 중 위쪽 법선 점이 전체의 이 비율 이상이면 '넓은 수평 윗면' — 커버율과 무관하게
+#  윗면 보강 자세를 넣는다 (근거는 `_augment_top_face` 주석).
+CAP_FORCE_FRAC = 0.05        # 법선이 위와 이루는 각 ≤30° 를 '윗면' 으로 본다
 
 
 def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
@@ -1291,15 +1378,35 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
     s_up = float(np.sign(up_sign)) or 1.0
     n_up = nrm_obj[:, 2] * s_up                 # +1 = 위를 향함
     z_up = z * s_up                             # 클수록 위
-    top_up = float(z_up.max())
-    cap = (n_up > CAP_NORMAL_COS) & (z_up > top_up - CAP_ZONE_M)
-    if int(cap.sum()) < 50:
+    # ★ 꼭대기는 max 가 아니라 **밀도 기준** — 잡음 몇 점이 위에 떠 있으면 뚜껑 자세가
+    #   허공을 겨눈다(run_102221: max 119mm vs 실제 80mm).
+    _z_bottom = float(np.quantile(z, 0.995 if s_up < 0 else 0.005))   # 디스크 쪽 끝
+    _H, _ = robust_top_height(pts_obj, np.r_[axis_xy, _z_bottom], np.array([0.0, 0.0, 1.0]))
+    top_up = float(z_up.max()) if _H is None else float(_z_bottom * s_up + _H)
+    zone = z_up > top_up - CAP_ZONE_M
+    cap = (n_up > CAP_NORMAL_COS) & zone
+    # ★ 임계를 **점군 밀도에 비례**시킨다. 예전의 절대 50점은 preview 밀도(7천점)에
+    #   비해 임의적이었고, 2026-09-22 run_184746 은 윗면 점이 **49개**여서 한 점 차이로
+    #   '윗면 없음' 판정 → 밴드 3개가 전부 el=30° → 뚜껑에 구멍이 남았다.
+    #   (상단부 131점의 법선 n_up 은 p50 +0.81 · max +1.00 — 분명히 윗면이 있었다.)
+    #   구·원뿔처럼 진짜 평평한 윗면이 없는 물체는 이 문턱이 아니라 **아래 커버율
+    #   판정**이 걸러 준다: 옆 밴드가 이미 그 면을 보므로 cap_frac 이 높게 나온다.
+    n_cap_min = max(15, int(round(0.002 * len(pts_obj))))
+    if int(cap.sum()) < n_cap_min:
+        if not quiet:
+            print(f"[lookaround] 윗면 보강 판단 — 상단 {CAP_ZONE_M*1000:.0f}mm 의 "
+                  f"위쪽 법선 점 {int(cap.sum())} < {n_cap_min} → 윗면이라 할 면이 없다고 봄")
         return False                            # 윗면이라 할 면이 없음 (구·원뿔 등)
     cov = np.zeros(len(pts_obj), dtype=bool)
     for e in evals:
         cov |= e.seen_mask
     cap_frac = float(cov[cap].mean())
-    if cap_frac >= CAP_COVER_MIN:
+    # ★ 윗면이 **넓은 수평면**(위쪽 법선 점이 전체의 5% 이상)이면 커버율과 무관하게 넣는다.
+    #   옆 밴드(el≤40°)는 수평면을 입사각 50°+ 로밖에 못 봐 실제 스캔에 구멍이 남는데,
+    #   preview 점 기반 커버율은 그걸 못 잰다(run_102221: 라벨면 점 2,182개가 el=30 에서
+    #   "70% 커버" 로 나와 보강이 빠졌고 실제 메시엔 라벨면에 구멍). 대가는 전회전 1회.
+    _force = int(cap.sum()) >= max(n_cap_min, int(round(CAP_FORCE_FRAC * len(pts_obj))))
+    if cap_frac >= CAP_COVER_MIN and not _force:
         return False
     cap_els = [float(e) for e in els if float(e) >= CAP_EL_MIN_DEG]
     if not cap_els:
@@ -1309,16 +1416,27 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
         return False
     tz_cap = s_up * (top_up - CAP_ZONE_M)
     best = None
-    for el in cap_els:
+    # ★ **높은 el 부터** 본다. 수평 윗면의 법선은 위를 향하므로 입사각 = 90°−el 이다
+    #   (el=50° → 40°, el=70° → 20°). 커버 점수가 같으면(성긴 preview 에서는 쉽게
+    #   포화된다) 입사각이 나은 쪽이 실제 스캔 품질이 낫다 — 아래 비교가 strict `>`
+    #   라 동점이면 먼저 본 **높은 el** 이 남는다. 실물 관찰과도 맞는다(el=70 으로
+    #   윗면이 잘 찍혔다, 2026-09-19).
+    cands = []
+    for el in sorted(cap_els, reverse=True):
         for so in sos:
             pose = make_view_pose(axis_xy, float(tz_cap), el, 0.0, so,
                                   up_sign)
             ev = evaluate_viewpoint(pts_obj, nrm_obj, axis_xy, pose,
                                     sensor, n_theta=n_theta)
-            sc = float(ev.seen_mask[cap].mean())
-            if best is None or sc > best[2]:
-                best = (pose, ev, sc)
-    if best is None or best[2] <= cap_frac:
+            cands.append((float(ev.seen_mask[cap].mean()), float(el), pose, ev))
+    if not cands:
+        return False
+    sc_max = max(c[0] for c in cands)
+    near = [c for c in cands if c[0] >= sc_max - CAP_SCORE_MARGIN]
+    el_pick = max(c[1] for c in near)             # 동점·근소차면 가파른 쪽
+    pick = max((c for c in near if c[1] == el_pick), key=lambda c: c[0])
+    best = (pick[2], pick[3], pick[0])
+    if best[2] <= cap_frac and not _force:
         return False
     best[0].is_cap = True                       # 밴드가 아님 — 정렬/겹침 판단에서 구분
     poses.append(best[0])
@@ -1326,7 +1444,8 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
     if not quiet:
         print(f"[lookaround] 윗면 보강 자세 추가 — el={best[0].el_deg:.0f}° "
               f"tz={best[0].target_z*1000:.0f}mm: 뚜껑 커버 "
-              f"{cap_frac*100:.0f}% → {best[2]*100:.0f}%")
+              f"{cap_frac*100:.0f}% → {best[2]*100:.0f}%"
+              + (f"  (넓은 수평 윗면: 위쪽 법선 점 {int(cap.sum())}/{len(pts_obj)} → 강제)" if _force else ""))
     return True
 
 
@@ -1470,8 +1589,27 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
     fill_target/fill_min 은 SLAM 트래킹 요구치에 정렬해 넘길 것 (real 캘리브)."""
     sensor = sensor or SensorModel()
     z = pts_obj[:, 2]
-    # 강건 z-범위 (노이즈/유령점 소수가 밴드 수를 부풀리지 않게 분위수 사용)
+    # 강건 z-범위 — 분위수(0.5%)로는 성긴 잡음 꼬리(preview 의 ~4%)를 못 거른다. 물체가
+    # 있는 쪽(위) 끝은 **밀도 기준**(`robust_top_height`, 2%)으로 자른다. run_102221:
+    # 80mm 물체에 밴드가 109·119mm 까지 잡혀 윗밴드가 허공을 돌았다.
     z_lo, z_hi = float(np.quantile(z, 0.005)), float(np.quantile(z, 0.995))
+    # 기준점 = 물체 **바닥**(디스크 쪽 끝). up_sign<0 이면 위가 −z 라 바닥은 z 큰 쪽.
+    _s_up = float(np.sign(up_sign)) or 1.0
+    _z_bottom = z_hi if _s_up < 0 else z_lo
+    _H, _ = robust_top_height(pts_obj, np.r_[axis_xy, _z_bottom], np.array([0.0, 0.0, 1.0]))
+    if _H is not None:
+        _z_top = _z_bottom + _s_up * _H
+        if _s_up < 0:
+            z_lo = max(z_lo, _z_top)
+        else:
+            z_hi = min(z_hi, _z_top)
+        # ★ 꼬리 점은 **계획 점군에서 아예 뺀다** — z 범위만 자르면 seen-span·커버율·
+        #   윗면 판정이 여전히 꼬리 점을 세어 서로 안 맞는다(zspan/h 가 1.76 로 나옴).
+        _keep = ((z >= _z_top - 0.010) if _s_up < 0 else (z <= _z_top + 0.010))
+        if 50 <= int(_keep.sum()) < len(z):
+            pts_obj = pts_obj[_keep]
+            nrm_obj = nrm_obj[_keep]
+            z = pts_obj[:, 2]
     sos, _ = _standoff_candidates(pts_obj, axis_xy, sensor)
     tzs = [float(np.quantile(z, q)) for q in (0.35, 0.5, 0.65)]
 
