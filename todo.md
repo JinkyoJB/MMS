@@ -34,8 +34,15 @@ Studio 에서 확인된 증상: **2·3·4·5면(옆면)이 lookaround·flip 양�
 밴드가 4%p 이상 더 덮으면 밴드를 유지한다. 검증(이득 부족 강제): 옛 동작 단일+윗면(옆면 55.4%)
 → 새 동작 3밴드+윗면(옆면 **80.3%**).
 
-- [ ] **다음 run 에서 확인**: el 20·25° 가 실제로 채택되는지(`도달 자세 없음` 로그 확인),
-      로그의 `옆면(법선 수평±30°) 커버`, `[nbv] 축거리 … ✓`
+**후속 (run_144057 이 135151 보다 나빠진 원인, 2026-09-23 오후)** — 옆면 채점 항이 **먼 standoff**
+(옆면이 더 들어옴)를 편들어 cap 354·flip 351mm 가 선택됐고(완주 run 은 299·309), 표면이 창 far 끝에
+걸려 3D 가 안 나오고 거리추종 사망판정이 오작동했다. 고친 것: standoff 가까운 후보 선호
+(`STANDOFF_NEAR_W`), 사망판정 포화 가드, 밴드 이동 재전진 상한(60스텝, 넘으면 새 IScan),
+nbv 패치 프레임 문턱(step 모드 3 — 예전엔 **모든 nbv 패치가 기각**됐었다). `docs/3_lookaround.md` §4c.
+
+- [ ] **다음 run 에서 확인**: `자세 el=… s=…` 의 s 가 후보 중 최솟값인지 · 로그의
+      `옆면(법선 수평±30°) 커버` · `[nbv] 축거리 … ✓` · nbv 패치가 `scan 병합` 되는지 ·
+      `debug/nbv_plan/` 에 파일이 생기는지 · 밴드 이동에서 `이 IScan 포기` 후 새 IScan 으로 이어지는지
 - [ ] **미규명**: nbv 의 `물체근접 42` 기각. gap 겨냥은 표면 기준 225mm 를 쓰므로 위 반경과
       무관하다. `EYE_CLEAR_M`(150mm) 검사가 `_guard_pts`(메시∪preview∪master)의 어떤 점에
       걸리는지 오프라인으로 재현해 볼 것 — tilt 75° 같은 접선 방향은 정당한 기각일 수 있다
@@ -107,6 +114,11 @@ Studio 에서 확인된 증상: **2·3·4·5면(옆면)이 lookaround·flip 양�
 Texturize 는 CPU 단일코어 15~20분(Studio GPU 는 1분) · Poisson `fillType=ALL` 은 열린 끝을 부풀린다 ·
 **watertight 가 안 되는 진짜 이유는 융합 설정이 아니라 커버리지**(바닥면·라벨면 미수집).
 
+- [ ] 🔴 **저장된 프로젝트로는 텍스처링이 안 된다** (2026-09-23 실측): 프레임 UV 가 저장→로드에서
+      전부 NaN, SDK `texturize()` `0x80010203`. **직접 굽기를 구현해 뒀다** — run 이
+      `texture_frames/` 에 사진+uv+정점을 남기고 `scripts/artec/bake_texture.py` 가 아무 메시에나
+      정점 색으로 굽는다(합성 시험 통과, **실물 프레임 미검증**). 다음 run 뒤 `--mesh final.obj` 로
+      한 번 돌려 볼 것. UV 아틀라스(OBJ+png)는 v2 몫. 상세: `docs/6_postprocess.md` §5
 - [ ] Texturize 를 GPU 로 (Studio CLI/배치 가능한지 조사)
 - [ ] 최종 메시 품질 검사 자동화 — boundary edge·조각 수·watertight (`reg_hint_fusion.py` 가 이미 잰다)
 

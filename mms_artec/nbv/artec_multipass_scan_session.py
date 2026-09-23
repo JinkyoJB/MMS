@@ -309,6 +309,12 @@ class ArtecMultiPassScanSessionSettings:
     # 기본 OFF — scan/성능 무영향. CloudCompare 로 검증. docs §3.0.
     probe_debug_dump: bool = False
     iso_debug_dir: str = ""                  # 비면 output/<RUN>/debug/iso/ (utils/run_paths.py)
+    #: 패스마다 프레임별 **사진+uv+정점+변환**을 `output/<RUN>/texture_frames/` 에 남긴다 —
+    #  텍스처를 나중에 직접 굽기 위해(`scripts/artec/bake_texture.py`). ★ 저장된 sproj 는 uv 가
+    #  전부 NaN 이라 SDK·Studio 텍스처링이 불가하고(2026-09-23), uv 는 **live 에서만** 유효하다.
+    #  40 프레임 × 3 패스 ≈ 40MB.
+    dump_texture_frames: bool = True
+    dump_texture_frames_per_pass: int = 40
 
     # 병합 비교용: False 면 _merge_into_master 가 IScan frame_transformations 에
     # T_pre 를 set 하지 않고 result.recorded_hints 에 (scan_index, T_pre) list 로만
@@ -1581,6 +1587,7 @@ class ArtecMultiPassScanSession:
         """원시 IScan 점(스캔 월드, mm, 색) + 적용 T_pre 를 npz 로 남긴다 —
         `output/<RUN_TS>/scan_dumps/scanNN_<stage>_poseK.npz`. 정합을 SDK 없이 오프라인에서
         다시 돌리기 위한 것. master 월드 = scan00 (T_pre 항등). 실패는 무시."""
+        self._dump_texture_frames(model, T_pre_mm, stage)
         try:
             from utils.run_paths import run_dir
             # scans/ 는 Artec 프로젝트 페이로드 폴더 이름과 겹친다 → scan_dumps/
@@ -1631,6 +1638,67 @@ class ArtecMultiPassScanSession:
             print(f"  [scan-dump] {f.relative_to(d.parents[2])} ({len(P):,}pt)")
         except Exception as e:                                   # noqa: BLE001
             print(f"  [scan-dump] ⚠ 실패({type(e).__name__}: {e})")
+
+    def _dump_texture_frames(self, model, T_pre_mm, stage: str) -> None:
+        """프레임별 사진(jpg)+uv+정점+faces+프레임변환 을 남긴다 — 텍스처 **직접 굽기**용.
+
+        위치 `output/<RUN>/texture_frames/scanNN_<stage>_poseK/sSS_fFFFF.{jpg,npz}`.
+        월드 좌표: X_master = T_pre_mm · T_frame_mm · v (mm). 굽기는 `scripts/artec/bake_texture.py`.
+        왜 필요한가 — `save_project` 왕복에서 uv 가 전부 NaN 이 돼 저장된 프로젝트로는 SDK 도
+        Studio 도 텍스처링을 못 한다(2026-09-23 실측). uv 가 유효한 **live 시점**에 뽑아 둔다.
+        실패는 무시(스캔을 깨지 않는다)."""
+        s = self.s
+        if not getattr(s, "dump_texture_frames", True):
+            return
+        try:
+            import cv2
+            from utils.run_paths import run_dir
+            st = self._st
+            base = (run_dir() / "texture_frames"
+                    / f"scan{st.master_model.scan_count():02d}_{stage}_pose{st.pose_idx}")
+            base.mkdir(parents=True, exist_ok=True)
+            n_target = max(1, int(getattr(s, "dump_texture_frames_per_pass", 40)))
+            n_saved = n_tot = n_bad_uv = 0
+            for si in range(model.scan_count()):
+                scan = model.get_scan(si)
+                n = scan.frame_count(); n_tot += n
+                for i in range(0, n, max(1, n // n_target)):
+                    fr = scan.get_frame(i)
+                    try:
+                        if not fr.has_image():
+                            continue
+                        img = fr.image(); uv = fr.uv(); v = fr.vertices()
+                    except Exception:                            # noqa: BLE001
+                        continue
+                    if img is None or uv is None or v is None or len(v) == 0 or len(uv) != len(v):
+                        continue
+                    uv = np.asarray(uv, np.float32)
+                    if np.isfinite(uv).all(1).mean() < 0.5:
+                        n_bad_uv += 1
+                        continue
+                    try:
+                        faces = np.asarray(fr.faces(), np.int32)
+                    except Exception:                            # noqa: BLE001
+                        faces = np.zeros((0, 3), np.int32)
+                    T = np.asarray(scan.get_frame_transformation(i), float)
+                    tag = f"s{si:02d}_f{i:04d}"
+                    cv2.imwrite(str(base / f"{tag}.jpg"),
+                                cv2.cvtColor(np.ascontiguousarray(img[..., :3]), cv2.COLOR_RGB2BGR),
+                                [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    np.savez_compressed(
+                        base / f"{tag}.npz", verts_mm=np.asarray(v, np.float32), uv=uv, faces=faces,
+                        T_frame_mm=T,
+                        T_pre_mm=np.asarray(T_pre_mm if T_pre_mm is not None else np.eye(4), float),
+                        image_hw=np.asarray(img.shape[:2], np.int32),
+                        stage=stage, scan_idx=si, frame_idx=i)
+                    n_saved += 1
+            print(f"  [tex-dump] {base.name}: {n_saved} 프레임 (사진+uv+정점) ← {n_tot} 중"
+                  + (f" · uv 무효 {n_bad_uv}" if n_bad_uv else ""))
+            if n_saved == 0 and n_tot > 0:
+                print("  [tex-dump] ⚠ 유효한 uv 프레임이 없다 — live 에서도 uv 가 NaN 이면 "
+                      "직접 굽기도 불가. `docs/6_postprocess.md` §5")
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  [tex-dump] ⚠ 실패({type(e).__name__}: {e})")
 
     def _compose_T_pre_W_mm(self, T_BC_new: np.ndarray, theta0: float,
                             tag: str = "merge", T_extra_B=None) -> np.ndarray:
@@ -2762,14 +2830,33 @@ class ArtecMultiPassScanSession:
         if _n_master > 0:
             _need = min(_need, max(self.s.pass_min_pts_abs,
                                    int(round(self.s.nbv_patch_pts_frac * _n_master))))
-        if 0 <= _n_pts < _need or _ok_frames < self.s.nbv_min_patch_frames:
+        # ★ 프레임 문턱은 캡처 방식에 맞춘다 (2026-09-23). "step"(정지-촬영)은 90° 스윕에
+        #   **7프레임**이 설계값인데 문턱이 10 이라 run_135151·144057 의 nbv 패치 **6개 전부**
+        #   (점 610~2,876 = 정상)가 "빈 캡처" 로 버려졌다 — nbv 가 한 번도 기여한 적이 없었다.
+        _need_frames = int(self.s.nbv_min_patch_frames)
+        if str(getattr(self.s, "nbv_capture_mode", "step")) == "step":
+            _need_frames = min(_need_frames, 3)
+        if 0 <= _n_pts < _need or _ok_frames < _need_frames:
             print(f"  [nbv] ✘ 빈 캡처 — 점 {_n_pts:,}(4mm 복셀) · OK 프레임 {_ok_frames} "
-                  f"(기준 {_need:,}점·{self.s.nbv_min_patch_frames}프레임"
+                  f"(기준 {_need:,}점·{_need_frames}프레임"
                   + (f", master {_n_master:,}" if _n_master else "") + ") → 병합 안 함")
             _ev("merge", stage="nbv", pose_idx=st.pose_idx, method="rejected(empty)",
                 n_scans_before=st.master_model.scan_count(), n_pts=_n_pts, frames_ok=_ok_frames)
             if getattr(self, "_nbv", None) is not None:
                 self._nbv.report_patch(False)                    # dry 로 회계
+            # 디버그 덤프도 남긴다 — 예전엔 여기서 돌아가 plan() 만 쌓이고 파일은 안 써져
+            # `debug/nbv_plan/` 이 늘 비어 있었다.
+            try:
+                if getattr(self, "_nbv_dbg", None) is not None:
+                    from types import SimpleNamespace as _NS
+                    _raw = (np.asarray(_pcd_g.points, float) / 1000.0
+                            if _pcd_g is not None else None)
+                    self._nbv_dbg.patch(raw_pts=_raw, aligned_pts=None,
+                                        result=_NS(ok=False, reason="rejected(empty)",
+                                                   fitness=0.0, rmse=0.0,
+                                                   delta_translation_m=0.0, delta_rotation_deg=0.0))
+            except Exception as _e:                              # noqa: BLE001
+                print(f"  [nbv-dbg] 기록 실패({_e})")
             return True
         # nbv 패치도 같은 정리(꼬리 제거 + SerialReg + Outlier) — 예전엔 이 경로만 빠져 있었다.
         sub.model = self._cleanup_model(

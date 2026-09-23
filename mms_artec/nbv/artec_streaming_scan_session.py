@@ -128,6 +128,12 @@ class ArtecStreamingScanSessionSettings:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
+class BandTransitionAbandoned(RuntimeError):
+    """밴드 이동을 **포기**했다 — 같은 IScan 에서 더 끌지 않고 남은 밴드를 새 IScan 으로 넘긴다.
+    (2026-09-23 run_144057: 되찾기 2회째가 α=0 에서 1.2mm 스텝 **251회 재전진**을 시도해 3분을
+    쓰고도 실패했다. 그 시간이면 새 IScan 이 이미 붙는다.)"""
+
+
 class TrackingState:
     """
     Frame callback 이 갱신하는 공유 상태. Turntable controller 가 이걸 보고
@@ -669,6 +675,16 @@ class ArtecStreamingScanSession:
                                 self.move_robot_fn(_band_q)
                                 _ev("band_move", stage=s.stage_label, from_band=_bi,
                                     to_band=_bi + 1, steps=1, outcome="direct")
+                    except BandTransitionAbandoned as e:
+                        # 완주한 밴드는 살리고, 남은 밴드는 multipass `capture_bands` 가
+                        # 새 IScan 으로 이어 찍는다(부분 성공 경로 = tracking_lost + n_bands_done).
+                        with tracking._lock:
+                            tracking.tracking_lost = True
+                            tracking.last_loss_reason = f"band transition abandoned: {e}"
+                        band_reasons.append(f"band {_bi + 1}/{len(bands)}: 전환 포기 — {e}")
+                        print(f'  ⚠ 밴드 이동 포기({e}) — 완주 {n_bands_done}개는 살리고 '
+                              f'남은 밴드는 새 IScan 으로')
+                        break
                     except Exception as e:
                         print(f'  ⚠ 밴드 이동 실패({e}) — 남은 밴드 중단')
                         break
@@ -1161,6 +1177,11 @@ class ArtecStreamingScanSession:
     BAND_STEP_POLL_S = 0.15      # 스텝 후 프레임 폴링 시간 (~2 프레임)
     BAND_RELOC_TRIES = 2         # 되돌아가기 시도 횟수
     BAND_RELOC_WAIT_S = 1.5      # 되찾음 판정 대기 (스텝당)
+    #: 재전진 스텝 상한. 넘으면 이 IScan 을 포기한다(→ 남은 밴드는 새 IScan). 스텝당 ~0.5s 라
+    #  60 스텝 ≈ 30s. run_144057 은 251 스텝(≈2.5분)을 걷고도 실패했다.
+    BAND_RELOC_MAX_STEPS = 60
+    #: 되찾은 자리가 출발점(α≈0)이면 같은 길을 다시 걷는 셈이라 포기한다.
+    BAND_RELOC_MIN_ALPHA = 0.05
 
     def _reg_ok(self, tracking) -> bool:
         """마지막 프레임이 정합됐고 연속 reg<0 가 끊겼는가 (밴드 전환의 되찾음 판정용)."""
@@ -1305,13 +1326,24 @@ class ArtecStreamingScanSession:
                                      standoff_from=standoff_from, standoff_to=standoff_to)
             if not path:
                 break
+            if len(path) > self.BAND_RELOC_MAX_STEPS or a_found <= self.BAND_RELOC_MIN_ALPHA:
+                _why = (f"재전진 {len(path)}스텝 > 상한 {self.BAND_RELOC_MAX_STEPS}"
+                        if len(path) > self.BAND_RELOC_MAX_STEPS
+                        else f"출발점(α={a_found:.2f})까지 돌아가야 정합됨 — 같은 길을 다시 걷는 셈")
+                print(f"  [밴드이동] ✘ {_why} — 이 IScan 포기, 남은 밴드는 새 IScan 으로")
+                _ev("band_move", steps=len(path), step_mm=step * 1000, outcome="abandoned",
+                    tries=attempt + 1, lost_alpha=lost_alpha, found_alpha=found_alpha,
+                    reason=_why, **evb)
+                raise BandTransitionAbandoned(_why)
             print(f"  [밴드이동] α={a_found:.2f} 에서 되찾음 — 스텝 {step*1000:.1f}mm 로 재전진 "
                   f"{len(path)}스텝")
-        print("  [밴드이동] ✘ 되찾기 실패 — 목표 자세로 가서 진행 (이 밴드는 lost 로 처리될 수 있다)")
-        _ev("band_move", steps=len(path), step_mm=step * 1000, outcome="failed",
-            tries=self.BAND_RELOC_TRIES, lost_alpha=lost_alpha, found_alpha=found_alpha, **evb)
-        self.move_robot_fn(q_to_eff)
-        return standoff_to
+        # ★ 예전엔 목표 자세로 가서 같은 IScan 을 계속했다 — 거기서 lost 판정이 나기까지
+        #   10~20s 를 더 쓰고 결국 새 IScan 으로 갔다. 바로 포기한다(2026-09-23).
+        print("  [밴드이동] ✘ 되찾기 실패 — 이 IScan 포기, 남은 밴드는 새 IScan 으로")
+        _ev("band_move", steps=len(path), step_mm=step * 1000, outcome="abandoned",
+            tries=self.BAND_RELOC_TRIES, lost_alpha=lost_alpha, found_alpha=found_alpha,
+            reason="relocalization failed", **evb)
+        raise BandTransitionAbandoned("되찾기 실패")
 
     def _track_standoff(self, session, tracking, band_q, band_i: int, n_bands: int,
                         d0_override: float = None):
@@ -1393,9 +1425,23 @@ class ArtecStreamingScanSession:
                          f"measured {(p - state['p'])*1000:+.0f}mm (prev p={state['p']*1000:.0f})")
             self._dbg_range_image(f"s{self._dbg_seq:02d}_band{band_i+1}_start{state['k']:02d}", r,
                                   state["dcur"], p, _note)
+            # ★ 일관성 판정은 측정이 **창 안쪽**일 때만 믿을 수 있다 (2026-09-23 run_144057).
+            #   표면이 far 클립(330mm) 근처면 창 밖 점은 잘리고 남은 점의 중앙값이 ~287mm 에
+            #   **포화**된다 — 카메라를 25mm 당겨도 측정은 +1mm 만 변한다. 그걸 "프레임을 못
+            #   믿는다" 로 읽고 추종을 끊었고, 그 뒤 5프레임 만에 tracking lost 였다(flip 2회
+            #   모두). 가장자리면 판정을 보류하고 **계속 접근**한다 — 방향은 자명하다.
+            _lo, _hi = (self.scan_range or (0.20, 0.30))
+            _edge = 0.045
+            _sat = ((p > _hi - _edge) or (p < _lo + _edge)
+                    or (state["p"] is not None
+                        and (state["p"] > _hi - _edge or state["p"] < _lo + _edge)))
             if state["d"] is not None and abs(state["dcur"] - state["d"]) >= 0.015:
                 dd = state["dcur"] - state["d"]; dp = p - state["p"]
-                if abs(dp - dd) > 0.6 * abs(dd):
+                if _sat:
+                    print(f"  [거리추종] 이동 {dd*1000:+.0f}mm 에 측정 {dp*1000:+.0f}mm — 측정이 창 "
+                          f"가장자리({p*1000:.0f}mm, 창 {_lo*1000:.0f}~{_hi*1000:.0f})에 포화돼 "
+                          f"일관성 판정 보류, 계속 접근")
+                elif abs(dp - dd) > 0.6 * abs(dd):
                     print(f"  [거리추종] ✘ 이동 {dd*1000:+.0f}mm 에 측정이 {dp*1000:+.0f}mm 만 변함 — "
                           f"프레임을 믿을 수 없어 이 밴드의 거리추종 중단")
                     _ev("standoff_skip", stage=self.s.stage_label, band=band_i + 1,

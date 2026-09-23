@@ -176,12 +176,44 @@ output/<RUN>/README.txt              ← 같은 안내를 run 마다 자동으�
 SDK Texturize 는 CPU 단일코어다 — `TexturizationSettings` 에 GPU 항목이 없고, 1912 프레임에
 15~20분(실측, GPU 0%). 그래서 **기본 끔**(`do_texturize=False`, 켜려면 `--texturize`).
 
-파이프라인은 융합 메시 + 원본 스캔(텍스처 프레임 포함)을 `output/<RUN>/final/final.sproj`
-로 남긴다. Studio 에서:
+### 🔴 저장된 프로젝트로는 텍스처링이 **안 된다** (2026-09-23 실측)
 
-1. File → Open project → 그 `.sproj`.
-2. Workspace 에서 융합 메시(composite)를 선택 → **Texture** 탭 → 소스 스캔 전부 체크 →
-   Texture resolution 2048 → Apply (GPU, 보통 1분 내).
-3. File → Export meshes → OBJ(+ texture) 로 저장.
+**저장→로드에서 프레임별 UV 가 사라진다.** `output/20260923_135151/aligned/aligned.sproj` 확인:
+
+| 항목 | 상태 |
+|---|---|
+| 텍스처 이미지 | **있음** — 프레임마다 1280×960×3, `.tscan` 1.5~1.7GB, 밝기 평균 65~159 (실제 내용) |
+| `has_image()` · `is_textured()` | 둘 다 True |
+| `uv()` | 배열은 오지만 **전부 NaN** (표본 26프레임 × 2스캔, 유효 0) |
+| SDK `texturize()` | **실패 `0x80010203`** (융합 뒤, 소스 스캔을 붙여도 동일) |
+
+**live 에서는 UV 가 정상이다** — run 중 `image_match` 가 `cKDTree(uv_px)` 를 쓰는데 scipy 는
+NaN 에 예외를 낸다. 그게 안 났고 특징점을 찾았으니(`sub=844 master=379`) 캡처 시점의 uv 는
+유한하다. 즉 **`save_project`/`load_project` 왕복에서 텍스처↔기하 매핑이 유실된다.**
+
+그래서 "Studio 에서 텍스처를 입히면 된다" 던 기존 계획은 **성립하지 않는다.** 남은 길:
+
+| 방법 | 대가 |
+|---|---|
+| run 중에 SDK Texturize (`--texturize`) | CPU 단일코어 15~20분. 그리고 **우리 융합 메시**에만 입는다 — Studio 에서 정합을 다듬은 메시에는 못 입힌다 |
+| 바인딩 수정 (**진짜 해결**) | 로드 후 텍스처 좌표를 다시 계산하는 SDK 호출을 노출하거나, save 에 텍스처 캘리브가 빠지는지 확인. C++ 바인딩 작업 필요 |
+| 우리가 직접 굽기 | run 중 프레임별 `image()`+`uv()`+변환을 덤프해 두고, 나중에 어떤 메시에든 투영해 입힌다. SDK 없이 가능 |
+
+### 직접 굽기 (2026-09-23 구현) — Studio 에서 다듬은 메시에도 입힐 수 있다
+
+run 이 패스마다 프레임별 **사진+uv+정점+변환**을 `output/<RUN>/texture_frames/scanNN_<stage>_poseK/`
+에 남긴다(`dump_texture_frames=True`, 패스당 40 프레임 ≈ 40MB). uv 가 유효한 live 시점에 뽑는다.
+
+```bash
+python scripts/artec/bake_texture.py --run <RUN> --mesh output/<RUN>/final.obj           # 우리 융합 메시
+python scripts/artec/bake_texture.py --run <RUN> --mesh <Studio 에서 내보낸 obj> --out x.ply  # Studio 정합·융합 메시
+```
+프레임마다 (정점↔픽셀) 대응에서 DLT 로 투영행렬을 맞추고(캘리브 불요), 메시 정점을 각 프레임에
+투영해 가시성(프레임 자신의 깊이 + 법선 방향)을 거른 뒤 입사각 가중 평균으로 **정점 색**을 입힌다.
+uv 의 v 방향(SDK 미명세)은 두 규약으로 구워 프레임 간 색 일관성이 좋은 쪽을 자동 선택한다.
+출력은 정점 색 PLY(CloudCompare/MeshLab). v1 은 UV 아틀라스가 아니라 정점 색이다 — 메시가 성기면
+색도 성기다. 합성 시험(실제 융합 메시 + 가상 카메라 30대): 정점 83% 착색, 오차 중앙 <0.05.
+⚠ 실물 프레임으로는 아직 미검증 — 다음 run 의 `texture_frames/` 로 한 번 돌려 볼 것.
+Studio 메시는 **master 스캔월드(mm)** 좌표여야 한다(프로젝트 좌표 그대로 내보내면 된다).
 
 정합을 다듬는 동안은 텍스처가 필요 없으므로 `--test`(Texturize 생략 + 형상만)로 돌린다.

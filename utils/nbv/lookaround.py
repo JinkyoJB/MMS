@@ -1255,6 +1255,14 @@ SIDE_NORMAL_DEG = 30.0
 SIDE_COV_MIN = 0.75
 #: 그때 밴드가 옆면에서 이만큼 더 덮으면, 전체 면적 이득이 모자라도 밴드를 유지한다.
 SIDE_GAIN_MIN = 0.04
+#: standoff 후보 중 **먼 쪽에 벌점** (100mm 멀어질 때마다 이만큼). 왜 — 후보는 near+20+r,
+#  mid+r, mid+r+30 세 개인데 r 이 **max 반경**(잡음 꼬리에 부풀어 실제보다 30~50mm 큼)이라
+#  중간·먼 후보는 표면을 창 far 끝(285~320mm)에 놓는다. run_144057: cap 이 354mm 에서 3D 점
+#  **4개**, flip 이 351mm 에서 포화 측정 → 추종 중단 → lost. 같은 물체의 run_135151 은 cap 299·
+#  flip 309(가까운 후보)로 완주했다. 위험이 비대칭이다 — 너무 가까우면 추종이 밖으로 밀어내면
+#  되지만(점은 남는다), 너무 멀면 점이 사라져 되돌릴 근거가 없다. 그래서 가까운 쪽을 편든다.
+#  옆면 항(SIDE_SCORE_W, 최대 0.5)이 먼 자세(옆면이 더 들어옴)를 편들던 것을 상쇄한다.
+STANDOFF_NEAR_W = 0.8
 #: 자세 채점의 **옆면 커버** 항 가중 (전체 커버 항 0.5 와 같은 크기).
 #  ★ 왜 필요한가 — run_125718 preview 실측에서 el 15~30° 는 **전체 커버가 32.5% 로 같고**
 #    minfill 도 둘 다 fill_target 위라 점수가 **정확히 동점**이었다. 그래서 채점기가
@@ -1458,7 +1466,11 @@ def _augment_top_face(poses, evals, pts_obj, nrm_obj, axis_xy, z, sensor,
     sc_max = max(c[0] for c in cands)
     near = [c for c in cands if c[0] >= sc_max - CAP_SCORE_MARGIN]
     el_pick = max(c[1] for c in near)             # 동점·근소차면 가파른 쪽
-    pick = max((c for c in near if c[1] == el_pick), key=lambda c: c[0])
+    # ★ 같은 el 안에서는 **가까운 standoff** 를 고른다 (2026-09-23). 커버율만 보면 먼 자세가
+    #   윗면을 더 많이 담아 이기는데, run_144057 의 cap(el70, 354mm)은 실제로 3D 점 4개였다 —
+    #   윗면이 far 클립 근처라 반환이 없다. 같은 물체 run_135151 의 cap 299mm 는 정상.
+    pick = max((c for c in near if c[1] == el_pick),
+               key=lambda c: (-round(float(c[2].standoff), 4), c[0]))
     best = (pick[2], pick[3], pick[0])
     if best[2] <= cap_frac and not _force:
         return False
@@ -1712,7 +1724,8 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
                         continue             # 어차피 버려질 자세는 고르지 않는다
                     sc = (_score(ev, fill_target, side_mask=_side_m)
                           + TRACK_TIEBREAK_W * min(
-                              float(ev_all.min_fill_cm2) / max(fill_min, 1e-9), 1.0))
+                              float(ev_all.min_fill_cm2) / max(fill_min, 1e-9), 1.0)
+                          - STANDOFF_NEAR_W * max(0.0, (float(s) - float(min(sos_r))) / 0.1))
                     if best is None or sc > best[3]:
                         best = cand + (sc,)
         return best[:3] if best is not None else fallback
@@ -1927,7 +1940,8 @@ def recovery_replan(master_pts, master_nrm, axis_xy, resume_theta: float,
                 ev = evaluate_viewpoint(master_pts, master_nrm, axis_xy, pose,
                                         sensor, n_theta=n_theta)
                 sc = (_score(ev, side_mask=_side_normal_mask(master_nrm, up_sign))
-                      + w_overlap * min(ov / (2 * min_overlap_cm2), 1.0))
+                      + w_overlap * min(ov / (2 * min_overlap_cm2), 1.0)
+                      - STANDOFF_NEAR_W * max(0.0, (float(s) - float(min(sos))) / 0.1))
                 if best is None or sc > best[2]:
                     best, best_ov = (pose, ev, sc), ov
     if best is None:
