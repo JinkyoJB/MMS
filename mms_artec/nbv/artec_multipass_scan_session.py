@@ -240,7 +240,10 @@ class ArtecMultiPassScanSessionSettings:
     # 계획 = utils/nbv/lookaround.plan_lookaround_viewpoints (sim 과 동일 함수).
     # 실패(preview 부족·IK 없음·예외)하면 조용히 home 고정으로 되돌아간다.
     lookaround_planner_enabled: bool = True
-    lookaround_els_deg: tuple = (30.0, 40.0, 50.0, 60.0, 70.0)  # sim MMS_SIM_P1_ELS 와 동일
+    #: 2026-09-23: 20·25° 추가 — 30° 이상만 두면 눕힌 물체의 **옆면**이 구조적으로
+    #  안 찍힌다(`utils/nbv/lookaround.py` DEFAULT_ELS 주석). 도달 못 하는 el 은
+    #  `solve_plan_poses` 가 걸러 내고 로그에 남긴다.
+    lookaround_els_deg: tuple = (20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0)
     lookaround_view_azis_deg: tuple = (0.0, 30.0, -30.0)        # sim VIEW_AZIS_DEG 와 동일
     preview_el_deg: float = 30.0                     # 계획용 preview 고도각
     #: 계획용 preview 축거리 2스텝.
@@ -3784,6 +3787,7 @@ class ArtecMultiPassScanSession:
         #     preview 가 없을 때만 메시로 폴백하되, 디스크면 10mm 위의 점만 센다.
         _r_obj, _r_src = self._object_radius_m(axis_xy_B, verts)
         standoff = _axis_standoff(_r_obj, self.s.nbv_distance_mm / 1000.0)
+        self._check_standoff_window(standoff, axis_xy_B)
         # ★ 조준점을 **찍는다**. 이 한 줄이 없어서 단위/프레임 오류(mm 를 m 로,
         #   현재 T_CB 를 마스터 T_CB 로)가 "허공을 스캔" 으로만 드러났다.
         #   디스크 상단 z 와 나란히 보이면 바로 이상을 알 수 있다.
@@ -4384,6 +4388,52 @@ class ArtecMultiPassScanSession:
         except Exception as e:                                          # noqa: BLE001
             print(f"  [nbv] 디버그 이미지 실패({type(e).__name__}: {e})")
 
+    def _check_standoff_window(self, standoff_m: float, axis_xy_B) -> None:
+        """축거리가 정해졌을 때 **방위별 표면거리**가 스캐너 작동창에 드는지 본다.
+
+        왜 필요한가 — 축을 겨누는 자세의 표면거리는 `축거리 − 그 방위의 국소 반경`이다.
+        물체가 원통이 아니면 방위마다 크게 다르다(run_125718: 46~84mm). 반경을 하나로
+        요약하는 순간 어떤 방위는 창 밖으로 나간다.
+          · 반경을 **작게** 보면 축거리가 짧아져 넓은 방위가 근접한계 안 → 빈 캡처.
+            run_125718 의 추종 실측 12mm 가 그 경우다(표면 153~191mm, 5/12 구간이 170mm 미만).
+          · 반경을 **크게**(잡음) 보면 먼 쪽으로 밀려 최적대(200~250mm) 밖에서 잡음이 는다.
+        실패해도 스캔은 계속한다 — 경고만.
+        """
+        try:
+            P = self._master_pts_B_m(40_000)
+            tt = getattr(self.mms, "turntable_transform", None)
+            if tt is None or P is None or len(P) < 500:
+                return
+            ax = np.asarray(tt.axis_point_B, float)
+            ad = np.asarray(tt.axis_dir_B, float); ad = ad / np.linalg.norm(ad)
+            up = -1.0 if float(self._view_up_B()[2]) < 0 else +1.0
+            v = P - ax
+            h = up * (v @ ad) * -1.0 if up < 0 else (v @ ad)
+            perp = v - np.outer(v @ ad, ad)
+            rr = np.linalg.norm(perp, axis=1)
+            k = (rr < 0.15) & (np.abs(h) > 0.004)
+            if k.sum() < 200:
+                return
+            perp, rr = perp[k], rr[k]
+            u = np.array([1.0, 0.0, 0.0]) - ad * (ad @ np.array([1.0, 0.0, 0.0]))
+            u /= np.linalg.norm(u); w = np.cross(ad, u)
+            phi = (np.degrees(np.arctan2(perp @ w, perp @ u)) + 360.0) % 360.0
+            b = (phi // 30).astype(int)
+            loc = np.array([np.percentile(rr[b == i], 98) if (b == i).sum() > 50 else np.nan
+                            for i in range(12)])
+            surf = (float(standoff_m) - loc) * 1000.0
+            lo, hi = (np.asarray(self._scanning_range_m(), float) * 1000.0)
+            n_near = int(np.nansum(surf < lo)); n_far = int(np.nansum(surf > hi))
+            msg = (f"  [nbv] 축거리 {standoff_m*1000:.0f}mm — 방위별 표면거리 "
+                   f"{np.nanmin(surf):.0f}~{np.nanmax(surf):.0f}mm (창 {lo:.0f}~{hi:.0f})")
+            if n_near or n_far:
+                print(msg + f"  ⚠ 창 밖 {n_near}구간(가까움)/{n_far}(멂) — "
+                            f"그 방위는 빈 캡처가 된다. 물체 반경 추정을 의심할 것")
+            else:
+                print(msg + "  ✓")
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  [nbv] 작동창 검사 생략({type(e).__name__}: {e})")
+
     def _object_radius_m(self, axis_xy_B, mesh_verts):
         """축거리 계산용 **물체 반경** (m, p95) 과 출처 문자열.
 
@@ -4404,20 +4454,45 @@ class ArtecMultiPassScanSession:
                 return None
             return float(np.percentile(np.linalg.norm(P[:, :2] - ax, axis=1), 95))
 
-        # 0순위 lookaround 거리추종 실측 — "축거리 = 표면거리 + r" 의 r 를 실제로 잰 값.
-        #   preview p95 는 실루엣 잡음·디스크 가장자리에 끌려 과대하다(2026-09-22 run_162620:
-        #   preview 92mm → nbv 축거리 317mm 로 프레임당 ~1,000점 "빈 캡처" 2회. 같은 run 의
-        #   밴드 추종은 353→278mm 로 수렴, 즉 r_eff≈25~30mm).
-        _hist = list(getattr(getattr(self, "_st", None), "r_eff_hist", []) or [])
-        if len(_hist) >= 1:
-            return float(np.median(_hist)), "lookaround 실측"
+        # ── 기하 실측 (가장 믿을 만함) — master 점군, 없으면 메시 정점 ──────────
+        r_geo, geo_src = None, ""
+        try:
+            _mp = self._master_pts_B_m(40_000)
+        except Exception:                                    # noqa: BLE001
+            _mp = np.zeros((0, 3))
+        if len(_mp):
+            r_geo, geo_src = _p95(_mp), "master 점군"
+        if r_geo is None:
+            r_geo, geo_src = _p95(mesh_verts), "메시"
+
+        # ── 거리추종 실측 (d−p) — **기하와 어긋나면 안 믿는다** ────────────────
+        #   preview p95 는 실루엣 잡음에 끌려 과대하다(run_162620: 92mm → 빈 캡처 2회)
+        #   → 그래서 추종값을 우선했었다. 그런데 run_125718 에서는 그 추종값이 **12mm**
+        #   (한 밴드는 −15mm, 물리적으로 불가능)였고 실제 반경은 p95 69mm 였다.
+        #   그 12mm 면 축거리가 237mm 로 짧아져 **방위별 표면거리가 153~191mm** — 12구간 중
+        #   5구간이 근접한계(170mm) 안이라 그 방위는 빈 캡처가 된다(`_check_standoff_window`).
+        #   p95(69mm)면 축거리 294mm, 표면거리 210~248mm 로 최적대(200~250)에 들어온다.
+        #   ⚠ 이 값은 **축을 겨누는 자세**(보장 고도각 등)에만 쓰인다. gap 겨냥
+        #   (`plan_frontier`)은 표면 기준 `nbv_distance_mm` 를 그대로 받으므로 무관하다 —
+        #   run_125718 의 `물체근접 42` 는 이것 때문이 아니다(원인 미규명, todo).
+        #   둘 다 틀릴 수 있으므로 **서로 확인**시킨다.
+        _hist = [float(v) for v in (getattr(getattr(self, "_st", None), "r_eff_hist", []) or [])
+                 if float(v) > 0.0]
+        if _hist:
+            r_trk = float(np.median(_hist))
+            if r_geo is None:
+                return r_trk, f"lookaround 실측(n={len(_hist)})"
+            if 0.5 * r_geo <= r_trk <= 1.5 * r_geo:
+                return r_trk, f"lookaround 실측(n={len(_hist)}, 기하와 일치)"
+            print(f"  [nbv] ⚠ 거리추종 반경 {r_trk*1000:.0f}mm 이 기하 실측 "
+                  f"{r_geo*1000:.0f}mm({geo_src})과 어긋난다 — 기하를 쓴다 "
+                  f"(추종값이 작으면 축거리가 짧아져 gap 겨냥이 전부 '물체근접' 기각된다)")
+        if r_geo is not None:
+            return r_geo, geo_src
         pv = getattr(self, "preview_result", None) or {}
         r = _p95(pv.get("points_B", np.zeros((0, 3))))
         if r is not None:
             return r, "preview"
-        r = _p95(mesh_verts)
-        if r is not None:
-            return r, "메시(폴백)"
         return 0.0, "없음"
 
     def _gap_kw(self) -> dict:

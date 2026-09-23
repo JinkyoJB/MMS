@@ -1224,6 +1224,12 @@ def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,
             # ★ 채택된 az 를 자세에 새겨 둔다. 캡처 중 거리추종이 **같은 밴드를
             #   같은 방위로** 다시 풀어야 하기 때문이다(`StandoffTracker`).
             vps.append(replace(vp, az_deg=float(azd)))
+        elif log:
+            # 예전엔 조용히 빠졌다 — 낮은 el 후보를 넣은 뒤로는 "왜 그 자세가 없나" 를
+            # 로그에서 바로 알아야 한다(2026-09-23).
+            log(f"  ✘ 자세 el={vp.el_deg:.0f}° s={vp.standoff:.3f} "
+                f"tz={vp.target_z:.3f} — 모든 방위({len(azis_deg)}개)에서 "
+                f"도달 자세 없음(IK·충돌) → 이 자세 제외")
     if return_poses:
         return (qs or None), vps
     return qs or None
@@ -1232,11 +1238,29 @@ def solve_plan_poses(plan, axis_xy, azis_deg, solve_q, is_safe=None, log=None,
 # ── 계획 (단일 자세 → 부족하면 겹침 밴드 분할) ────────────────────────────────
 #: 플래너가 고르는 elevation 후보 (deg).
 #
-#  ⚠ 20° 는 **도달 자세가 없다**(실측). 두 백엔드 모두 이 기본값을 안 쓰고
-#    (30,40,50,60,70) 으로 덮어써 왔는데, 그러면 `validate_lookaround.py` 같은
-#    검증 스크립트만 **실제로 안 쓰는 el 로** 검증하게 된다. 기본값을 실사용값에
-#    맞춘다 — 백엔드의 명시 지정은 그대로 두되, 안 주면 같은 값이 나온다.
-DEFAULT_ELS = (30.0, 40.0, 50.0, 60.0, 70.0)
+#  ★ 2026-09-23: **20·25° 를 다시 넣었다.** 30° 이상만 두면 전부 '내려다보는' 자세라
+#    눕힌 물체의 **옆면**(법선이 수평)이 구조적으로 안 찍힌다 — run_125718 실측:
+#    옆면 법선 점이 lookaround 26%·flip 21% 뿐이고 방위 12구간 중 5~6구간이 300점
+#    미만, 디스크 위 0~40mm 는 전체의 5% 였다. 그 상태로는 두 패스가 공유할 면이
+#    없어 정합이 성립하지 않는다.
+#  ⚠ 예전 주석은 "20° 는 도달 자세가 없다(실측)" 였다. 그 관측이 맞을 수 있으므로
+#    **후보로만 둔다** — 도달 못 하면 `solve_plan_poses` 의 IK·충돌 검사가 걸러 내고
+#    로그에 남긴다(`도달 자세 없음`). 낮은 el 은 축거리가 오히려 멀어져
+#    (d = standoff·cos el) 보호 원기둥에는 덜 걸린다.
+DEFAULT_ELS = (20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0)
+
+#: '옆면' 판정 — 법선이 수평에서 ±이 각도 안.
+SIDE_NORMAL_DEG = 30.0
+#: 옆면을 이 비율 미만으로 덮으면 "옆면이 빈 계획" 으로 본다.
+SIDE_COV_MIN = 0.75
+#: 그때 밴드가 옆면에서 이만큼 더 덮으면, 전체 면적 이득이 모자라도 밴드를 유지한다.
+SIDE_GAIN_MIN = 0.04
+#: 자세 채점의 **옆면 커버** 항 가중 (전체 커버 항 0.5 와 같은 크기).
+#  ★ 왜 필요한가 — run_125718 preview 실측에서 el 15~30° 는 **전체 커버가 32.5% 로 같고**
+#    minfill 도 둘 다 fill_target 위라 점수가 **정확히 동점**이었다. 그래서 채점기가
+#    추적 여유가 큰 30° 를 골랐는데, 옆면 커버는 15° 64.7% · 20° 59.7% · 30° 46.7% 로
+#    크게 갈린다. 동점을 가르는 기준이 '추적 여유' 뿐이면 옆면은 영원히 안 찍힌다.
+SIDE_SCORE_W = 0.5
 
 FILL_MIN_CM2 = 6.0            # 최악 프레임 이보다 작으면 tracking-risk (경고선)
 #: **배제선** — 이보다 작으면 볼 면이 사실상 없어 tracking lost 가 난다.
@@ -1516,14 +1540,33 @@ def _worst_adjacent(poses, ov):
     return min(ov), (min(band_only) if band_only else 1.0)
 
 
-def _union_covered_frac(evals) -> float:
-    """여러 자세가 **합쳐서** 품질-가시로 덮는 점 비율."""
+def _union_covered_frac(evals, mask=None) -> float:
+    """여러 자세가 **합쳐서** 품질-가시로 덮는 점 비율. `mask` 를 주면 그 부분집합만."""
     if not evals:
         return 0.0
     u = np.zeros_like(evals[0].seen_mask, dtype=bool)
     for e in evals:
         u |= e.seen_mask
+    if mask is not None:
+        m = np.asarray(mask, bool)
+        if not m.any():
+            return float("nan")
+        return float(u[m].mean())
     return float(u.mean())
+
+
+def _side_normal_mask(nrm_obj, up_sign: float, deg: float = SIDE_NORMAL_DEG):
+    """법선이 수평에서 ±`deg` 안인 점 = **옆면**. (N,) bool.
+
+    왜 따로 보나 — 면적 비율(`covered_frac`)은 윗면이 넓으면 높게 나와서 "옆면이라는
+    방향이 통째로 비었다" 를 못 잡는다. run_125718 이 그 경우다: 커버 85.5% 인데
+    옆면 방위 12구간 중 5개가 사실상 비어 flip 정합이 성립하지 않았다.
+    """
+    N = np.asarray(nrm_obj, float)
+    if N.ndim != 2 or len(N) == 0:
+        return np.zeros(0, bool)
+    nz = N[:, 2] / (np.linalg.norm(N, axis=1) + 1e-12)
+    return np.abs(nz) < math.sin(math.radians(float(deg)))
 
 
 def _band_capture_order(poses, evals) -> List[int]:
@@ -1552,9 +1595,14 @@ def _band_capture_order(poses, evals) -> List[int]:
     return idx
 
 
-def _score(ev: PoseEval, fill_target: float = 12.0) -> float:
-    return (2.0 * min(ev.min_fill_cm2 / fill_target, 1.0)
-            + 1.0 * ev.z_cover_frac + 0.5 * ev.covered_frac)
+def _score(ev: PoseEval, fill_target: float = 12.0, side_mask=None) -> float:
+    sc = (2.0 * min(ev.min_fill_cm2 / fill_target, 1.0)
+          + 1.0 * ev.z_cover_frac + 0.5 * ev.covered_frac)
+    # 옆면(법선 수평) 커버 — 없으면 flip 패스와 공유할 면이 없어 정합이 성립하지 않는다.
+    if (side_mask is not None and ev.seen_mask is not None
+            and len(side_mask) == len(ev.seen_mask) and bool(np.any(side_mask))):
+        sc += SIDE_SCORE_W * float(ev.seen_mask[side_mask].mean())
+    return sc
 
 
 #: **오차 주입용** 축거리 바이어스 (mm). 기본 0 = 꺼짐.
@@ -1643,6 +1691,7 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
         #     오히려 준다. 추적은 "끊기지만 않으면 된다" 는 제약이지 많을수록
         #     좋은 양이 아니다.
         best = fallback = None
+        _side_m = _side_normal_mask(nrm_obj, up_sign)   # 채점의 옆면 항 (SIDE_SCORE_W)
         for el in els:
             for s in sos_r:
                 for tz in tz_list:
@@ -1661,8 +1710,9 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
                         fallback = cand      # 전부 배제선 이하일 때 낼 최선 1개
                     if sub is not None and ev_all.min_fill_cm2 <= FILL_HARD_MIN_CM2:
                         continue             # 어차피 버려질 자세는 고르지 않는다
-                    sc = _score(ev, fill_target) + TRACK_TIEBREAK_W * min(
-                        float(ev_all.min_fill_cm2) / max(fill_min, 1e-9), 1.0)
+                    sc = (_score(ev, fill_target, side_mask=_side_m)
+                          + TRACK_TIEBREAK_W * min(
+                              float(ev_all.min_fill_cm2) / max(fill_min, 1e-9), 1.0))
                     if best is None or sc > best[3]:
                         best = cand + (sc,)
         return best[:3] if best is not None else fallback
@@ -1804,13 +1854,33 @@ def plan_lookaround_viewpoints(pts_obj, nrm_obj, axis_xy, sensor: SensorModel = 
     #  커버가 안 늘고 전회전 횟수만 늘어난다. 재서 확인하고 아니면 되돌린다.
     band_cov = _union_covered_frac(evals)
     gain = band_cov - single_cov
+    # ★ **옆면 방향 커버리지**도 같이 본다 (2026-09-23). 면적 이득만 보면 윗면이 넓은
+    #   물체에서 "이득 부족" 으로 단일 자세가 되는데, 그러면 옆면이 통째로 비어 flip
+    #   정합이 성립하지 않는다(run_125718: 커버 85.5% 인데 옆면 방위 12구간 중 5개가 빔).
+    side_m = _side_normal_mask(nrm_obj, up_sign)
+    side_single = _union_covered_frac(single_evals, side_m)
+    side_band = _union_covered_frac(evals, side_m)
+    if side_m.any():
+        print(f"[lookaround] 옆면(법선 수평±{SIDE_NORMAL_DEG:.0f}°) 커버 — "
+              f"밴드 {side_band*100:.1f}% vs 단일+윗면 {side_single*100:.1f}% "
+              f"(옆면 점 {int(side_m.sum()):,}/{len(side_m):,})")
     if gain < BAND_GAIN_MIN_COV:
-        print(f"[lookaround] 밴드 {m_bands}개 커버 {band_cov*100:.1f}% vs "
-              f"단일+윗면 {single_cov*100:.1f}% — 이득 {gain*100:+.1f}%p "
-              f"(<{BAND_GAIN_MIN_COV*100:.1f}%p) → 단일 자세로 되돌린다 "
-              f"(높이가 아니라 윗면이 문제였다)")
-        return _single_plan("single+윗면(밴드 무익)" if single_cap
-                            else "single(밴드 무익)")
+        _side_rescue = (side_m.any()
+                        and np.isfinite(side_single) and np.isfinite(side_band)
+                        and side_single < SIDE_COV_MIN
+                        and (side_band - side_single) >= SIDE_GAIN_MIN)
+        if _side_rescue:
+            print(f"[lookaround] 면적 이득은 {gain*100:+.1f}%p 로 모자라지만 "
+                  f"**옆면**이 단일 {side_single*100:.1f}% < {SIDE_COV_MIN*100:.0f}% 이고 "
+                  f"밴드가 {(side_band - side_single)*100:+.1f}%p 더 덮는다 → 밴드 유지 "
+                  f"(옆면이 비면 flip 정합이 성립하지 않는다)")
+        else:
+            print(f"[lookaround] 밴드 {m_bands}개 커버 {band_cov*100:.1f}% vs "
+                  f"단일+윗면 {single_cov*100:.1f}% — 이득 {gain*100:+.1f}%p "
+                  f"(<{BAND_GAIN_MIN_COV*100:.1f}%p) → 단일 자세로 되돌린다 "
+                  f"(높이가 아니라 윗면이 문제였다)")
+            return _single_plan("single+윗면(밴드 무익)" if single_cap
+                                else "single(밴드 무익)")
 
     ov = _adjacent_overlap(evals)
     risk = any(e.min_fill_cm2 < fill_min for e in evals)
@@ -1856,7 +1926,8 @@ def recovery_replan(master_pts, master_nrm, axis_xy, resume_theta: float,
                     continue                            # relocalization 불가 후보
                 ev = evaluate_viewpoint(master_pts, master_nrm, axis_xy, pose,
                                         sensor, n_theta=n_theta)
-                sc = _score(ev) + w_overlap * min(ov / (2 * min_overlap_cm2), 1.0)
+                sc = (_score(ev, side_mask=_side_normal_mask(master_nrm, up_sign))
+                      + w_overlap * min(ov / (2 * min_overlap_cm2), 1.0))
                 if best is None or sc > best[2]:
                     best, best_ov = (pose, ev, sc), ov
     if best is None:

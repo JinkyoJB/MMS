@@ -12,7 +12,7 @@
 #   output/debug/range_<R>.avi · range_view_<R>.log → output/<R>/debug/range.avi · range_view.log
 #   output/debug/preview/*.png                  → output/<R>/debug/cam/preview/      (R = 수정시각으로 배정)
 #   output/debug/preview_points_HHMMSS.npz      → output/<R>/debug/                  (〃)
-#   output/live_cloud_<TS>.ply                  → output/<R>/                        (〃)
+#   output/live_cloud_<TS>.ply                  → output/<R>/live_cloud.ply          (〃, 이름의 TS 는 쓴 시각)
 #   비게 된 output/debug, scan_dumps, iso_debug 는 지운다. registration_test·reg_offline·_live_latest.* 는 건드리지 않는다.
 #
 #   python scripts/artec/tidy_output.py            # 계획만 출력
@@ -115,9 +115,9 @@ def main() -> int:
     for p in sorted((OUT / "debug").glob("preview_points_*.npz")) if (OUT / "debug").is_dir() else []:
         r = run_for_mtime(p)
         (mv(p, OUT / r / "debug" / p.name) if r else unassigned.append(p))
-    for p in sorted(OUT.glob("live_cloud_*.ply")):
+    for p in sorted(OUT.glob("live_cloud_*.ply")):       # 이름의 시각은 RUN_TS 가 아니라 쓴 시각
         r = run_for_mtime(p)
-        (mv(p, OUT / r / p.name) if r else unassigned.append(p))
+        (mv(p, OUT / r / "live_cloud.ply") if r else unassigned.append(p))
 
     # ── 계획 출력 ─────────────────────────────────────────────────────────────
     print(f"run {len(order)}개: {', '.join(order)}")

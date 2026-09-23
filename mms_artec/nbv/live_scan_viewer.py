@@ -372,8 +372,13 @@ class LiveScanViewer:
                 pts = np.vstack(_pl).astype(np.float32)
                 cols = np.clip(np.vstack(_cl), 0.0, 1.0)
                 rgb = (cols * 255.0).astype(np.uint8)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                ply = str(_OUT / f"live_cloud_{ts}.ply")
+                # ★ run 폴더에 고정 이름으로 (2026-09-23). 예전엔 output/ 바로 밑에
+                #   `live_cloud_<지금시각>.ply` 였다 — 그 시각은 **파일 쓴 때**(finalize)라
+                #   RUN_TS 와 달라서 "왜 그 이름의 run 폴더가 없냐" 를 매번 묻게 됐다.
+                #   IPC 용 `_live_latest.*` 는 외부 뷰어가 인자 없이 찾으므로 고정 경로 유지.
+                from utils.run_paths import run_dir
+                _rd = run_dir(); _rd.mkdir(parents=True, exist_ok=True)
+                ply = str(_rd / "live_cloud.ply")
                 self._write_ply(ply, pts, rgb)
                 print(f"  [live] 누적 클라우드 PLY → {ply}\n"
                       f"  [live]   AABB {self._bbox_str} "

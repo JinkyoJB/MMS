@@ -5,6 +5,7 @@
     ├─ aligned/aligned.sproj         Artec Studio 로 여는 것 (mms_artec/system.py)
     ├─ final/final.sproj
     ├─ events.jsonl · run.log        이벤트 로그 · 콘솔 로그
+    ├─ live_cloud.ply                라이브 뷰어 누적 점군 (mms_artec/nbv/live_scan_viewer.py)
     ├─ scan_dumps/                   IScan 별 점군 npz + 적용 변환
     └─ debug/                        디버그 이미지 — 뷰어(scripts/artec/live_range_view.py)가 tail
         ├─ preview/ · lookaround/ · nbv/ · flip/    단계별 거리 이미지 (range_debug_image)

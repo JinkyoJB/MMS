@@ -122,6 +122,7 @@ $env:MMS_BACKEND = "real"
 $env:PYTHONIOENCODING = "utf-8"       # 콘솔 cp949 이모지 깨짐 방지
 
 python main_artec.py                                            # 기본 (preview→lookaround→nbv)
+$env:MMS_BACKEND="real"; python -u main_artec.py --range-video  # 캡쳐 화면 보면서 실행
 python main_artec.py --until flip --no-prompt                   # 전 단계 무인 실행
 python main_artec.py --until lookaround --max-passes 1 --test   # 한 자세만, texturize 생략
 ```
