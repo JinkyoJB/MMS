@@ -337,26 +337,26 @@ winget install --id GitHub.cli --source winget --scope user `
   --accept-package-agreements --accept-source-agreements
 # ↑ PATH 가 바뀌므로 여기서 터미널을 새로 연다
 gh auth login                                    # private 저장소라 인증 필요
-gh release download assets-v1 -R JinkyoJB/MMS -p 'mms-assets-v1.tar.zst' -D $env:TEMP
+gh release download assets-v2 -R JinkyoJB/MMS -p 'mms-assets-v2.tar.zst' -D $env:TEMP
 ```
 
 검증 — 릴리스에 `.sha256` 이 같이 올라와 있다:
 
 ```powershell
-(Get-FileHash "$env:TEMP\mms-assets-v1.tar.zst" -Algorithm SHA256).Hash.ToLower()
-# 04c84f45590d91871d9f737d5cd6ba85701b8a546e6ade3228246c7b18d84a1c 와 같아야 한다
+(Get-FileHash "$env:TEMP\mms-assets-v2.tar.zst" -Algorithm SHA256).Hash.ToLower()
+# 68e4d13f0e795273e32c486582549220ec59c4a9490061d52333d454fd10be6e 와 같아야 한다
 ```
 
 압축 해제 — **`C:\dev` 에 풀면 환경변수가 필요 없다:**
 
 ```powershell
-tar -xf "$env:TEMP\mms-assets-v1.tar.zst" -C C:\dev --strip-components=1
+tar -xf "$env:TEMP\mms-assets-v2.tar.zst" -C C:\dev --strip-components=1
 ```
 
 | | |
 |---|---|
 | Windows `tar.exe` | zstd 를 자동 인식한다 (`-I zstd` 불필요) |
-| 결과 | `C:\dev\2_3Dassets` (99MB) + `C:\dev\testset` (638MB) |
+| 결과 | `C:\dev\2_3Dassets` (101MB) + `C:\dev\testset` (638MB) |
 | 왜 `C:\dev` 인가 | 리포가 `C:\dev\MMS` 라 `mms_paths.py` 탐색 후보 **#3**(`<repo>/../2_3Dassets`)에 그대로 걸린다. `MMS_ASSET_ROOT` 를 안 잡아도 된다 |
 
 ⚠ `2_3Dassets` 와 `testset` 은 **형제 디렉터리**여야 한다 — v3 씬이 `../../testset/...` 로
@@ -390,7 +390,7 @@ $ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
 | 증상 | 원인 / 해결 |
 |---|---|
 | `씬이 없다: ...v3_scene.usd` | 자산 미설치 → §5.3 |
-| `씬이 없다: ...v2_real_260917.usd` | 릴리스에 없는 **생성물**이다 → `sim_scene.md` §3 의 2번 |
+| `씬이 없다: ...v2_real_260917.usd` | `assets-v1` 을 받았다. **`assets-v2`** 로 다시 받는다 |
 | 첫 실행이 안 끝나는 것 같다 | 정상. `Simulation App Startup Complete` 까지 ~8분 |
 | `NGX DLSS ... AdapterUnsupported` | 무시. Ada 전용 기능이라 3080 에 없는 게 정상 |
 | `torch.cuda.is_available() False` | 알려진 사항 — §5.2 주석. 씬 보기에는 무관 |
@@ -409,9 +409,8 @@ $ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
 
 ⚠ **env 를 섞지 말 것.** `env_isaacsim` 은 numpy **1.26 고정**(isaacsim wheel 의 ABI), 나머지는 numpy 2.x.
 `env_isaacsim` 은 RTX GPU 가 필요하고 다운로드가 수십 GB다.
-`step2usd` 는 sim 씬을 만들 때 필요하다. **기본 씬 `v2_real_260917.usd` 는 릴리스에
-없는 생성물이라 새 머신에서는 한 번 만들어야 한다** (`sim_scene.md` §3). 이미 있는
-씬으로 돌리기만 할 때는 없어도 된다.
+`step2usd` 는 STEP 에서 **새 씬을 만들 때만** 필요하다. 기본 씬 `v2_real_260917.usd` 는
+`assets-v2` 릴리스에 포함되어 있으므로, 기존 씬으로 실행만 할 경우에는 필요 없다.
 
 ### conda 를 못 쓰는 환경이라면
 

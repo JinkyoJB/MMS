@@ -31,16 +31,195 @@ sim_harness/MMS_ext_*.py         Isaac 검증 하니스 (실행 시 Isaac 트리
 
 ## 환경
 
-ubuntu 환경이라면 다음을 실행하면 환경이 설치됨
+**운영체제에 따라 지원 범위가 상이하다.** real 백엔드는 턴테이블 구동에
+`utils/turntable/Eziservo_x64` 의 **Windows 전용 DLL**(`FAS_EziMOTIONPlusE`)을 사용하므로
+Windows 환경에서만 동작하며, sim 백엔드는 양쪽 모두 지원한다.
+
+| 구분 | Ubuntu | Windows |
+|---|---|---|
+| sim (`isaac`) | ✅ 주 개발·검증 환경 | ✅ 씬 대조 및 충돌 캐시 재생성 용도 |
+| real | ❌ 미지원 (턴테이블 DLL 부재) | ✅ 운영 환경 |
+| 환경 구성 | `bash setup/setup_envs.sh` 실행 | **`docs/install.md`** 절차 준수 |
+| Artec SDK 바인딩 | 불필요 | **직접 빌드 필요** |
+| `env -u PYTHONPATH` | **필수** (ROS python3.10 혼입 방지) | 불필요 |
+| 콘솔 인코딩 | 기본 UTF-8 | `$env:PYTHONIOENCODING="utf-8"` 설정 (cp949 문자 깨짐 방지) |
+
+### Ubuntu — sim
+
+순서대로 실행한다. 최초 1회는 1~3 단계를 수행하고, 이후에는 4 단계만 반복한다.
+
+**1) 저장소 복제**
 ```bash
-bash setup/setup_envs.sh          # mms-env / env_isaacsim / step2usd 생성 + 검증
+git clone git@github.com:JinkyoJB/MMS.git ~/workspace/MMS
+cd ~/workspace/MMS
 ```
+
+**2) conda env 3종 생성** — `~/miniconda3/envs/<env>/bin/python` 경로 배치를 전제로 한다.
+```bash
+bash setup/setup_envs.sh
+```
+완료 시 env 3종이 생성되며 스크립트가 자체 검증까지 수행한다.
+
+**3) 자산(USD) 배치** — 상세는 아래 「자산(USD) 내려받기」 절 참조.
+```bash
+export MMS_ASSET_ROOT=~/mms-assets/2_3Dassets     # .bashrc 에 등록 권장
+```
+
+**4) 실행** — `env -u PYTHONPATH` 는 ROS python3.10 경로 혼입을 막는 장치로 **생략할 수 없다.**
+```bash
+env -u PYTHONPATH MMS_BACKEND=isaac \
+    ~/miniconda3/envs/env_isaacsim/bin/python -u main_artec.py --no-prompt
+```
+
+**5) 검증** — 하드웨어 없이 셀 기하·IK·충돌을 점검한다.
+```bash
+~/miniconda3/envs/mms-env/bin/python scripts/artec/validate_real_cell.py
+```
+
+### Windows — real
+
+`setup_envs.sh` 는 Linux 전용이므로 사용할 수 없다. 아래는 `docs/install.md` 에서 검증된
+절차이며, 3 단계의 소요가 가장 크다.
+
+**1) Miniforge 설치**
+```powershell
+winget install --id CondaForge.Miniforge3 --source winget --scope user `
+  --accept-package-agreements --accept-source-agreements
+```
+⚠ `--source winget` 을 생략하면 msstore 약관 프롬프트에서 중단된다.
+⚠ 설치 후 **터미널을 재시작**해야 conda 가 인식된다. 확인: `conda --version`
+
+**2) 저장소 복제 및 `mms-env` 생성**
+```powershell
+git clone git@github.com:JinkyoJB/MMS.git C:\Users\user\workspace\MMS
+cd C:\Users\user\workspace\MMS
+conda create -y -n mms-env python=3.11
+conda activate mms-env
+pip install -r requirements.txt
+python -c "import numpy,cv2,open3d; print(numpy.__version__, cv2.__version__, open3d.__version__)"
+```
+`2.x / 4.x / 0.19+` 이면 정상이다. **cv2 가 5.x 이면 안 된다** —
+`cv2.calibrateHandEye` 가 제거되어 hand-eye 캘리브레이션이 동작하지 않는다.
+
+여기까지 완료하면 캘리브레이션·분석 등 **오프라인 스크립트는 모두 동작한다.**
+
+**3) Artec SDK python 바인딩 빌드** — 사전에 Artec 3D Scanning SDK 와
+VS Build Tools(**C++ 데스크톱 개발** 워크로드)가 설치되어 있어야 한다.
+```powershell
+conda activate mms-env
+pip install pybind11
+
+$cmake = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+$py    = "$env:USERPROFILE\miniforge3\envs\mms-env\python.exe"
+
+& $cmake -S mms_artec\sensor -B mms_artec\sensor\build -G "Visual Studio 17 2022" -A x64 `
+         -DPython_EXECUTABLE="$py" -DPython_ROOT_DIR="$env:USERPROFILE\miniforge3\envs\mms-env"
+& $cmake --build mms_artec\sensor\build --config Release
+
+Get-ChildItem mms_artec\sensor\*.pyd | Measure-Object        # Count = 6 이면 성공
+python -c "from mms_artec.sensor import artec_base; artec_base._load(); import artec_sdk_py; print(artec_sdk_py.enumerate_scanners())"
+```
+⚠ Generator 는 설치된 VS 버전에 맞춘다. ⚠ `-DPython_EXECUTABLE` 을 생략하면 시스템
+파이썬을 잡아 `mms-env` 에서 import 되지 않는 `.pyd` 가 생성된다. ⚠ 재구성 시
+`build\` 를 삭제한다(`CMakeCache.txt` 에 이전 Generator 가 잔존한다).
+
+**4) 장비 점검** — 위에서 아래로 진행하며, 선행 항목 실패 시 후속 점검은 무의미하다.
+```powershell
+ping 192.168.1.210 ; ping 192.168.0.10                  # xArm7 / 턴테이블
+python scripts/artec/validate_real_cell.py              # 장비 없이 셀 기하·IK·충돌
+python scripts/artec/go_home.py                         # 로봇 구동 ⚠ 실제로 움직인다
+python scripts/turntable/lookaround_speed_rotation.py   # 턴테이블 ⚠ 실제로 돈다
+python scripts/artec/live_scan_view.py                  # 스캐너 + 라이브 점군
+```
+
+**5) 실행**
+```powershell
+conda activate mms-env
+$env:MMS_BACKEND = "real"
+$env:PYTHONIOENCODING = "utf-8"        # 콘솔 cp949 문자 깨짐 방지
+python main_artec.py --until lookaround
+```
+
+⚠ `main_artec.py` 의 `BACKEND` 기본값은 `"real"` 이다. 이를 `"isaac"` 으로 변경할 경우
+`mms-env` 에 Isaac 이 설치되어 있지 않아 **import 단계에서 실패**한다. 소스 수정 대신
+환경변수 `MMS_BACKEND` 로 지정할 것을 권장한다.
+
+### Windows — sim
+
+**필요할 때만 구성한다.** 실물 스캔에는 Isaac 이 불필요하다. CAD 기반 씬(v2/v3/v4)과
+실물 셀을 육안 대조하거나, 충돌 캐시(`cell_env.npz`)를 재생성할 때 사용한다
+(`docs/collision.md` §6). 2026-09-15 Windows 11 / RTX 3080 Laptop 환경에서 전 과정을
+검증하였다.
+
+**1) 사양 확인** — GPU RTX(VRAM 8GB) · RAM 16GB 이상 · 디스크 **약 30GB** 여유.
+```powershell
+nvidia-smi
+```
+드라이버 551.95 / CUDA 12.4 에서 정상 동작을 확인하였다. 사전에 드라이버를 갱신할
+필요는 없다.
+
+**2) `env_isaacsim` 생성** — 다운로드 약 30GB.
+```powershell
+conda create -y -n env_isaacsim python=3.11
+& "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe" -m pip install `
+    -r setup\requirements-isaac.txt --extra-index-url https://pypi.nvidia.com
+```
+`mms-env` 를 activate 하지 않고 env 의 `python.exe` 를 직접 호출하면 env 오염을 방지할 수 있다.
+
+**3) 자산(USD) 배치** — **필수.** 씬 USD 는 git 에 없으므로 이 단계를 건너뛰면 열 대상이 없다.
+```powershell
+winget install --id GitHub.cli --source winget --scope user `
+  --accept-package-agreements --accept-source-agreements
+# ↑ PATH 가 변경되므로 여기서 터미널을 재시작한다
+
+gh auth login                                    # private 저장소이므로 인증이 필요하다
+gh release download assets-v2 -R JinkyoJB/MMS -p 'mms-assets-v2.tar.zst' -D $env:TEMP
+(Get-FileHash "$env:TEMP\mms-assets-v2.tar.zst" -Algorithm SHA256).Hash.ToLower()
+
+tar -xf "$env:TEMP\mms-assets-v2.tar.zst" -C C:\dev --strip-components=1
+```
+Windows `tar.exe` 는 zstd 를 자동 인식하므로 `-I zstd` 가 필요 없다. 결과는
+`C:\dev\2_3Dassets` 와 `C:\dev\testset` 이다. 리포가 `C:\dev\MMS` 인 경우
+`mms_paths.py` 탐색 후보에 그대로 걸리므로 **`MMS_ASSET_ROOT` 설정이 불필요하다.**
+
+⚠ `2_3Dassets` 와 `testset` 은 **형제 디렉터리**여야 한다(v3 씬이 `../../testset/...` 로
+대상물을 참조한다). 위 명령은 해당 배치가 되도록 전개한다.
+
+확인:
+```powershell
+& "$env:USERPROFILE\miniforge3\envs\mms-env\python.exe" -c "import mms_paths,os; p=mms_paths.asset('frame_xarm7_spider_turntable_v2/v3_scene.usd'); print(os.path.exists(p), p)"
+```
+
+**4) 씬 열기** — stage 를 열고 대기할 뿐, 로봇 구동이나 물리 연산은 수행하지 않는다.
+```powershell
+$ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
+& $ISAAC scripts\sim\view_scene.py                 # v3 (기본)
+& $ISAAC scripts\sim\view_scene.py v2              # 구 씬
+& $ISAAC scripts\sim\view_scene.py v4              # 턴테이블 이설 검토안
+& $ISAAC scripts\sim\view_scene.py v3 --headless   # 창 없이 로드만 확인
+```
+⚠ **첫 실행은 약 8분이 소요된다.** 익스텐션과 셰이더 캐시를 내려받는 과정이며,
+로그에 `Pulling extension:` 만 출력되어도 정상이다. 이후 실행은 캐시를 사용한다.
+
+| 증상 | 원인 및 조치 |
+|---|---|
+| `씬이 없다: ...v3_scene.usd` | 자산 미설치 → 3) 수행 |
+| `씬이 없다: ...v2_real_260917.usd` | `assets-v1` 을 받았다. **`assets-v2`** 로 다시 받는다 |
+| `isaacsim` ModuleNotFoundError | `mms-env` 로 실행한 경우다. `env_isaacsim` 의 `python.exe` 를 직접 호출한다 |
+| 씬이 비어 있거나 텍스처가 없다 | `2_3Dassets` 와 `testset` 이 형제 관계가 아니다 |
+| `torch.cuda.is_available()` 이 `False` | 알려진 사항. `torch==2.7.0` 이 **CPU 전용**으로 설치된다. RTX 렌더러는 Vulkan, PhysX GPU 도 torch 와 별개이므로 씬 확인에는 지장이 없다 |
+| `NGX DLSS ... AdapterUnsupported` | 무시한다. Ada 세대 전용 기능이다 |
+| EULA 프롬프트에서 중단 | `$env:OMNI_KIT_ACCEPT_EULA="YES"` (`view_scene.py` 는 자동 설정한다) |
+
+### env 3종
 
 | env | 용도 |
 |---|---|
 | `mms-env` | real 백엔드 + 오프라인 스크립트(캘리브·분석). numpy 2.x |
 | `env_isaacsim` | isaac 백엔드 (Isaac Sim 5.1). **numpy 1.x** — 섞으면 ABI 오류 |
 | `step2usd` | STEP→USD 전용. Isaac 불필요라 빠름 |
+
+**상세 내용은 `docs/install.md` 참고** (Windows 전 과정 및 장비 점검 명령 수록)
 
 ## **자산(USD) 내려받기** — 새 머신에서 최초 1회
 
@@ -49,18 +228,18 @@ bash setup/setup_envs.sh          # mms-env / env_isaacsim / step2usd 생성 + �
 > `-R JinkyoJB/MMS`
 
 ```bash
-gh release download assets-v1 -R JinkyoJB/MMS -p 'mms-assets-v1.tar.zst*'
-sha256sum -c mms-assets-v1.tar.zst.sha256
+gh release download assets-v2 -R JinkyoJB/MMS -p 'mms-assets-v2.tar.zst*'
+sha256sum -c mms-assets-v2.tar.zst.sha256
 
 mkdir -p ~/mms-assets
-tar -I zstd -xf mms-assets-v1.tar.zst -C ~/mms-assets --strip-components=1
+tar -I zstd -xf mms-assets-v2.tar.zst -C ~/mms-assets --strip-components=1
 export MMS_ASSET_ROOT=~/mms-assets/2_3Dassets      # .bashrc 에 넣어 두면 편하다
 ```
 
 ⚠ `2_3Dassets` 와 `testset` 은 **형제 디렉터리**여야 한다. v3 씬이 `../../testset/...` 로
 대상물을 참조하므로 이 배치가 깨지면 텍스처가 통째로 사라진다.
 
-압축 328 MB / 해제 738 MB. `MMS_ASSET_ROOT` 없이도 `mms_paths.py` 가 알려진 배치를
+압축 316 MB / 해제 739 MB. `MMS_ASSET_ROOT` 없이도 `mms_paths.py` 가 알려진 배치를
 순서대로 탐색한다(`docs/sim_commands.md`). 자산을 갱신하면 새 태그로 릴리스를 올린다.
 
 **더 자세한건 docs/install.md 참고**
