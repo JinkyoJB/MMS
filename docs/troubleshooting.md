@@ -102,7 +102,7 @@ scan_range_far_mm  = 265.0
 스캐너가 본 것과 로봇이 아는 것을 같은 좌표계로 묶는 두 상수. 기계를 옮기거나
 센서를 교체하면 다시 잡는다.
 
-- hand-eye: ChArUco(5×3, 100×60mm) + `solvePnP` → `AX=ZB`. **t 3.55mm / r 1.30°**
+- hand-eye: ChArUco(`spider_dense` 7×5, 84×60mm) + `solvePnP` → `AX=ZB`. **t 3.55mm / r 1.30°**
 - 턴테이블 축: disc rim 점 → 3D 원 피팅. **0.015° / 0.7mm**
 - ★ 카메라 위치는 SLAM 이 아니라 **로봇 FK + T_EC** 가 알려준다
 

@@ -71,11 +71,16 @@ python scripts\artec\check_calibration.py
 
 ### ChArUco 보드
 
-`mms_artec\sensor\markerboard_img\charuco_5x3_20_15.png` 를 **실척(100%)** 으로 인쇄한다.
-없으면 `python scripts\artec\make_charuco.py` 로 다시 만든다.
+`mms_artec\sensor\markerboard_img\charuco_7x5_12_9.png`(기본 `spider_dense`,
+7×5 · 84×60mm)를 **실척(100%)** 으로 인쇄한다. 없으면
+`python scripts\artec\make_charuco.py` 로 다시 만든다.
 
+> ⚠ **구 보드 `charuco_5x3_20_15.png` 를 쓰지 말 것.** 내부 코너가 8개뿐이라
+> Spider FOV 에서 잘리면 캘리브가 풀리지 않는다 (`1_calibration.md` §2).
+>
 > ⚠ **인쇄 배율이 틀리면 모든 값이 조용히 틀린다.** 인쇄물의 검은 사각형 한 변을
-> 자로 재서 **20.0mm** 인지 확인한다. "페이지에 맞춤" 옵션을 끌 것.
+> 자로 재서 **12.0mm** 인지 확인한다. "페이지에 맞춤" 옵션을 끌 것.
+> 작은 보드라 **20 px/mm(508 DPI)** 로 인쇄하는 편이 안전하다.
 
 평평한 판에 **주름·들뜸 없이** 붙인다. 휘면 각도 오차가 그대로 들어간다.
 

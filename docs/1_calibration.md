@@ -64,7 +64,7 @@
 
 캘리브의 출발점은 **실물 보드**다. 여기서 어긋나면 이후 모든 수치가 무의미해진다.
 
-![ChArUco 보드 (spider 프리셋)](figures/calibration/charuco_board.png)
+![ChArUco 보드 — `spider_dense` 기본 프리셋 (7×5 · 12/9mm · 84×60mm · 내부 코너 24)](figures/calibration/charuco_board.png)
 
 ### 생성
 
