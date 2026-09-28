@@ -204,7 +204,7 @@ $ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
 | 증상 | 원인 및 조치 |
 |---|---|
 | `씬이 없다: ...v3_scene.usd` | 자산 미설치 → 3) 수행 |
-| `씬이 없다: ...v2_real_260917.usd` | `assets-v1` 을 받았다. **`assets-v2`** 로 다시 받는다 |
+| `씬이 없다: ...v2_real_260917.usd` | 자산이 구버전이다. **`assets-v2`** 로 다시 받는다 |
 | `isaacsim` ModuleNotFoundError | `mms-env` 로 실행한 경우다. `env_isaacsim` 의 `python.exe` 를 직접 호출한다 |
 | 씬이 비어 있거나 텍스처가 없다 | `2_3Dassets` 와 `testset` 이 형제 관계가 아니다 |
 | `torch.cuda.is_available()` 이 `False` | 알려진 사항. `torch==2.7.0` 이 **CPU 전용**으로 설치된다. RTX 렌더러는 Vulkan, PhysX GPU 도 torch 와 별개이므로 씬 확인에는 지장이 없다 |

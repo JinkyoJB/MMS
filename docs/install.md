@@ -390,7 +390,7 @@ $ISAAC = "$env:USERPROFILE\miniforge3\envs\env_isaacsim\python.exe"
 | 증상 | 원인 / 해결 |
 |---|---|
 | `씬이 없다: ...v3_scene.usd` | 자산 미설치 → §5.3 |
-| `씬이 없다: ...v2_real_260917.usd` | `assets-v1` 을 받았다. **`assets-v2`** 로 다시 받는다 |
+| `씬이 없다: ...v2_real_260917.usd` | 자산이 구버전이다. **`assets-v2`** 로 다시 받는다 |
 | 첫 실행이 안 끝나는 것 같다 | 정상. `Simulation App Startup Complete` 까지 ~8분 |
 | `NGX DLSS ... AdapterUnsupported` | 무시. Ada 전용 기능이라 3080 에 없는 게 정상 |
 | `torch.cuda.is_available() False` | 알려진 사항 — §5.2 주석. 씬 보기에는 무관 |
